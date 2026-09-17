@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Optional, Sequence
 
 from ..core.document import DocumentObject, SourceSpec
-from ..core.geometry import BBox
+from ..core.geometry import AffineTransform, BBox
 from ..core.strokes import Stroke
 from ..fonts.manager import FontManager
 from ..fonts.model import FontFamily
@@ -51,6 +51,9 @@ _CACHE_MAX_POINTS = 1_000_000
 #: pt 又放大一次，整体多乘 (96/72)/(25.4/96) ≈ 5.0404。用户在坏帧上手工
 #: 编辑过的笔画（stroke_edits.modified）按该系数一次性迁回正确帧。
 _TIKZ_BROKEN_FRAME_FACTOR = (96.0 / 72.0) / (25.4 / 96.0)
+#: source.data 里的迁移标记：坏帧的编辑层与补偿缩放只迁移一次，之后的
+#: 用户有意缩放/编辑不再被碰。
+_TIKZ_MIGRATED_KEY = "_badframe_migrated"
 
 
 def _migrate_tikz_edit_frame(strokes: list[Stroke], data: dict[str, Any]) -> None:
@@ -101,6 +104,29 @@ def _migrate_tikz_edit_frame(strokes: list[Stroke], data: dict[str, Any]) -> Non
             m["pts"] = [[x / k, y / k] for x, y in m["pts"]]
 
 
+def _migrate_tikz_compensating_scale(obj, data: dict[str, Any]) -> None:
+    """一次性清掉坏帧时代的补偿缩放（成功后就地改 ``data`` 打标记）。
+
+    坏帧渲染整体大 ~5 倍，用户在画布上把对象拖小到页面里——存档变换里
+    留着 ≈1/5.04 的缩放。基线恢复真实尺寸后这层补偿会把对象压成 ~1/5。
+    只处理无旋转的纯缩放；缩放比例乘回坏帧系数落在合理窗口才重置为 1
+    （平移保留）。打上标记后永不再触发，用户之后的有意缩放不受影响。
+    """
+    if data.get(_TIKZ_MIGRATED_KEY):
+        return
+    t = obj.transform
+    a, b, c, d = t.a, t.b, t.c, t.d
+    if abs(b) > 1e-12 or abs(c) > 1e-12:
+        data[_TIKZ_MIGRATED_KEY] = True   # 带旋转/斜切：无法判定，保守不动
+        return
+    k = _TIKZ_BROKEN_FRAME_FACTOR
+    if (0.55 < abs(a) * k < 1.45) and (0.55 < abs(d) * k < 1.45):
+        obj.transform = AffineTransform(
+            math.copysign(1.0, a), 0.0, 0.0, math.copysign(1.0, d),
+            t.e, t.f)
+    data[_TIKZ_MIGRATED_KEY] = True
+
+
 def _render_fingerprint(kind: str, data: dict[str, Any], manager) -> str:
     """渲染输入指纹：除「扰动参数/笔画编辑」外一切影响渲染结果的输入。
 
@@ -110,7 +136,8 @@ def _render_fingerprint(kind: str, data: dict[str, Any], manager) -> str:
     """
     core = {k: v for k, v in (data or {}).items()
             if k not in ("perturb", "stroke_edits",
-                         "layout_box", "table_box")}
+                         "layout_box", "table_box",
+                         _TIKZ_MIGRATED_KEY)}
     if kind == SOURCE_SVG and core.get("path"):
         try:
             st = os.stat(core["path"])
@@ -422,6 +449,7 @@ def regenerate_content_object(obj: DocumentObject, manager: FontManager) -> bool
             obj.meta["md_table_box"] = box
     if kind == SOURCE_TIKZ:
         _migrate_tikz_edit_frame(new.local_strokes, data)
+        _migrate_tikz_compensating_scale(obj, data)
     # 重生成会冲刷掉画笔编辑的删除/改动，这里把编辑层重新施加一遍
     obj.local_strokes = _apply_stroke_edits(new.local_strokes, data)
     return True
