@@ -5,7 +5,7 @@ name: build
 #
 #   * 手动触发（workflow_dispatch）：只出构建产物，在运行页下载，不发 Release；
 #   * 推 v* 标签：门禁测试 → 三平台构建 → 自动创建 GitHub Release
-#     （附全部产物 + SHA256SUMS.txt，发布说明按提交自动生成）。
+#     （附全部产物 + SHA256SUMS.txt，发布说明只写下载用法，保持极简）。
 #
 # Linux 产物要在旧发行版上跑：在 ubuntu-latest runner 里用 ubuntu:22.04
 # **容器**构建（glibc 2.35 基线）。不直接用 ubuntu-22.04 虚拟机镜像，因为
@@ -149,7 +149,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          cat > /tmp/relnotes.md <<'EOF'
+          ## 下载
+
+          - **Windows**：`WriterStudio.exe` —— 下载后双击运行，免安装
+          - **macOS**：`WriterStudio-macos.zip` —— 解压后将 WriterStudio.app 拖入「应用程序」
+          - **Linux**：`WriterStudio-x86_64.AppImage`（下载后 `chmod +x` 直接运行）
+            或 `WriterStudio-linux64.tar.gz`
+
+          `SHA256SUMS.txt` 为各文件的 SHA256 校验和。
+          EOF
           gh release create "$GITHUB_REF_NAME" relpkg/* \
             --repo "$GITHUB_REPOSITORY" \
             --title "WriterStudio $GITHUB_REF_NAME" \
-            --generate-notes
+            --notes-file /tmp/relnotes.md

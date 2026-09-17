@@ -1,6 +1,21 @@
 GRBL 写字机上位机软件。文字、表格、LaTeX公式、TikZ、SVG矢量图，笔画编辑，手写模拟 一个软件全搞定：
 可多字体混排、可调手写随机扰动、可纸张对齐参考层。
 
+## 下载与使用
+
+到 [Releases](https://github.com/ZhengXieGang/WriterStudio/releases) 页面下载对应平台的文件：
+
+| 平台 | 文件 | 用法 |
+|------|------|------|
+| Windows | `WriterStudio.exe` | 下载后双击运行，免安装 |
+| macOS | `WriterStudio-macos.zip` | 解压后将 WriterStudio.app 拖入「应用程序」 |
+| Linux | `WriterStudio-x86_64.AppImage` | 下载后 `chmod +x` 直接运行 |
+
+程序零依赖开箱即用：自带全部运行所需组件（Python/Qt/字库/排版引擎），
+系统里不需要装任何东西。公式与 LaTeX 文档的内置渲染开箱即用；可选安装
+TeX 工具链（texlive 的 `xelatex` + poppler 的 `pdftocairo`）后，LaTeX
+文档与 TikZ 自动升级为忠实编译——不装也不影响任何日常功能。
+
 ## 功能特性
 
 ### 书写内容
@@ -31,7 +46,22 @@ GRBL 写字机上位机软件。文字、表格、LaTeX公式、TikZ、SVG矢量
 
 外部字体目录可在设置中添加，扫描建索引瞬时完成、懒加载。
 
-## 快速开始
+## 许可
+
+本软件：GPL-3.0-or-later，详见 [LICENSE](LICENSE)。
+
+内置字库的第三方数据：
+
+* `fonts/builtin/hershey/*.jhf` —— Hershey Fonts。原始创建者 Dr. A. V. Hershey
+  （U.S. National Bureau of Standards），字体数据格式来自 James Hurt（Cognition,
+  Inc.）。可自由使用（含商业），须随数据保留致谢文本，见
+  [`fonts/builtin/hershey/ACKNOWLEDGEMENT.txt`](writerstudio/fonts/builtin/hershey/ACKNOWLEDGEMENT.txt)。
+* `fonts/builtin/stroke-json/STRK-Kaiti.json` —— 中文单线字库，由
+  [chinese-hershey-font](https://github.com/LingDong-/chinese-hershey-font)（MIT，
+  Copyright (c) 2018 Lingdong Huang）从 TTF 生成。
+
+<details>
+<summary><b>从源码运行（开发者）</b></summary>
 
 ```bash
 pip install -r requirements.txt   # 或 pip install .
@@ -39,12 +69,10 @@ python -m writerstudio            # 启动界面
 python -m pytest -q               # 运行测试（无需显示器）
 ```
 
-**零依赖开箱即用**：程序自带全部依赖（Python/Qt/字库/排版引擎），上述功能
-不需要在系统里装任何东西。公式与 LaTeX 文档的内置渲染开箱即用；可选安装
-TeX 工具链（texlive 的 `xelatex` + poppler 的 `pdftocairo`，或 `dvisvgm`）
-后，LaTeX 文档自动升级为忠实编译——不装也不影响任何日常功能。
+</details>
 
-## 打包发行
+<details>
+<summary><b>打包发行与 CI/CD（开发者）</b></summary>
 
 PyInstaller 不能交叉编译，三个平台各自原生构建：
 
@@ -59,8 +87,7 @@ python scripts/make_appimage.py  # Linux：把目录版组装成 AppImage（零�
 * **ci.yml** —— 推送到 main / PR 时触发：pyflakes 静态检查 + 全量测试
   （Linux 为门禁，Windows/macOS 观察项，Qt 测试离屏运行）。
 * **build.yml** —— 手动触发只出构建产物；推 `v*` 标签则先跑门禁测试，
-  通过后构建三平台产物并**自动创建 GitHub Release**（附产物与
-  SHA256SUMS.txt 校验和，发布说明按提交自动生成）。
+  通过后构建三平台产物并自动创建 GitHub Release。
 
 发布一次新版本的完整操作：
 
@@ -71,7 +98,10 @@ git tag v0.2.0 && git push origin v0.2.0   # 之后去 Actions 页看进度
 Linux 产物在 `ubuntu:22.04` 容器里构建（glibc 2.35 基线），兼容更多
 旧发行版；Windows 为单文件便携 exe；macOS 为 .app（ad-hoc 签名）。
 
-## 开发
+</details>
+
+<details>
+<summary><b>目录结构（开发者）</b></summary>
 
 ```
 ├── writerstudio/
@@ -82,22 +112,10 @@ Linux 产物在 `ubuntu:22.04` 容器里构建（glibc 2.35 基线），兼容�
 │   ├── machine/    G-code 生成 / GRBL 协议 / 串口链路 / 路径优化
 │   └── ui/         PySide6 界面层
 ├── tests/          单元测试（`python -m pytest -q`，离屏运行）
-├── tools/          模板生成等辅助脚本
+├── tools/          辅助脚本
 └── scripts/        AppImage 组装脚本
 ```
 
 测试全部离屏可跑（`QT_QPA_PLATFORM=offscreen`），无显示器环境/CI 直接执行。
 
-## 许可
-
-本软件：GPL-3.0-or-later，详见 [LICENSE](LICENSE)。
-
-内置字库的第三方数据：
-
-* `fonts/builtin/hershey/*.jhf` —— Hershey Fonts。原始创建者 Dr. A. V. Hershey
-  （U.S. National Bureau of Standards），字体数据格式来自 James Hurt（Cognition,
-  Inc.）。可自由使用（含商业），须随数据保留致谢文本，见
-  [`fonts/builtin/hershey/ACKNOWLEDGEMENT.txt`](writerstudio/fonts/builtin/hershey/ACKNOWLEDGEMENT.txt)。
-* `fonts/builtin/stroke-json/STRK-Kaiti.json` —— 中文单线字库，由
-  [chinese-hershey-font](https://github.com/LingDong-/chinese-hershey-font)（MIT，
-  Copyright (c) 2018 Lingdong Huang）从 TTF 生成。
+</details>
