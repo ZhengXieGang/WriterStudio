@@ -567,7 +567,7 @@ class AiTools:
         }
 
     def tool_render_preview(self, args: dict) -> dict:
-        from PySide6.QtCore import QMarginsF, QPointF, QRectF, Qt
+        from PySide6.QtCore import QRectF, Qt
         from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPainterPath
 
         page = self._page

@@ -299,7 +299,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                              "也可用环境变量 WRITERSTUDIO_MCP_PORT）")
     args = parser.parse_args(argv)
     try:
-        from mcp.server.fastmcp import FastMCP  # noqa: F401
+        from mcp.server.fastmcp import FastMCP as _mcp_probe
+        _mcp_probe  # 可用性探测（引用以通过静态检查）
     except ImportError as exc:
         print("缺少 MCP SDK，请先安装：pip install mcp", file=sys.stderr)
         print(f"（导入错误：{exc}）", file=sys.stderr)

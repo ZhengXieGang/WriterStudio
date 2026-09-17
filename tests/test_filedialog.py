@@ -62,7 +62,8 @@ def test_priority_documents_when_nothing_valid(qapp):
     filedialog.install(get_last_dir=lambda: "/no/such/dir",
                        get_project_path=lambda: None,
                        set_last_dir=None)
-    assert filedialog.start_dir() == _docs()
+    # QStandardPaths 在 Windows 返回反斜杠路径，按 Path 语义比较（分隔符无关）
+    assert Path(filedialog.start_dir()) == Path(_docs())
 
 
 def test_never_returns_empty(qapp):
