@@ -1,0 +1,18 @@
+The Hershey Fonts were originally created by Dr. A. V. Hershey while
+working at the U. S. National Bureau of Standards.
+
+The format of the Font data in this distribution was originally created by
+
+        James Hurt
+        Cognition, Inc.
+        900 Technology Park Drive
+        Billerica, MA 01821
+
+USE RESTRICTION (from the Ghostscript distribution of the Hershey Fonts):
+This distribution of the Hershey Fonts may be used by anyone for any
+purpose, commercial or otherwise, providing that the above
+acknowledgements are distributed with the font data, and that the font
+data is not redistributed in the format distributed by the U.S. NTIS.
+
+Source: http://www.ghostscript.com/doc/current/Hershey.htm
+        http://en.wikipedia.org/wiki/Hershey_font

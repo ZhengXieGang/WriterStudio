@@ -1,0 +1,59 @@
+name: ci
+
+# 测试与静态检查门禁。
+#
+#   * 推送 main / 针对 main 的 PR 都会触发；
+#   * Linux（与开发环境一致）是必须通过的门禁；
+#   * Windows / macOS 是观察项：跑同一套测试以便尽早发现平台差异，
+#     但不阻塞合并——发布产物由 build.yml 在对应平台另行构建。
+#
+# 测试在无显示器的 CI 上通过 QT_QPA_PLATFORM=offscreen 运行 Qt。
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true        # 同分支新推送取消旧运行，省额度
+
+jobs:
+  lint:
+    name: 静态检查（pyflakes）
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pyflakes
+        run: pip install pyflakes
+      - name: Run pyflakes
+        run: python -m pyflakes writerstudio/ scripts/ tests/ main.py
+
+  test:
+    name: 测试（${{ matrix.os }}）
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            gate: true            # 门禁平台
+          - os: windows-latest    # 观察项
+          - os: macos-latest      # 观察项
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.gate != true }}
+    timeout-minutes: 30
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: pip install . pytest
+      - name: Run tests
+        run: python -m pytest tests/ -q

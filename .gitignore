@@ -1,0 +1,26 @@
+# ---- Python ----
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# ---- 构建产物 ----
+build/
+dist/
+*.spec.bak
+
+# ---- 打包中间物（AppImage 组装 / appimagetool 下载）----
+*.AppImage
+appimagetool*
+
+# ---- 本机生成的用户文件（含个人信息，不入库）----
+# 实验报告对齐模板：标题默认含校名，由 tools/make_report_template.py 生成
+templates/*.svg
+# 导出/试切的 G-code 产物
+/output.gcode
+*.log
+
+# ---- 本地专属（个人进度文档与本机资源测试，不公开）----
+README.local.md
+tests/local/

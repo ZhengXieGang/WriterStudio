@@ -1,0 +1,142 @@
+name: build
+
+# 多平台打包 + 自动发布。PyInstaller 不能交叉编译，三个平台各自原生构建；
+# 产物全部自带 Python 解释器与依赖——用户机器零安装直接运行。
+#
+#   * 手动触发（workflow_dispatch）：只出构建产物，在运行页下载，不发 Release；
+#   * 推 v* 标签：门禁测试 → 三平台构建 → 自动创建 GitHub Release
+#     （附全部产物 + SHA256SUMS.txt，发布说明按提交自动生成）。
+#
+# Linux 产物要在旧发行版上跑：在 ubuntu-latest runner 里用 ubuntu:22.04
+# **容器**构建（glibc 2.35 基线）。不直接用 ubuntu-22.04 虚拟机镜像，因为
+# 它 2026-09 起退役、2027-04 停支持；容器基线不受 runner 镜像生命周期影响。
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read           # 各构建任务默认只读；写权限只授予 release 任务
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false    # 发布流程不互相取消
+
+jobs:
+  test:
+    # 发布门禁：标签/手动构建前先全量测试（与 ci.yml 同环境）
+    name: 门禁测试
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: pip install . pytest
+      - name: Run tests
+        run: python -m pytest tests/ -q
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: WriterStudio-linux64
+            container: "ubuntu:22.04"
+          - os: windows-latest
+            artifact: WriterStudio-win64-portable
+          - os: macos-latest
+            artifact: WriterStudio-macos
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}   # 仅 Linux 条目定义；空值=宿主机
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: 容器基础工具（checkout 需 git；appimagetool 校验需 file）
+        if: runner.os == 'Linux'
+        run: apt-get update && apt-get install -y --no-install-recommends \
+              git file ca-certificates
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install . pyinstaller
+      - name: Build
+        run: pyinstaller writerstudio.spec
+      - name: AppImage（Linux 零安装格式，随身携带全部系统依赖库）
+        if: runner.os == 'Linux'
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"   # CI 容器无 FUSE，解压方式运行
+        run: |
+          python - <<'EOF'
+          import urllib.request
+          urllib.request.urlretrieve(
+              "https://github.com/AppImage/appimagetool/releases/download"
+              "/continuous/appimagetool-x86_64.AppImage",
+              "/tmp/appimagetool")
+          EOF
+          chmod +x /tmp/appimagetool
+          python scripts/make_appimage.py --appimagetool /tmp/appimagetool
+      - name: Ad-hoc 签名（macOS 未经签名无法启动）
+        if: runner.os == 'macOS'
+        run: codesign --deep --force -s - dist/WriterStudio.app
+      - name: Package (linux)
+        if: runner.os == 'Linux'
+        run: tar czf ${{ matrix.artifact }}.tar.gz -C dist WriterStudio
+      - name: Package (macos)
+        if: runner.os == 'macOS'
+        run: cd dist && ditto -c -k --keepParent WriterStudio.app ../${{ matrix.artifact }}.zip
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            WriterStudio-*.tar.gz
+            WriterStudio-*.zip
+            dist/*.AppImage
+            dist/WriterStudio.exe
+          if-no-files-found: error
+
+  release:
+    # 仅标签触发：汇总产物并发布 GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write          # 创建 Release 的唯一写权限点
+    steps:
+      - uses: actions/checkout@v4
+      - name: 版本核对（tag 与 pyproject 不一致仅提醒，不阻断）
+        run: |
+          PROJ_VER=$(python3 -c \
+            "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          if [ "$PROJ_VER" != "$TAG_VER" ]; then
+            echo "::warning::pyproject.toml 版本 ($PROJ_VER) 与标签 ($TAG_VER) 不一致——发布前建议把 pyproject 版本一并更新"
+          fi
+      - name: 汇总产物
+        uses: actions/download-artifact@v4
+        with:
+          path: relpkg
+          merge-multiple: true
+      - name: SHA256 校验和
+        run: |
+          cd relpkg
+          sha256sum ./* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: 创建 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" relpkg/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "WriterStudio $GITHUB_REF_NAME" \
+            --generate-notes
