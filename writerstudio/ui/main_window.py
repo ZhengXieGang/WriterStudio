@@ -186,6 +186,9 @@ class MainWindow(QMainWindow):
         self._bind_panel_actions()
         self._restore_settings()
         self._restore_machine_profile()
+        # AI 排版服务（MCP 桥的连接目标；仅监听本机回环，见 ai/server.py）
+        self.ai_server = None
+        self._start_ai_server_from_settings()
 
         self._status_coord = QLabel("—")
         self._status_zoom = QLabel("—")
@@ -447,7 +450,47 @@ class MainWindow(QMainWindow):
         self.act_show_objects.triggered.connect(
             lambda c: self.dock.setVisible(c))
 
+        self.act_ai_settings = QAction("AI 服务设置…", self)
+        self.act_ai_settings.triggered.connect(self._show_ai_settings)
+
         self._apply_action_icons()
+
+    # ------------------------------------------------------------- AI 服务
+    def _start_ai_server_from_settings(self) -> None:
+        if self.settings.ai_service_enabled():
+            self.start_ai_server(self.settings.ai_service_port())
+
+    def start_ai_server(self, port: int) -> bool:
+        """在指定端口启动 AI 排版服务（先停掉旧实例）。失败返回 False。"""
+        from ..ai.server import AiTcpServer
+        from ..ai.tools import AiTools
+        self.stop_ai_server()
+        server = AiTcpServer(AiTools(self), port, parent=self)
+        if not server.start():
+            # 端口被占（常见：已开了一个 WriterStudio）不致命，仅提示
+            self.statusBar().showMessage(
+                f"AI 排版服务启动失败：{server.error}（端口 {port}）", 8000)
+            server.deleteLater()
+            return False
+        self.ai_server = server
+        self.statusBar().showMessage(
+            f"AI 排版服务已启动：127.0.0.1:{server.port}", 5000)
+        return True
+
+    def stop_ai_server(self) -> None:
+        if getattr(self, "ai_server", None) is not None:
+            self.ai_server.stop()
+            self.ai_server.deleteLater()
+            self.ai_server = None
+
+    def restart_ai_server(self) -> None:
+        self.stop_ai_server()
+        if self.settings.ai_service_enabled():
+            self.start_ai_server(self.settings.ai_service_port())
+
+    def _show_ai_settings(self) -> None:
+        from ..ai.dialog import AiServiceDialog
+        AiServiceDialog(self).exec()
 
     def _apply_action_icons(self) -> None:
         """给工具栏/菜单动作配图标：统一 fa6 单一家族（见 :mod:`.icons`）。
@@ -576,6 +619,9 @@ class MainWindow(QMainWindow):
         m_machine.addAction(self.act_send_job)
         m_machine.addSeparator()
         m_machine.addAction(self.act_show_machine)
+
+        m_ai = mb.addMenu("AI 排版(&A)")
+        m_ai.addAction(self.act_ai_settings)
 
     def _build_theme_menu(self) -> QMenu:
         """「主题」子菜单：深色/浅色互斥切换（qdarktheme 热切换）。"""
@@ -2702,6 +2748,7 @@ class MainWindow(QMainWindow):
             self.machine_panel.link.disconnect()
         except Exception:
             pass
+        self.stop_ai_server()
         super().closeEvent(event)
 
     # ------------------------------------------------------------ 机器命令

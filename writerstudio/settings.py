@@ -51,6 +51,8 @@ K_PAGE_W = "page/width"
 K_PAGE_H = "page/height"
 K_PAGE_MARGIN = "page/margin"
 K_PAGE_PRESET = "page/preset_name"
+K_AI_ENABLED = "ai/mcp_enabled"    # AI 排版服务（MCP，仅本机回环）
+K_AI_PORT = "ai/mcp_port"          # AI 排版服务端口
 K_GEOMETRY = "ui/geometry"
 K_UI_THEME = "ui/theme"
 K_MAX_RECENT = 10
@@ -417,3 +419,19 @@ class Settings:
 
     def set_page_preset_name(self, name: str) -> None:
         self.set(K_PAGE_PRESET, name)
+
+    # --------------------------------------------------- AI 排版服务（MCP）
+    AI_PORT_DEFAULT = 8765
+
+    def ai_service_enabled(self, default: bool = True) -> bool:
+        """AI 排版服务是否随软件启动（仅监听本机回环，无外部暴露）。"""
+        return self.get_bool(K_AI_ENABLED, default)
+
+    def set_ai_service_enabled(self, on: bool) -> None:
+        self.set(K_AI_ENABLED, bool(on))
+
+    def ai_service_port(self) -> int:
+        return self.get_int(K_AI_PORT, self.AI_PORT_DEFAULT)
+
+    def set_ai_service_port(self, port: int) -> None:
+        self.set(K_AI_PORT, int(port))

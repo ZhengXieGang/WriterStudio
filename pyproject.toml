@@ -22,9 +22,12 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.4", "pyinstaller>=6.10"]
+# AI 排版桥（stdio MCP 服务器）专用；GUI 内嵌服务不依赖它
+ai = ["mcp>=1.2"]
 
 [project.scripts]
 writerstudio = "writerstudio.__main__:main"
+writerstudio-mcp = "writerstudio.ai.bridge:main"
 
 [tool.setuptools.packages.find]
 include = ["writerstudio*"]

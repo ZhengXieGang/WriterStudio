@@ -124,6 +124,7 @@ jobs:
             WriterStudio-*.zip
             dist/*.AppImage
             dist/WriterStudio.exe
+            dist/WriterStudioMCP.exe
           if-no-files-found: error
 
   release:

@@ -41,6 +41,36 @@ GRBL 写字机上位机软件。文字、表格、LaTeX公式、TikZ、SVG矢量
 | gcode 字符库 | 每字符一文件 | 每字符一段 G-code 的字库目录 |
 | `.gfont` | `.gfont` | 单线笔画字体包 |
 
+## AI 智能排版（MCP）
+
+让 Claude Desktop 等 AI 助手直接在软件里完成整页排版：手写文字、数据表格、
+坐标系图、公式，排版结果可直接发送打印。所有修改都在软件里可撤销。
+
+**启用**：软件菜单「AI 排版 → AI 服务设置…」确认服务开启（默认开启，
+仅监听本机 127.0.0.1），把下面的配置（端口以对话框显示为准）加入 AI 应用
+的 MCP 配置——`command` 按你使用的版本二选一：
+
+```json
+{
+  "mcpServers": {
+    "writerstudio": {
+      "command": "WriterStudioMCP.exe",
+      "args": ["--port", "8765"]
+    }
+  }
+}
+```
+
+| 安装方式 | `command` 写法 |
+|----------|----------------|
+| Windows 发行版 | Release 里与主程序一同下载的 `WriterStudioMCP.exe` |
+| Linux AppImage | AppImage 文件路径，`args` 前加 `"--mcp"` |
+| macOS | `WriterStudio.app/Contents/MacOS/WriterStudioMCP` |
+| 源码运行 | `writerstudio-mcp`，或 `python -m writerstudio.ai.bridge`（需 `pip install mcp`） |
+
+之后对 AI 说「帮我排一页物理实验报告」即可；试运行样例：
+`python scripts/ai_layout_demo.py`（需先打开软件）。
+
 ## 许可
 
 本软件：GPL-3.0-or-later，详见 [LICENSE](LICENSE)。
@@ -89,10 +119,11 @@ python scripts/make_appimage.py  # Linux：把目录版组装成 AppImage（零�
 │   ├── perturb/    手写扰动引擎
 │   ├── content/    Markdown / LaTeX / TikZ / SVG 导入
 │   ├── machine/    G-code 生成 / GRBL 协议 / 串口链路 / 路径优化
+│   ├── ai/         AI 智能排版（MCP 服务 + stdio 桥）
 │   └── ui/         PySide6 界面层
 ├── tests/          单元测试（`python -m pytest -q`，离屏运行）
 ├── tools/          辅助脚本
-└── scripts/        AppImage 组装脚本
+└── scripts/        AppImage 组装、AI 排版演示脚本
 ```
 
 测试全部离屏可跑（`QT_QPA_PLATFORM=offscreen`），无显示器环境/CI 直接执行。

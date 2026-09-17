@@ -39,6 +39,12 @@ Terminal=false
 _APPRUN = """#!/bin/sh
 HERE=$(dirname "$(readlink -f "$0")")
 export LD_LIBRARY_PATH="$HERE/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# 透传：AppImage --mcp [参数] == 直接运行包内的 AI 排版桥（MCP stdio 服务），
+# 供 AI 应用的 mcpServers 配置把本 AppImage 当作 command 使用
+if [ "$1" = "--mcp" ]; then
+    shift
+    exec "$HERE/opt/WriterStudio/WriterStudioMCP" "$@"
+fi
 exec "$HERE/opt/WriterStudio/WriterStudio" "$@"
 """
 

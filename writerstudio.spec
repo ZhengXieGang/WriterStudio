@@ -40,6 +40,27 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 
+# ---- AI 排版桥（MCP stdio 服务）：独立小可执行文件 -------------------------
+# 桥不依赖 PySide6/matplotlib（排除掉），只带 mcp SDK 及其依赖。
+bridge_a = Analysis(
+    [str(ROOT / "writerstudio" / "ai" / "bridge_entry.py")],
+    pathex=[str(ROOT)],
+    binaries=[],
+    datas=[],
+    hiddenimports=["mcp.server.fastmcp", "mcp.server.stdio", "mcp.types",
+                   # pydantic 的二进制扩展与 anyio 的异步后端都是动态加载，
+                   # 静态分析看不到，必须显式声明
+                   "pydantic", "pydantic_core", "pydantic_core._pydantic_core",
+                   "anyio", "anyio._backends._asyncio"],
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=["tkinter", "pytest", "PySide6", "PyQt5", "PyQt6", "PySide2",
+              "matplotlib", "PySide6.QtNetwork"],
+    noarchive=False,
+)
+bridge_pyz = PYZ(bridge_a.pure)
+
 if sys.platform == "win32":
     # Windows：单文件便携 exe（自带解压，双击即用、免安装）
     exe = EXE(
@@ -56,6 +77,20 @@ if sys.platform == "win32":
         icon=str(ROOT / "resources" / "icon.ico"),
         disable_windowed_traceback=False,
     )
+    # AI 桥：console=True——stdio 服务需要真实的 stdout（windowed 下为 None）
+    mcp_exe = EXE(
+        bridge_pyz,
+        bridge_a.scripts,
+        bridge_a.binaries,
+        bridge_a.datas,
+        [],
+        name="WriterStudioMCP",
+        debug=False,
+        strip=False,
+        upx=False,
+        console=True,
+        icon=str(ROOT / "resources" / "icon.ico"),
+    )
 else:
     # Linux / macOS：目录版（启动快、避开 onefile 的 /tmp 解压问题）；
     # macOS 在 windowed+onedir 下额外产出 WriterStudio.app
@@ -70,10 +105,26 @@ else:
         upx=False,
         console=False,
     )
+    mcp_exe = EXE(
+        bridge_pyz,
+        bridge_a.scripts,
+        [],
+        exclude_binaries=True,
+        name="WriterStudioMCP",
+        debug=False,
+        strip=False,
+        upx=False,
+        console=True,
+    )
     coll = COLLECT(
         exe,
+        mcp_exe,
         a.binaries,
         a.datas,
+        # 桥可执行文件的二进制/数据也要进目录（exclude_binaries=True 时
+        # EXE 本身不带，漏掉会让 WriterStudioMCP 缺 pydantic/mcp 等依赖）
+        bridge_a.binaries,
+        bridge_a.datas,
         strip=False,
         upx=False,
         name="WriterStudio",
