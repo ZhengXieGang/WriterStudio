@@ -59,38 +59,40 @@ jobs:
           - os: ubuntu-latest
             artifact: WriterStudio-linux64
             container: "ubuntu:22.04"
+            py: python3            # 容器自带 3.10（setup-python 的构建要新 glibc）
           - os: windows-latest
             artifact: WriterStudio-win64-portable
+            py: python
           - os: macos-latest
             artifact: WriterStudio-macos
+            py: python3
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}   # 仅 Linux 条目定义；空值=宿主机
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: 容器基础工具（checkout 需 git；file 供 appimagetool 校验；
-              Qt 系统库供 PyInstaller 收集钩子导入 PySide6）
+              Qt 系统库供 PyInstaller 收集钩子导入 PySide6；python3/pip 供构建）
         if: runner.os == 'Linux'
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            git file ca-certificates \
+            git file ca-certificates python3 python3-pip \
             libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1
       - uses: actions/setup-python@v5
+        if: "!matrix.container"   # 容器：CPython 工具缓存要 GLIBC 2.38，22.04 只有 2.35，改用系统 python3
         with:
           python-version: "3.12"
       - name: Install
-        # 容器里 setup-python 的 bin 未必含 pip/pyinstaller 入口脚本，
-        # 统一用 python -m 调用最稳
-        run: python -m pip install . pyinstaller
+        run: ${{ matrix.py }} -m pip install . pyinstaller
       - name: Build
-        run: python -m PyInstaller writerstudio.spec
+        run: ${{ matrix.py }} -m PyInstaller writerstudio.spec
       - name: AppImage（Linux 零安装格式，随身携带全部系统依赖库）
         if: runner.os == 'Linux'
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"   # CI 容器无 FUSE，解压方式运行
         run: |
-          python - <<'EOF'
+          ${{ matrix.py }} - <<'EOF'
           import urllib.request
           urllib.request.urlretrieve(
               "https://github.com/AppImage/appimagetool/releases/download"
@@ -98,7 +100,7 @@ jobs:
               "/tmp/appimagetool")
           EOF
           chmod +x /tmp/appimagetool
-          python scripts/make_appimage.py --appimagetool /tmp/appimagetool
+          ${{ matrix.py }} scripts/make_appimage.py --appimagetool /tmp/appimagetool
       - name: Ad-hoc 签名（macOS 未经签名无法启动）
         if: runner.os == 'macOS'
         run: codesign --deep --force -s - dist/WriterStudio.app
