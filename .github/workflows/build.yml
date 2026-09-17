@@ -85,7 +85,11 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install
-        run: ${{ matrix.py }} -m pip install . pyinstaller
+        # 容器的 pip 22 构建隔离会装到读不懂 [project] 元数据的老
+        # setuptools，项目被装成 UNKNOWN-0.0.0、依赖全丢——先升级
+        run: |
+          ${{ matrix.py }} -m pip install -U pip setuptools wheel
+          ${{ matrix.py }} -m pip install . pyinstaller
       - name: Build
         run: ${{ matrix.py }} -m PyInstaller writerstudio.spec
       - name: AppImage（Linux 零安装格式，随身携带全部系统依赖库）
