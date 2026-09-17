@@ -32,6 +32,9 @@ jobs:
       QT_QPA_PLATFORM: offscreen
     steps:
       - uses: actions/checkout@v4
+      - name: Qt 运行时系统库（runner 缺 libEGL 等，PySide6 导入即失败）
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends \
+              libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -59,10 +62,12 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - name: 容器基础工具（checkout 需 git；appimagetool 校验需 file）
+      - name: 容器基础工具（checkout 需 git；file 供 appimagetool 校验；
+              Qt 系统库供 PyInstaller 收集钩子导入 PySide6）
         if: runner.os == 'Linux'
         run: apt-get update && apt-get install -y --no-install-recommends \
-              git file ca-certificates
+              git file ca-certificates \
+              libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
