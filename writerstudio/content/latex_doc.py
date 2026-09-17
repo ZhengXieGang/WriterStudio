@@ -24,6 +24,7 @@ from typing import Optional, Sequence
 from ..core.geometry import BBox
 from ..core.strokes import Stroke
 from .svg_import import import_svg
+from .svg_import import _PT_TO_PX
 
 ENGINES = ("xelatex", "pdflatex", "lualatex")
 XETEX_ENGINES = ("xelatex", "lualatex")
@@ -298,7 +299,11 @@ def compile_tex_source(tex_src: str, target_width_mm: Optional[float] = None,
             result.log = log
             return result
         try:
-            imported = import_svg(svg, target_width_mm=target_width_mm)
+            # TeX 编译产物走历史帧 px×96/72（全部既有文档的对象变换与
+            # 笔画编辑层都按它标定；TikZ 字体替换路径同帧），不是 SVG
+            # 文件导入的物理尺寸语义。
+            imported = import_svg(svg, target_width_mm=target_width_mm,
+                                  natural_scale=_PT_TO_PX)
         except Exception as exc:
             result.log = f"SVG 解析失败：{exc}"
             return result

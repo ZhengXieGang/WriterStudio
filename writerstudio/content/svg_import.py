@@ -30,6 +30,10 @@ _UNIT_TO_MM = {
     "": 25.4 / 96.0,   # 缺省按 96dpi 像素
 }
 
+# pt → px（96dpi）。与 tikz_text._PT_TO_PX 同值；历史帧（无 target_width
+# 的归一化兜底）以此为单位约定，见 normalize_params。
+_PT_TO_PX = 96.0 / 72.0
+
 
 @dataclass
 class SVGImportResult:
@@ -102,19 +106,22 @@ def parse_svg_geometry(path: str | Path, tolerance: float = 0.1
 
 
 def normalize_params(raw: Sequence[Stroke],
-                     target_width_mm: Optional[float] = None
+                     target_width_mm: Optional[float] = None,
+                     natural_scale: Optional[float] = None
                      ) -> tuple[BBox, float]:
     """由原始笔画求归一化参数 ``(包围盒, 缩放系数)``。
 
     与 :func:`import_svg` 用的是同一套换算，供文字位置等外部坐标同步对齐。
+    ``natural_scale``：无 target_width 时的兜底缩放。缺省为 px→mm（SVG
+    文件导入的物理尺寸语义）；TeX 编译产物走历史帧 px×96/72，由调用方
+    （compile_tex_source）传入。
     """
     box = BBox.from_points(p for s in raw for p in s.points)
     if target_width_mm and box.width > 1e-9:
         scale = target_width_mm / box.width
     else:
-        # svgelements 输出的几何坐标是 96dpi **像素**：不给目标宽度时
-        # 按 px→mm 换算成物理尺寸，否则 1:1 当毫米用会放大 96/25.4≈3.8 倍
-        scale = _UNIT_TO_MM["px"]
+        scale = natural_scale if natural_scale is not None \
+            else _UNIT_TO_MM["px"]
     return box, scale
 
 
@@ -129,11 +136,12 @@ def normalize_point(x: float, y: float, box: BBox, scale: float
 
 def import_svg(path: str | Path,
                target_width_mm: Optional[float] = None,
-               tolerance: float = 0.1) -> SVGImportResult:
+               tolerance: float = 0.1,
+               natural_scale: Optional[float] = None) -> SVGImportResult:
     """导入 SVG 文件为笔画（mm，Y 向上，包围盒左下角在原点）。
 
-    ``target_width_mm`` 给定时按宽度等比缩放；否则按文件物理尺寸。
-    ``tolerance`` 为曲线离散容差（mm）。
+    ``target_width_mm`` 给定时按宽度等比缩放；否则按 ``natural_scale``
+    （缺省 px→mm，即文件物理尺寸）。``tolerance`` 为曲线离散容差（mm）。
     """
     result = SVGImportResult()
     raw, warnings = parse_svg_geometry(path, tolerance)
@@ -142,7 +150,7 @@ def import_svg(path: str | Path,
         result.warnings.append("SVG 中未找到可绘制的矢量元素")
         return result
 
-    box, scale = normalize_params(raw, target_width_mm)
+    box, scale = normalize_params(raw, target_width_mm, natural_scale)
     for s in raw:
         pts = [normalize_point(x, y, box, scale) for x, y in s.points]
         result.strokes.append(Stroke(pts, s.closed))
@@ -223,7 +231,7 @@ def _bezier_point(t: float, p0, p1, p2, p3=None) -> tuple[float, float]:
         c = t * t
         return (a * p0[0] + b * p1[0] + c * p2[0],
                 a * p0[1] + b * p1[1] + c * p2[1])
-    a = mt * mt
+    a = mt * mt * mt
     b = 3.0 * mt * mt * t
     c = 3.0 * mt * t * t
     d = t * t * t

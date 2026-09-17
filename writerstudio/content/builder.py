@@ -13,13 +13,12 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
 from ..core.document import DocumentObject, SourceSpec
-from ..core.geometry import AffineTransform, BBox
+from ..core.geometry import BBox
 from ..core.strokes import Stroke
 from ..fonts.manager import FontManager
 from ..fonts.model import FontFamily
@@ -47,85 +46,6 @@ _RENDER_CACHE_KEY = "render_cache"
 #: 缓存点数上限：超大文档（整页 LaTeX）不再翻倍内存，退回全量重建
 _CACHE_MAX_POINTS = 1_000_000
 
-#: 旧版 TikZ 渲染的单位混用系数：无 target_width 时 SVG 的 px 坐标被当成
-#: pt 又放大一次，整体多乘 (96/72)/(25.4/96) ≈ 5.0404。用户在坏帧上手工
-#: 编辑过的笔画（stroke_edits.modified）按该系数一次性迁回正确帧。
-_TIKZ_BROKEN_FRAME_FACTOR = (96.0 / 72.0) / (25.4 / 96.0)
-#: source.data 里的迁移标记：坏帧的编辑层与补偿缩放只迁移一次，之后的
-#: 用户有意缩放/编辑不再被碰。
-_TIKZ_MIGRATED_KEY = "_badframe_migrated"
-
-
-def _migrate_tikz_edit_frame(strokes: list[Stroke], data: dict[str, Any]) -> None:
-    """把旧坏帧上的 TikZ 笔画编辑层一次性迁回正确比例（就地改 data）。
-
-    重建后的基线已是正确比例。判定与点数无关（笔画编辑器弯折会改变
-    点数）：取每条改动笔画的**质心**，分别度量「除以坏帧系数」与「原样」
-    两种假设下到最近基线笔画质心的距离，中位距离更小的那种假设胜出。
-    坏帧成立才把全部改动笔画除以精确系数——迁移后该检测自然不再触发，
-    不会重复迁移；新帧上的编辑（原样更近）一律不动。
-    """
-    edits = data.get("stroke_edits")
-    if not isinstance(edits, dict):
-        return
-    modified = edits.get("modified")
-    if not modified:
-        return
-    saved_centroids = []
-    for m in modified.values():
-        pts = m.get("pts") or []
-        if len(pts) >= 1:
-            saved_centroids.append(
-                (sum(p[0] for p in pts) / len(pts),
-                 sum(p[1] for p in pts) / len(pts)))
-    base_centroids = []
-    for s in strokes:
-        pts = s.points
-        if len(pts) >= 1:
-            base_centroids.append(
-                (sum(p[0] for p in pts) / len(pts),
-                 sum(p[1] for p in pts) / len(pts)))
-    if not saved_centroids or not base_centroids:
-        return
-
-    def _median_nn(k: float) -> float:
-        ds: list[float] = []
-        for cx, cy in saved_centroids:
-            sx, sy = cx / k, cy / k
-            d = min(math.hypot(sx - bx, sy - by)
-                    for bx, by in base_centroids)
-            ds.append(d)
-        ds.sort()
-        return ds[len(ds) // 2]
-
-    if _median_nn(_TIKZ_BROKEN_FRAME_FACTOR) < _median_nn(1.0):
-        k = _TIKZ_BROKEN_FRAME_FACTOR
-        for m in modified.values():
-            m["pts"] = [[x / k, y / k] for x, y in m["pts"]]
-
-
-def _migrate_tikz_compensating_scale(obj, data: dict[str, Any]) -> None:
-    """一次性清掉坏帧时代的补偿缩放（成功后就地改 ``data`` 打标记）。
-
-    坏帧渲染整体大 ~5 倍，用户在画布上把对象拖小到页面里——存档变换里
-    留着 ≈1/5.04 的缩放。基线恢复真实尺寸后这层补偿会把对象压成 ~1/5。
-    只处理无旋转的纯缩放；缩放比例乘回坏帧系数落在合理窗口才重置为 1
-    （平移保留）。打上标记后永不再触发，用户之后的有意缩放不受影响。
-    """
-    if data.get(_TIKZ_MIGRATED_KEY):
-        return
-    t = obj.transform
-    a, b, c, d = t.a, t.b, t.c, t.d
-    if abs(b) > 1e-12 or abs(c) > 1e-12:
-        data[_TIKZ_MIGRATED_KEY] = True   # 带旋转/斜切：无法判定，保守不动
-        return
-    k = _TIKZ_BROKEN_FRAME_FACTOR
-    if (0.55 < abs(a) * k < 1.45) and (0.55 < abs(d) * k < 1.45):
-        obj.transform = AffineTransform(
-            math.copysign(1.0, a), 0.0, 0.0, math.copysign(1.0, d),
-            t.e, t.f)
-    data[_TIKZ_MIGRATED_KEY] = True
-
 
 def _render_fingerprint(kind: str, data: dict[str, Any], manager) -> str:
     """渲染输入指纹：除「扰动参数/笔画编辑」外一切影响渲染结果的输入。
@@ -136,8 +56,7 @@ def _render_fingerprint(kind: str, data: dict[str, Any], manager) -> str:
     """
     core = {k: v for k, v in (data or {}).items()
             if k not in ("perturb", "stroke_edits",
-                         "layout_box", "table_box",
-                         _TIKZ_MIGRATED_KEY)}
+                         "layout_box", "table_box")}
     if kind == SOURCE_SVG and core.get("path"):
         try:
             st = os.stat(core["path"])
@@ -447,9 +366,6 @@ def regenerate_content_object(obj: DocumentObject, manager: FontManager) -> bool
             obj.meta.pop("md_table_box", None)
         else:
             obj.meta["md_table_box"] = box
-    if kind == SOURCE_TIKZ:
-        _migrate_tikz_edit_frame(new.local_strokes, data)
-        _migrate_tikz_compensating_scale(obj, data)
     # 重生成会冲刷掉画笔编辑的删除/改动，这里把编辑层重新施加一遍
     obj.local_strokes = _apply_stroke_edits(new.local_strokes, data)
     return True

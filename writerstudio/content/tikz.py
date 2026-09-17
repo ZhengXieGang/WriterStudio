@@ -416,13 +416,12 @@ def _render_tikz_with_app_fonts(tex_src: str,
             if target_width_mm and box.width > 1e-9:
                 scale = target_width_mm / box.width
             else:
-                # 解析出的坐标是 px（svgelements 按 96dpi 归一，词框的
-                # pt→px 已对齐同一单位）；这里要把 px 换算成 mm。此前误用
-                # _PT_TO_PX（pt→px），等于把 px 又当 pt 放大 96/72 倍、
-                # 再叠加 px→mm 的缺失——无 target_width 的对象整体膨胀
-                # 约 5 倍（278/55.4 实测），圆和曲线随之严重扭曲。
-                from .svg_import import _UNIT_TO_MM as _U2M
-                scale = _U2M["px"]
+                # 无 target_width 时沿用历史帧：本地单位 = px×96/72。
+                # 这不是 px→mm 的物理换算，而是所有既有文档（对象变换、
+                # 笔画编辑层的坐标）共同标定的约定——改成 px→mm 会让旧
+                # 文档打开时整体缩到约 1/5.04，用户全部尺寸与手绘编辑
+                # 全部错位。新对象的观感尺寸由对象变换决定，不受影响。
+                scale = _PT_TO_PX
         else:
             result.log = "TikZ 编译成功但未解析出图形笔画；" + "; ".join(warnings)
             return result

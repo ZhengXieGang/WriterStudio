@@ -614,63 +614,45 @@ def test_render_tikz_produces_strokes():
                                     fromlist=["tikz_available"]).tikz_available(),
                     reason="TikZ 工具链不可用")
 def test_render_tikz_natural_size_without_target_width():
-    """无 target_width 时按真实尺寸（mm）输出，不得整体膨胀。
+    """无 target_width 时沿用历史帧：本地单位 = px×96/72。
 
-    回归：SVG 的 px 坐标曾被当成 pt 再放大一次，无 target_width 的对象
-    整体膨胀 (96/72)/(25.4/96) ≈ 5.04 倍（2cm 线段渲染成 ~101mm）。
+    这是全部既有文档（对象变换、笔画编辑层坐标）共同标定的约定，
+    不得改动——改成 px→mm 会让旧文档打开时整体缩到约 1/5.04。
+    2cm 线段 → 75.59px → ×96/72 ≈ 100.8 本地单位。
     """
     from writerstudio.content.tikz import render_tikz
     r = render_tikz(r"\draw (0,0) -- (2,0);", timeout=120)
     assert r.ok, r.log
-    assert r.width == pytest.approx(20.0, rel=0.06), \
-        f"2cm 线段应约 20mm，实际 {r.width:.1f}mm（疑似单位换算回归）"
-    assert r.height == pytest.approx(0.0, abs=1.5)
+    assert r.width == pytest.approx(2 / 2.54 * 96 * 96 / 72, rel=0.06), \
+        f"2cm 线段应约 100.8 本地单位（历史帧），实际 {r.width:.1f}"
+    assert r.height == pytest.approx(0.0, abs=2.0)
 
 
-def test_migrate_tikz_edit_frame():
-    """坏帧编辑层迁移：旧 5.04 倍坐标迁回，新帧编辑不动，迁移幂等。"""
-    from writerstudio.content.builder import (
-        _TIKZ_BROKEN_FRAME_FACTOR as K,
-        _migrate_tikz_edit_frame,
-    )
-    base = [Stroke([(0.0, 0.0), (10.0, 0.0)], False),
-            Stroke([(0.0, 0.0), (0.0, 20.0)], False)]
+def test_bezier_point_matches_svgelements():
+    """回归：三次 Bernstein 首项少乘一个 mt（mt²），每个求值点都被推离
 
-    def jitter(pts):
-        # 手工编辑的微小偏移（不影响质心近邻判定）
-        return [[x + 0.2, y - 0.2] for x, y in pts]
-
-    # 坏帧：存档 = 基线 × 5.0404 + 微偏移 → 应除回
-    broken = {"modified": {"0": {"pts": jitter([[x * K, y * K]
-                                                for x, y in base[0].points]),
-                                          "closed": False,
-                                          "role": None, "group": None},
-                           "1": {"pts": jitter([[x * K, y * K]
-                                                for x, y in base[1].points]),
-                                          "closed": False,
-                                          "role": None, "group": None}}}
-    data = {"stroke_edits": broken}
-    _migrate_tikz_edit_frame(base, data)
-    got0 = data["stroke_edits"]["modified"]["0"]["pts"]
-    assert got0[1] == pytest.approx([base[0].points[1][0] + 0.2,
-                                     base[0].points[1][1] - 0.2], abs=0.6)
-    # 迁移后再次调用：比例 ≈1，不再变化（幂等）
-    before = [p[:] for p in got0]
-    _migrate_tikz_edit_frame(base, data)
-    for p_before, p_after in zip(before,
-                                 data["stroke_edits"]["modified"]["0"]["pts"]):
-        assert p_after == pytest.approx(p_before, abs=1e-9)
-
-    # 新帧编辑：存档 ≈ 基线 → 原样保留
-    fresh = {"modified": {"0": {"pts": jitter(base[0].points),
-                                "closed": False, "role": None, "group": None},
-                          "1": {"pts": jitter(base[1].points),
-                                "closed": False, "role": None, "group": None}}}
-    data = {"stroke_edits": fresh}
-    _migrate_tikz_edit_frame(base, data)
-    assert data["stroke_edits"]["modified"]["1"]["pts"][1] == \
-        pytest.approx([base[1].points[1][0] + 0.2,
-                       base[1].points[1][1] - 0.2], abs=0.6)
+    真实曲线——小圆解析成来回折叠的乱线团、曲线弧长成倍膨胀、包围盒
+    虚胀导致文字错位。权重和必须恒等于 1，且与 svgelements 原生
+    ``seg.point`` 一致。
+    """
+    from writerstudio.content.svg_import import _bezier_point
+    p0, p1, p2, p3 = (0.0, 0.0), (10.0, 30.0), (40.0, -20.0), (50.0, 10.0)
+    for t in (0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0):
+        mt = 1.0 - t
+        ref = (mt ** 3 * p0[0] + 3 * mt * mt * t * p1[0]
+               + 3 * mt * t * t * p2[0] + t ** 3 * p3[0]), \
+              (mt ** 3 * p0[1] + 3 * mt * mt * t * p1[1]
+               + 3 * mt * t * t * p2[1] + t ** 3 * p3[1])
+        assert _bezier_point(t, p0, p1, p2, p3) == pytest.approx(ref, abs=1e-9)
+    # 权重和恒为 1：远离原点的曲线也不会整体被推走
+    p0 = (10000.0, -20000.0)
+    mt = 1.0 - 0.3
+    x, y = _bezier_point(0.3, p0, p1, p2, p3)
+    assert (x, y) == pytest.approx(
+        (mt ** 3 * p0[0] + 3 * mt * mt * 0.3 * p1[0]
+         + 3 * mt * 0.09 * p2[0] + 0.027 * p3[0],
+         mt ** 3 * p0[1] + 3 * mt * mt * 0.3 * p1[1]
+         + 3 * mt * 0.09 * p2[1] + 0.027 * p3[1]), abs=1e-9)
 
 
 @pytest.mark.skipif(not __import__("writerstudio.content.tikz",
