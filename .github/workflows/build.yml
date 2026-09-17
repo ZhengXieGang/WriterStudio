@@ -148,6 +148,10 @@ jobs:
       - name: SHA256 校验和
         run: |
           cd relpkg
+          # upload-artifact 会保留 dist/ 前缀（如 dist/*.AppImage），先扁平化
+          find . -mindepth 2 -type f -exec mv -f {} . \;
+          find . -mindepth 1 -type d -empty -delete
+          ls -l
           sha256sum ./* > SHA256SUMS.txt
           cat SHA256SUMS.txt
       - name: 创建 GitHub Release
