@@ -11,10 +11,7 @@ GRBL 写字机上位机软件。文字、表格、LaTeX公式、TikZ、SVG矢量
 | macOS | `WriterStudio-macos.zip` | 解压后将 WriterStudio.app 拖入「应用程序」 |
 | Linux | `WriterStudio-x86_64.AppImage` | 下载后 `chmod +x` 直接运行 |
 
-程序零依赖开箱即用：自带全部运行所需组件（Python/Qt/字库/排版引擎），
-系统里不需要装任何东西。公式与 LaTeX 文档的内置渲染开箱即用；可选安装
-TeX 工具链（texlive 的 `xelatex` + poppler 的 `pdftocairo`）后，LaTeX
-文档与 TikZ 自动升级为忠实编译——不装也不影响任何日常功能。
+可选安装 TeX 工具链（ `xelatex` + `pdftocairo`）
 
 ## 功能特性
 
@@ -32,7 +29,7 @@ TeX 工具链（texlive 的 `xelatex` + poppler 的 `pdftocairo`）后，LaTeX
 
 ### 编辑与排版
 * 笔画编辑工具：单笔画移动/变换/弯折/重扰动/删除
-* 纸张预设与**参考层**：可导入图片/SVG 底图作为参考
+* 纸张预设与**参考层**：可导入图片/SVG 底图作为位置参考
 
 ## 支持的字体格式
 
@@ -43,8 +40,6 @@ TeX 工具链（texlive 的 `xelatex` + poppler 的 `pdftocairo`）后，LaTeX
 | TrueType/OpenType | `.ttf` `.otf` | 经 fontTools 解析轮廓转单线 |
 | gcode 字符库 | 每字符一文件 | 每字符一段 G-code 的字库目录 |
 | `.gfont` | `.gfont` | 单线笔画字体包 |
-
-外部字体目录可在设置中添加，扫描建索引瞬时完成、懒加载。
 
 ## 许可
 
@@ -61,7 +56,7 @@ TeX 工具链（texlive 的 `xelatex` + poppler 的 `pdftocairo`）后，LaTeX
   Copyright (c) 2018 Lingdong Huang）从 TTF 生成。
 
 <details>
-<summary><b>从源码运行（开发者）</b></summary>
+<summary><b>从源码运行</b></summary>
 
 ```bash
 pip install -r requirements.txt   # 或 pip install .
@@ -72,7 +67,7 @@ python -m pytest -q               # 运行测试（无需显示器）
 </details>
 
 <details>
-<summary><b>打包发行与 CI/CD（开发者）</b></summary>
+<summary><b>构建</b></summary>
 
 PyInstaller 不能交叉编译，三个平台各自原生构建：
 
@@ -82,26 +77,10 @@ pyinstaller writerstudio.spec    # Windows 出单文件便携 exe；Linux/macOS 
 python scripts/make_appimage.py  # Linux：把目录版组装成 AppImage（零安装分发）
 ```
 
-仓库自带 GitHub Actions CI/CD：
-
-* **ci.yml** —— 推送到 main / PR 时触发：pyflakes 静态检查 + 全量测试
-  （Linux 为门禁，Windows/macOS 观察项，Qt 测试离屏运行）。
-* **build.yml** —— 手动触发只出构建产物；推 `v*` 标签则先跑门禁测试，
-  通过后构建三平台产物并自动创建 GitHub Release。
-
-发布一次新版本的完整操作：
-
-```bash
-git tag v0.2.0 && git push origin v0.2.0   # 之后去 Actions 页看进度
-```
-
-Linux 产物在 `ubuntu:22.04` 容器里构建（glibc 2.35 基线），兼容更多
-旧发行版；Windows 为单文件便携 exe；macOS 为 .app（ad-hoc 签名）。
-
 </details>
 
 <details>
-<summary><b>目录结构（开发者）</b></summary>
+<summary><b>目录结构</b></summary>
 
 ```
 ├── writerstudio/

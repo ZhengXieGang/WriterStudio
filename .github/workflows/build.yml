@@ -80,9 +80,11 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install
-        run: pip install . pyinstaller
+        # 容器里 setup-python 的 bin 未必含 pip/pyinstaller 入口脚本，
+        # 统一用 python -m 调用最稳
+        run: python -m pip install . pyinstaller
       - name: Build
-        run: pyinstaller writerstudio.spec
+        run: python -m PyInstaller writerstudio.spec
       - name: AppImage（Linux 零安装格式，随身携带全部系统依赖库）
         if: runner.os == 'Linux'
         env:
