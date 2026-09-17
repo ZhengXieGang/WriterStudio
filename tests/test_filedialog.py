@@ -56,6 +56,9 @@ def test_priority_project_dir_when_no_last(qapp, tmp_path):
 
 
 def test_priority_documents_when_nothing_valid(qapp):
+    # runner/容器环境可能没有「文档」目录——start_dir 只认真实存在的
+    # 目录，缺了会退回家目录。这里确保它存在，测试不依赖环境。
+    Path(_docs()).mkdir(parents=True, exist_ok=True)
     filedialog.install(get_last_dir=lambda: "/no/such/dir",
                        get_project_path=lambda: None,
                        set_last_dir=None)
