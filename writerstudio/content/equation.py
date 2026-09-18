@@ -8,8 +8,11 @@
 
 **字体链替换**（与 TikZ 文字替换同思路）：给出本软件的字体链时，mathtext
 只负责排版（每个字符的位置/字号由它保证），字母、数字等链上画得出的字符
-改用字体链重排成笔画（如用户的手写体）；链画不出的字符（∑ ∫ ≤ 等数学
-符号）与分式线/根号顶线等结构线保留 mathtext 轮廓，公式语义不受影响。
+改用字体链重排成笔画（如用户的手写体）；链画不出的数学符号（∑ π ∫ ≤ 等）
+改用**内置单线 Hershey 字体**（mathupp/greek 等，键位经逐字形渲染核对）
+画成单线笔画，个别简单符号（× ≤ ≥）按几何直接画线。mathtext 轮廓
+（填充字体的外框线，写出来是空心字）只作为未知符号的最后兜底，
+正常不会出现在纸面上。
 """
 
 from __future__ import annotations
@@ -21,6 +24,62 @@ from ..core.geometry import BBox
 from ..core.strokes import Stroke
 
 PT_TO_MM = 25.4 / 72.0
+
+# ---------------------------------------------------------------------------
+# 数学符号的单线兜底（键位经逐字形渲染核对，见 tests）：
+#   * mathupp/mathlow 是 Hershey 数学符号字体，字形挂在 ASCII 键位上；
+#   * greek 按希腊字母的拉丁转写挂键（P=Π pi, S=Σ sigma, Q=Θ theta,
+#     F=Φ phi, C=Χ chi, W=Ω omega, 小写同规则 p=π s=σ w=ω q=θ …）。
+# mathtext 的字符码是 Unicode（\sum=U+2211，希腊字母=U+03xx），因此
+# 需要这张「Unicode → (内置单线字体, 键位)」对照表。链上和这里都查不到
+# 的字符才退回 mathtext 轮廓（空心）。
+# ---------------------------------------------------------------------------
+_SYMBOL_FALLBACK: dict[str, tuple[str, str]] = {
+    "∑": ("mathupp", ";"), "∏": ("mathupp", ":"),
+    "√": ("mathupp", "b"), "∞": ("mathupp", "^"),
+    "°": ("mathupp", "`"), "≠": ("mathupp", "?"),
+    "≡": ("mathupp", "@"), "∈": ("mathupp", "h"),
+    "→": ("mathupp", "i"), "←": ("mathupp", "j"),
+    "↓": ("mathupp", "k"), "∂": ("mathupp", "m"),
+    "∇": ("mathupp", "n"), "∫": ("mathupp", "p"),
+    "∃": ("mathupp", "v"), "÷": ("mathupp", "x"),
+    "∥": ("mathupp", "y"), "⊥": ("mathupp", "z"),
+    "∠": ("mathupp", "{"), "±": ("mathupp", " "),
+    "·": ("mathupp", "$"), "⋅": ("mathupp", "$"),
+}
+_GREEK_TRANSLIT = {
+    "Α": "A", "Β": "B", "Γ": "G", "Δ": "D", "Ε": "E", "Ζ": "Z", "Η": "H",
+    "Θ": "Q", "Ι": "I", "Κ": "K", "Λ": "L", "Μ": "M", "Ν": "N", "Ξ": "X",
+    "Ο": "O", "Π": "P", "Ρ": "R", "Σ": "S", "Τ": "T", "Υ": "U", "Φ": "F",
+    "Χ": "C", "Ψ": "Y", "Ω": "W",
+}
+for _g, _k in _GREEK_TRANSLIT.items():
+    _SYMBOL_FALLBACK.setdefault(_g, ("greek", _k))
+    _SYMBOL_FALLBACK[_g.lower()] = ("greek", _k.lower())
+# 希腊字母 β/θ 等在 greek 字体里有专键；变体（ς 等）未收录则走轮廓兜底
+
+#: 语法太简单、单线字体里没有对应键的符号：按几何直接画线（em 为字号）
+_PROCEDURAL_SYMBOLS = {"×", "≤", "≥"}
+
+
+def _draw_procedural_symbol(ch: str, ox: float, oy: float, em: float
+                            ) -> list[Stroke]:
+    """在字形原点（pt→mm 后的基线左端）按几何画 × ≤ ≥，粗细交给笔尖。"""
+    x0, y0 = ox, oy + em * 0.15
+    w, h = em * 0.55, em * 0.45
+    cx, cy = x0 + w / 2.0, y0 + h / 2.0
+    if ch == "×":
+        return [Stroke([(x0, y0), (x0 + w, y0 + h)], closed=False),
+                Stroke([(x0, y0 + h), (x0 + w, y0)], closed=False)]
+    if ch in ("≤", "≥"):
+        s = -1.0 if ch == "≥" else 1.0
+        tipx = cx - s * w / 2.0
+        backx = cx + s * w / 2.0
+        return [Stroke([(backx, y0 + h), (tipx, cy), (backx, y0)],
+                       closed=False),
+                Stroke([(x0, y0), (x0 + w, y0)], closed=False)]
+    return []
+
 
 _matplotlib_lock = threading.Lock()
 _textpath = None
@@ -97,7 +156,8 @@ def render_equation(latex: str, size_mm: float = 5.0,
                 fonts.append(f)
         if fonts:
             try:
-                return _render_with_fonts(latex, size_mm, fonts, text_scale)
+                return _render_with_fonts(latex, size_mm, fonts, text_scale,
+                                          manager)
             except Exception:
                 pass        # 解析失败退回原生轮廓，公式不丢
     return _render_native(latex, size_mm, tolerance)
@@ -172,12 +232,13 @@ def _render_native(latex: str, size_mm: float, tolerance: float) -> list[Stroke]
     return strokes
 
 
-def _render_with_fonts(latex: str, size_mm: float, fonts, text_scale: float
-                       ) -> list[Stroke]:
+def _render_with_fonts(latex: str, size_mm: float, fonts, text_scale: float,
+                       manager=None) -> list[Stroke]:
     """字体链替换路径：mathtext 负责排版，字符用本软件字体重排。
 
     * 链上画得出的字符 → 字体链笔画（``role="glyph"``）；
-    * 链画不出的字符（数学符号等）→ mathtext 轮廓（语义不变）；
+    * 链画不出的数学符号 → 内置单线字体（Hershey mathupp/greek，见
+      ``_SYMBOL_FALLBACK``）或几何画线（× ≤ ≥）——都不产生空心轮廓；
     * 分式线/根号顶线等结构矩形 → 直线笔画。
     """
     from matplotlib.font_manager import FontProperties
@@ -188,6 +249,14 @@ def _render_with_fonts(latex: str, size_mm: float, fonts, text_scale: float
     text = wrap_math(latex)
     if not text:
         return []
+
+    # 单线兜底字体（懒加载，首次解析后由 FontManager 缓存）
+    symbol_fonts: dict[str, Any] = {}
+    if manager is not None:
+        for n in {f for f, _ in _SYMBOL_FALLBACK.values()}:
+            fam = manager.get(n)
+            if fam is not None:
+                symbol_fonts[n] = fam
 
     pt_size = size_mm / PT_TO_MM
     _w, _h, _d, glyphs, rects = parser.parse(
@@ -211,6 +280,22 @@ def _render_with_fonts(latex: str, size_mm: float, fonts, text_scale: float
             lay = layout_text(ch, fonts, TextStyle(size=gsize),
                               origin=(ox * scale, oy * scale))
             strokes.extend(lay.strokes())
+            continue
+        # 单线兜底：内置 Hershey 数学/希腊字体（绝不出空心轮廓）
+        fb = _SYMBOL_FALLBACK.get(ch)
+        if fb is not None:
+            fam = symbol_fonts.get(fb[0])
+            if fam is not None and fam.has(fb[1]):
+                gsize = fontsize * scale * max(0.1, min(5.0, text_scale))
+                from ..fonts.layout import TextStyle, layout_text
+                lay = layout_text(fb[1], [fam], TextStyle(size=gsize),
+                                  origin=(ox * scale, oy * scale))
+                if lay.strokes():
+                    strokes.extend(lay.strokes())
+                    continue
+        if ch in _PROCEDURAL_SYMBOLS:
+            strokes.extend(_draw_procedural_symbol(
+                ch, ox * scale, oy * scale, fontsize * scale))
             continue
         # 保留 mathtext 轮廓：按字形索引取出路径，散化为折线。
         # 数学字体的减号/正负号横杠等是**扁平矩形**（约 2.2×0.29mm），

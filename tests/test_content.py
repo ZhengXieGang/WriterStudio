@@ -1373,3 +1373,31 @@ def test_table_text_follows_line_position(fonts):
     assert checked >= 2, "表头行内应有可校验的字符"
 
 
+
+
+def test_equation_math_symbols_render_single_line():
+    """链上画不出的数学符号（∑ π ∞ 等）走内置单线字体兜底，不再出现
+    mathtext 轮廓的空心字。"""
+    import pytest as _pytest
+    _pytest.importorskip("matplotlib")
+    from writerstudio.content.equation import (
+        _PROCEDURAL_SYMBOLS,
+        _SYMBOL_FALLBACK,
+        render_equation,
+    )
+    from writerstudio.fonts.manager import FontManager
+
+    m = FontManager()
+    st = render_equation(r"$\pi + \sum_{i=1}^{n} \alpha$", size_mm=10,
+                         font_names=["futural"], manager=m)
+    assert st
+    # 单线笔画：任何一笔的点数都远小于 mathtext 轮廓（Σ 轮廓单笔 40+ 点）
+    assert max(len(s.points) for s in st) <= 30
+
+    # 兜底表覆盖常见数学符号，且每个键位在对应内置字体里真实存在
+    for ch in "∑∏π∞√∫±÷·≤≥≠∂∇°αβγθλωΣΩ":
+        assert ch in _SYMBOL_FALLBACK or ch in _PROCEDURAL_SYMBOLS, ch
+    for ch, (fname, key) in _SYMBOL_FALLBACK.items():
+        fam = m.get(fname)
+        assert fam is not None, (ch, fname)
+        assert fam.has(key), (ch, fname, key)
