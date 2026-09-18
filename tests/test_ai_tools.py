@@ -270,3 +270,39 @@ def test_export_gcode(tools, tmp_path):
     assert "G21" in text
     with pytest.raises(ToolError):
         tools.call("export_gcode", {"path": ""})
+
+
+# --------------------------------------------------------------- 扰动透传
+def test_content_tools_perturb_changes_output(tools, win):
+    """markdown/公式接受 perturb+seed：不同种子产出不同笔画（抖动生效）。"""
+    pytest.importorskip("matplotlib")
+    from writerstudio.content.equation import mathtext_available
+    if not mathtext_available():
+        pytest.skip("mathtext 不可用")
+    p = {"enabled": True, "size_sigma": 0.05, "stroke_x_sigma": 0.3}
+    r1 = tools.call("add_equation", {"latex": "$E = mc^2$", "seed": 1,
+                                     "perturb": p})
+    r2 = tools.call("add_equation", {"latex": "$E = mc^2$", "seed": 2,
+                                     "perturb": p})
+    o1 = win.controller.doc.find(r1["id"])
+    o2 = win.controller.doc.find(r2["id"])
+    s1 = [tuple(round(v, 2) for pt in s.points for v in pt)
+          for s in o1.local_strokes]
+    s2 = [tuple(round(v, 2) for pt in s.points for v in pt)
+          for s in o2.local_strokes]
+    assert s1 != s2                       # 种子不同 → 笔画不同
+
+    m1 = tools.call("add_markdown", {"markdown": "# 抖动\n**测试**段落",
+                                     "perturb": p, "seed": 3})
+    om = win.controller.doc.find(m1["id"])
+    assert om.source.data["perturb"]["enabled"] is True
+
+
+def test_add_text_direction_vertical(tools, win):
+    r = tools.call("add_text", {"text": "床前明月光\n疑是地上霜",
+                                "direction": "v-rl", "size": 8})
+    obj = win.controller.doc.find(r["id"])
+    assert obj.source.data["direction"] == "v-rl"
+    assert r["bbox"]["w"] > 0 and r["bbox"]["h"] > 0
+    with pytest.raises(ToolError):
+        tools.call("add_text", {"text": "x", "direction": "斜排"})

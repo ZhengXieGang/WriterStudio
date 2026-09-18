@@ -135,7 +135,8 @@ def _build_server(port: int):
                  char_spacing: float = 0.0, align: str = "left",
                  frame_width: float = 0.0,
                  perturb: Optional[dict] = None,
-                 seed: Optional[int] = None) -> str:
+                 seed: Optional[int] = None,
+                 direction: str = "h") -> str:
         """添加文本对象（手写字迹）。
 
         text: 内容，\\n 换行；frame_width>0 时按该宽度自动换行(0=不换行)；
@@ -143,7 +144,8 @@ def _build_server(port: int):
         x/y: 包围盒左上角落点(mm，页面左上原点)，省略则自动错开放置；
         font_names: 字体回退链(第一款中文+一款英文即可混排)，省略用当前默认；
         perturb: 手写扰动字典，如 {"enabled": true, "size_sigma": 0.03,
-        "baseline_amplitude": 0.4}；seed: 扰动种子(同 seed 同结果)。
+        "baseline_amplitude": 0.4}；seed: 扰动种子(同 seed 同结果)；
+        direction: h=横排 / v-rl=竖排右→左(传统中文) / v-lr=竖排左→右。
         返回 id、实际 bbox、缺字列表。
         """
         return json.dumps(rpc("add_text", {
@@ -151,6 +153,7 @@ def _build_server(port: int):
             "size": size, "line_spacing": line_spacing,
             "char_spacing": char_spacing, "align": align,
             "frame_width": frame_width, "perturb": perturb, "seed": seed,
+            "direction": direction,
         }, ), ensure_ascii=False)
 
     @mcp.tool()
@@ -158,42 +161,53 @@ def _build_server(port: int):
                      y: Optional[float] = None,
                      font_names: Optional[list[str]] = None,
                      size: float = 4.0, wrap_width: float = 120.0,
-                     table_width: float = 0.0) -> str:
+                     table_width: float = 0.0,
+                     perturb: Optional[dict] = None,
+                     seed: Optional[int] = None) -> str:
         """添加 Markdown 排版对象：多级标题、列表、粗体、数据表格（自动画
         表格线）、$行内公式$。适合多段落正文与表格。wrap_width 为自动换行
-        宽度(mm)，table_width>0 时表格拉到该宽。返回 id 与实际 bbox。"""
+        宽度(mm)，table_width>0 时表格拉到该宽。perturb/seed：手写随机
+        扰动及其种子（如 {"enabled": true, "size_sigma": 0.03}）。
+        返回 id 与实际 bbox。"""
         return json.dumps(rpc("add_markdown", {
             "markdown": markdown, "x": x, "y": y, "font_names": font_names,
             "size": size, "wrap_width": wrap_width,
-            "table_width": table_width,
+            "table_width": table_width, "perturb": perturb, "seed": seed,
         }), ensure_ascii=False)
 
     @mcp.tool()
     def add_tikz(code: str, x: Optional[float] = None, y: Optional[float] = None,
                  width_mm: Optional[float] = None,
                  font_names: Optional[list[str]] = None,
-                 text_scale: float = 1.0, name: Optional[str] = None) -> str:
+                 text_scale: float = 1.0, name: Optional[str] = None,
+                 perturb: Optional[dict] = None,
+                 seed: Optional[int] = None) -> str:
         """添加 TikZ 矢量图形（坐标系/函数曲线/几何图/示意图的首选）。
 
         code: TikZ 代码，\\begin{tikzpicture} 可省略；坐标单位默认 cm。
         width_mm: 成图宽度(mm)，按它整体缩放，强烈建议显式给出。
         节点文字自动用用户手写字体重排。例（10mm 宽的坐标轴）：
         \\draw[->] (0,0) -- (3,0) node[right]{$x$}; \\draw[->] (0,0) -- (0,2);
+        perturb/seed：手写随机扰动及其种子（线条微微抖动更像手绘）。
         返回 id 与实际 bbox。"""
         return json.dumps(rpc("add_tikz", {
             "code": code, "x": x, "y": y, "width_mm": width_mm,
             "font_names": font_names, "text_scale": text_scale, "name": name,
+            "perturb": perturb, "seed": seed,
         }), ensure_ascii=False)
 
     @mcp.tool()
     def add_equation(latex: str, x: Optional[float] = None,
                      y: Optional[float] = None, size_mm: float = 6.0,
-                     font_names: Optional[list[str]] = None) -> str:
+                     font_names: Optional[list[str]] = None,
+                     perturb: Optional[dict] = None,
+                     seed: Optional[int] = None) -> str:
         """添加数学公式（matplotlib mathtext 语法，如 $F = ma$、
-        $\\frac{a}{b}$）。size_mm 为公式主体高度。返回 id 与实际 bbox。"""
+        $\\frac{a}{b}$）。size_mm 为公式主体高度。perturb/seed：手写
+        随机扰动及其种子。返回 id 与实际 bbox。"""
         return json.dumps(rpc("add_equation", {
             "latex": latex, "x": x, "y": y, "size_mm": size_mm,
-            "font_names": font_names,
+            "font_names": font_names, "perturb": perturb, "seed": seed,
         }), ensure_ascii=False)
 
     # -------------------------------------------------------------- 编辑

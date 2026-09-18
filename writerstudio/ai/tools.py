@@ -278,6 +278,7 @@ class AiTools:
             frame_width=_num(args.get("frame_width", 0.0), "frame_width",
                              lo=0.0, hi=2000.0),
             perturb=perturb,
+            direction=self._parse_direction(args.get("direction")),
         )
         if seed is not None:
             spec.font_seed = int(seed)
@@ -309,7 +310,9 @@ class AiTools:
                              lo=0.0, hi=2000.0),
         )
         obj = make_markdown_object(
-            text, self.win.font_manager, font_names=font_names, style=style)
+            text, self.win.font_manager, font_names=font_names, style=style,
+            perturb=self._parse_perturb(args.get("perturb"),
+                                        args.get("seed")))
         if not obj.local_strokes:
             raise ToolError("未能生成任何笔画：字体无法绘制该内容")
         self._place_and_add(obj, self._common_pos(args), "添加Markdown")
@@ -336,6 +339,8 @@ class AiTools:
                 manager=self.win.font_manager,
                 text_scale=_num(args.get("text_scale", 1.0), "text_scale",
                                 lo=0.2, hi=5.0),
+                perturb=self._parse_perturb(args.get("perturb"),
+                                            args.get("seed")),
             )
         except ValueError as exc:
             raise ToolError(f"TikZ 编译失败：{exc}") from exc
@@ -357,6 +362,8 @@ class AiTools:
                 font_names=font_names if font_names is not None
                 else self.win._default_font_chain(),
                 manager=self.win.font_manager,
+                perturb=self._parse_perturb(args.get("perturb"),
+                                            args.get("seed")),
             )
         except Exception as exc:
             raise ToolError(f"公式渲染失败（需 matplotlib mathtext 语法）：{exc}")
@@ -620,6 +627,15 @@ class AiTools:
         if v in (ALIGN_LEFT, ALIGN_CENTER, ALIGN_RIGHT):
             return v
         raise ToolError(f"align 只能是 left/center/right，收到：{v!r}")
+
+    def _parse_direction(self, v) -> str:
+        if v is None:
+            from ..fonts.layout import DIR_H
+            return DIR_H
+        if v in ("h", "v-rl", "v-lr"):
+            return v
+        raise ToolError("direction 只能是 h（横排）/ v-rl（竖排右→左）/ "
+                        "v-lr（竖排左→右），收到：" + repr(v))
 
     def _parse_perturb(self, raw, seed) -> PerturbParams:
         if raw is None:

@@ -1,6 +1,8 @@
 GRBL 写字机上位机软件。文字、表格、LaTeX公式、TikZ、SVG矢量图，笔画编辑，手写模拟 一个软件全搞定：
 可多字体混排、可调手写随机扰动、可纸张对齐参考层。
 
+![一页手写：古诗、Markdown 注释与表格、TikZ 月夜线稿、LaTeX 公式——全部由手写字库加轻微随机扰动渲染，并由 MCP 智能排版自动生成](resources/preview.png)
+
 ## 下载与使用
 
 到 [Releases](https://github.com/ZhengXieGang/WriterStudio/releases) 页面下载对应平台的文件：
@@ -43,7 +45,7 @@ GRBL 写字机上位机软件。文字、表格、LaTeX公式、TikZ、SVG矢量
 
 ## AI 智能排版（MCP）
 
-让 Claude Desktop 等 AI 助手直接在软件里完成整页排版：手写文字、数据表格、
+让AI Agent 直接在软件里完成整页排版：手写文字、数据表格、
 坐标系图、公式，排版结果可直接发送打印。所有修改都在软件里可撤销。
 
 **启用**：软件菜单「AI 排版 → AI 服务设置…」确认服务开启（默认开启，
