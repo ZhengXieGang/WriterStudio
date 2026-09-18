@@ -648,3 +648,119 @@ def test_frame_geometry_survives_success_regen(qapp):
     assert [float(v) for v in obj2.source.data["layout_box"]] == \
         pytest.approx(box0)
     assert obj2.meta.get("layout") is not None
+
+
+# ============================================================ 撤销历史去重
+def _snapshot(doc: Document) -> dict:
+    from writerstudio.project import doc_to_data
+    return doc_to_data(doc)
+
+
+def _history_project(tmp_path):
+    """构造 3 步撤销历史：添加 A/B → 移动 B → 再移动 B（相邻快照大量重复）。"""
+    doc = Document()
+    a = make_static_object([Stroke([(0, 0), (10, 10)])], name="A")
+    b = make_static_object([Stroke([(5, 5), (15, 5)])], name="B")
+    doc.add(a)
+    doc.add(b)
+    s0 = _snapshot(doc)
+    b.translate(3.0, 0.0)
+    s1 = _snapshot(doc)
+    b.translate(0.0, 2.0)
+    s2 = _snapshot(doc)
+    entries = [{"text": t, "doc": s}
+               for t, s in (("添加图形", s0), ("移动", s1), ("再移动", s2))]
+    project = ProjectData(document=doc, history=entries)
+    path = tmp_path / "pooled.wsproj"
+    save_project(path, project)
+    return path, entries
+
+
+def test_history_pool_dedup_and_roundtrip(tmp_path):
+    path, entries = _history_project(tmp_path)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    # 池化键存在，旧的全量键不再写出
+    assert "history_refs" in raw and "history_pool" in raw
+    assert "history" not in raw
+    # 3 条快照 × 2 对象 = 6 个对象实例，但对象 A 三条快照内容相同、
+    # B 有 3 个版本 → 池里应只有 4 份唯一数据（A + B0 + B1 + B2）
+    assert len(raw["history_pool"]) == 4
+    assert [len(e["objects"]) for e in raw["history_refs"]] == [2, 2, 2]
+    # 引用序列逐条指向正确的池条目（text/页面对象齐全）
+    assert [e["text"] for e in raw["history_refs"]] == \
+        [e["text"] for e in entries]
+
+    loaded = load_project(path)
+    assert [e["text"] for e in loaded.history] == \
+        [e["text"] for e in entries]
+    for got, want in zip(loaded.history, entries):
+        assert got["doc"]["objects"] == want["doc"]["objects"]
+        assert got["doc"]["page"] == want["doc"]["page"]
+    # 各条目的对象数据相互独立（深拷贝，不共享可变字典）
+    loaded.history[1]["doc"]["objects"][1]["transform"] = ["tampered"]
+    assert loaded.history[2]["doc"]["objects"][1]["transform"] != ["tampered"]
+
+
+def test_history_pool_load_then_undo_restores_state(tmp_path):
+    path, entries = _history_project(tmp_path)
+    loaded = load_project(path)
+
+    from writerstudio.ui.controller import DocumentController
+    ctrl = DocumentController(loaded.document)
+    ctrl.rebuild_history(loaded.history)
+    assert ctrl.can_undo
+    # 日志第 k 条是第 k 条命令执行前的快照：撤销一次回到最后一条快照
+    # （内容与最终状态相同），撤销两次才回到「移动」前的状态
+    ctrl.undo()
+    ctrl.undo()
+    names = [(o.name, tuple(o.transform.as_tuple()))
+             for o in ctrl.doc.objects]
+    prev = entries[1]["doc"]["objects"]
+    assert names == [(o["name"], tuple(o["transform"]))
+                     for o in prev]
+
+
+def test_history_old_full_snapshot_format_still_loads(tmp_path):
+    path, entries = _history_project(tmp_path)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    # 改写回旧版格式：history = 全量快照
+    raw.pop("history_refs")
+    raw.pop("history_pool")
+    raw["history"] = entries
+    old = tmp_path / "old.wsproj"
+    old.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+
+    loaded = load_project(old)
+    assert len(loaded.history) == 3
+    assert loaded.history[2]["doc"]["objects"] == entries[2]["doc"]["objects"]
+
+
+def test_history_pool_corrupt_pool_drops_history_keeps_doc(tmp_path):
+    path, _ = _history_project(tmp_path)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["history_pool"] = "not-a-list"          # 损坏
+    bad = tmp_path / "bad.wsproj"
+    bad.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+    loaded = load_project(bad)
+    assert loaded.history == []
+    assert len(loaded.document.objects) == 2     # 文档本体不受影响
+
+
+def test_history_pool_actually_shrinks_file(tmp_path):
+    """重复快照的去重要有实际效果：多步微移动后文件远小于全量存储。"""
+    doc = Document()
+    objs = [make_static_object([Stroke([(0, 0), (10, 10)])], name=f"o{i}")
+            for i in range(10)]
+    for o in objs:
+        doc.add(o)
+    entries = []
+    for step in range(15):
+        doc.objects[step % 10].translate(0.5, 0.0)
+        entries.append({"text": f"移动{step}", "doc": _snapshot(doc)})
+    path = tmp_path / "many.wsproj"
+    save_project(path, ProjectData(document=doc, history=entries))
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    total_instances = sum(len(e["objects"]) for e in raw["history_refs"])
+    # 15 步 × 10 对象 = 150 个实例，唯一版本 ≈ 10（初始）+ 15（每步动一个）
+    assert total_instances == 150
+    assert len(raw["history_pool"]) <= 25

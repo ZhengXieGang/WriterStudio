@@ -155,8 +155,10 @@ def test_project_roundtrip_with_history(qapp, tmp_path):
     path = tmp_path / "p.wsproj"
     save_project(path, win._collect_project())
     data = json.loads(path.read_text(encoding="utf-8"))
-    assert "history" in data and len(data["history"]) >= 1
-    assert all("doc" in e for e in data["history"])
+    # 新版为池化格式：对象抽进 history_pool 去重，条目按池下标引用
+    assert "history_refs" in data and len(data["history_refs"]) >= 1
+    assert "history_pool" in data and data["history_pool"]
+    assert all("objects" in e and "text" in e for e in data["history_refs"])
 
     # 重新打开：历史恢复、可逐步回撤
     win2 = _win(qapp)

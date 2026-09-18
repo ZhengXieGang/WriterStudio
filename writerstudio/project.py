@@ -25,17 +25,26 @@
       ],
       "machine": {"config": {...}, "start_point": {...}},
       "fonts": {"search_dirs": [...], "preferred": [...]},
-      "history": [{"text": "移动对象：…", "doc": {…快照…}}, ...],
+      "history_pool": [<对象/参考图数据>, ...],
+      "history_refs": [{"text": "移动对象：…", "page": {...},
+                        "objects": [0, 1, ...], "references": [...],
+                        "metadata": {...}}, ...],
       "metadata": {...}
     }
 
-``history`` 是**撤销历史日志**：第 k 项是第 k 条撤销命令执行**前**的文档
-快照（``doc`` = page/objects/references）。打开项目时按日志重放到当前状态，
-关闭程序前的操作仍可逐步回撤。
+``history_refs`` + ``history_pool`` 是**撤销历史日志**：第 k 项是第 k 条
+撤销命令执行**前**的文档状态。相邻快照间绝大多数对象完全相同，因此把
+对象数据抽进 ``history_pool`` 去重（相同内容只存一份），``history_refs``
+按序引用池下标——否则每次小移动都会存一整份文档，文件随操作次数线性
+膨胀（见 ``_history_pool_pack``）。打开项目时还原成逐条完整快照重放到
+当前状态，撤销语义与旧版完全一致。
+旧版的 ``"history": [{"text", "doc"}]`` 全量快照格式仍可读取（见
+``project_from_data``）。
 """
 
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -133,12 +142,84 @@ def project_to_data(project: ProjectData) -> dict:
         },
         "metadata": dict(project.metadata),
     }
-    if project.history:
-        data["history"] = [
-            {"text": str(e.get("text", "")), "doc": e["doc"]}
-            for e in project.history if isinstance(e, dict) and e.get("doc")
-        ]
+    entries = [
+        {"text": str(e.get("text", "")), "doc": e["doc"]}
+        for e in project.history if isinstance(e, dict) and e.get("doc")
+    ]
+    if entries:
+        packed, pool = _history_pool_pack(entries)
+        data["history_refs"] = packed
+        data["history_pool"] = pool
     return data
+
+
+# ---------------------------------------------------------------------------
+# 撤销历史的体积去重：对象池 + 池下标引用
+# ---------------------------------------------------------------------------
+def _history_pool_pack(entries: list[dict[str, Any]]
+                       ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """把逐条全量快照的历史打包成 ``(history_refs, history_pool)``。
+
+    撤销日志的相邻快照之间只有一两个对象不同（每次命令只动一步），
+    全量存储会让文件随操作次数线性膨胀。这里把所有出现过的对象/参考图
+    数据收进池（按内容去重，相同数据只存一份），每条快照只留池下标序列：
+
+        history_refs[k] = {"text", "page", "objects": [池下标...],
+                           "references": [池下标...], "metadata"}
+
+    页面参数与元数据每条单独存（几十字节，不值得进池）。还原见
+    :func:`_history_pool_unpack`。
+    """
+    pool: list[dict[str, Any]] = []
+    index: dict[str, int] = {}
+
+    def _ref(data: dict[str, Any]) -> int:
+        key = json.dumps(data, ensure_ascii=False, sort_keys=True)
+        i = index.get(key)
+        if i is None:
+            i = len(pool)
+            index[key] = i
+            pool.append(data)
+        return i
+
+    packed: list[dict[str, Any]] = []
+    for e in entries:
+        doc = e.get("doc") or {}
+        packed.append({
+            "text": str(e.get("text", "")),
+            "page": doc.get("page", {}),
+            "objects": [_ref(o) for o in doc.get("objects", [])],
+            "references": [_ref(r) for r in doc.get("references", [])],
+            "metadata": doc.get("metadata", {}),
+        })
+    return packed, pool
+
+
+def _history_pool_unpack(packed: list[dict[str, Any]],
+                         pool: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """把池化历史还原成旧式全量快照（``[{"text", "doc"}, ...]``）。
+
+    还原出的对象数据逐份深拷贝——历史各条目会长期驻留在撤销栈日志里，
+    不能共享同一份可变字典（一条命令的重建若原地改动会串染其它条目）。
+    池下标越界按缺失对象跳过（文件损坏时尽量少丢内容）。
+    """
+    n = len(pool)
+    entries: list[dict[str, Any]] = []
+    for e in packed:
+        entries.append({
+            "text": str(e.get("text", "")),
+            "doc": {
+                "page": copy.deepcopy(e.get("page", {})),
+                "objects": [copy.deepcopy(pool[i])
+                            for i in e.get("objects", [])
+                            if isinstance(i, int) and 0 <= i < n],
+                "references": [copy.deepcopy(pool[i])
+                               for i in e.get("references", [])
+                               if isinstance(i, int) and 0 <= i < n],
+                "metadata": dict(e.get("metadata", {})),
+            },
+        })
+    return entries
 
 
 def doc_to_data(doc: Document) -> dict:
@@ -229,6 +310,24 @@ def project_from_data(data: dict) -> ProjectData:
 
     mach = data.get("machine", {})
     fonts = data.get("fonts", {})
+    # 撤销历史：新版为池化格式（history_refs + history_pool），
+    # 旧版为逐条全量快照（history），两者都能读。
+    # 池缺失/损坏时整体放弃历史——半份池会让撤销重放出空文档，
+    # 比没有历史危险得多；文档本体不受影响。
+    if isinstance(data.get("history_refs"), list):
+        pool = data.get("history_pool")
+        if isinstance(pool, list):
+            try:
+                history = _history_pool_unpack(
+                    [e for e in data["history_refs"] if isinstance(e, dict)],
+                    [o for o in pool if isinstance(o, dict)])
+            except Exception:
+                history = []
+        else:
+            history = []
+    else:
+        history = [e for e in data.get("history", [])
+                   if isinstance(e, dict) and e.get("doc")]
     return ProjectData(
         document=doc,
         machine_config=GCodeConfig.from_data(mach.get("config")),
@@ -236,8 +335,7 @@ def project_from_data(data: dict) -> ProjectData:
         search_dirs=list(fonts.get("search_dirs", [])),
         preferred_fonts=list(fonts.get("preferred", [])),
         metadata=dict(data.get("metadata", {})),
-        history=[e for e in data.get("history", [])
-                 if isinstance(e, dict) and e.get("doc")],
+        history=history,
     )
 
 

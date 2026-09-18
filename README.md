@@ -68,9 +68,6 @@ GRBL 写字机上位机软件。文字、表格、LaTeX公式、TikZ、SVG矢量
 | macOS | `WriterStudio.app/Contents/MacOS/WriterStudioMCP` |
 | 源码运行 | `writerstudio-mcp`，或 `python -m writerstudio.ai.bridge`（需 `pip install mcp`） |
 
-之后对 AI 说「帮我排一页物理实验报告」即可；试运行样例：
-`python scripts/ai_layout_demo.py`（需先打开软件）。
-
 ## 许可
 
 本软件：GPL-3.0-or-later，详见 [LICENSE](LICENSE)。
