@@ -166,7 +166,9 @@ jobs:
           cat > /tmp/relnotes.md <<'EOF'
           ## 下载
 
-          - **Windows**：`WriterStudio.exe` —— 下载后双击运行，免安装
+          - **Windows**：`WriterStudio.exe` —— 下载后双击运行，免安装；
+            `WriterStudioMCP.exe` 为 AI 智能排版（MCP）桥，无需运行，
+            在 AI 应用的 MCP 配置里引用即可（用法见 README）
           - **macOS**：`WriterStudio-macos.zip` —— 解压后将 WriterStudio.app 拖入「应用程序」
           - **Linux**：`WriterStudio-x86_64.AppImage`（下载后 `chmod +x` 直接运行）
             或 `WriterStudio-linux64.tar.gz`

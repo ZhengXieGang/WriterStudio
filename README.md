@@ -10,6 +10,7 @@ GRBL 写字机上位机软件。文字、表格、LaTeX公式、TikZ、SVG矢量
 | 平台 | 文件 | 用法 |
 |------|------|------|
 | Windows | `WriterStudio.exe` | 下载后双击运行，免安装 |
+| Windows | `WriterStudioMCP.exe` | AI 智能排版（MCP）桥，无需运行；供 AI 应用的 MCP 配置引用，见[下文](#ai-智能排版mcp) |
 | macOS | `WriterStudio-macos.zip` | 解压后将 WriterStudio.app 拖入「应用程序」 |
 | Linux | `WriterStudio-x86_64.AppImage` | 下载后 `chmod +x` 直接运行 |
 
@@ -45,30 +46,39 @@ GRBL 写字机上位机软件。文字、表格、LaTeX公式、TikZ、SVG矢量
 
 ## AI 智能排版（MCP）
 
-让AI Agent 直接在软件里完成整页排版：手写文字、数据表格、
-坐标系图、公式，排版结果可直接发送打印。所有修改都在软件里可撤销。
+让 AI Agent（Claude Desktop、Cline 等支持 MCP 的应用）直接在软件里完成
+整页排版：手写文字、数据表格、坐标系图、公式，排版结果可直接发送打印。
+所有修改都在软件里可撤销。
 
-**启用**：软件菜单「AI 排版 → AI 服务设置…」确认服务开启（默认开启，
-仅监听本机 127.0.0.1），把下面的配置（端口以对话框显示为准）加入 AI 应用
-的 MCP 配置——`command` 按你使用的版本二选一：
+**工作方式**：软件内嵌一个仅监听本机（127.0.0.1:8765）的服务，MCP 客户端
+再通过一个「桥」进程接入。桥只是一个无界面的翻译器，必须配合**打开着的
+WriterStudio** 使用；它随软件一同分发，各平台的获取方式：
+
+| 平台 | 桥在哪 | MCP 配置写法 |
+|------|--------|--------------|
+| Windows | Release 页单独下载 `WriterStudioMCP.exe`，放到固定目录 | `"command": "C:\\Tools\\WriterStudioMCP.exe"` |
+| Linux AppImage | 已内置，无需额外下载 | `"command": "/你的路径/WriterStudio-x86_64.AppImage"`，`args` 前加 `"--mcp"` |
+| macOS | app 包内：`/Applications/WriterStudio.app/Contents/MacOS/WriterStudioMCP` | `"command"` 填该完整路径 |
+| 源码运行 | `pip install '.[ai]'` 后得到 `writerstudio-mcp` 命令 | 或 `"python -m writerstudio.ai.bridge"` |
+
+以 Windows 为例，加入 AI 应用的 MCP 配置（端口以软件「AI 排版 →
+AI 服务设置…」对话框显示为准，默认 8765）：
 
 ```json
 {
   "mcpServers": {
     "writerstudio": {
-      "command": "WriterStudioMCP.exe",
+      "command": "C:\\Tools\\WriterStudioMCP.exe",
       "args": ["--port", "8765"]
     }
   }
 }
 ```
 
-| 安装方式 | `command` 写法 |
-|----------|----------------|
-| Windows 发行版 | Release 里与主程序一同下载的 `WriterStudioMCP.exe` |
-| Linux AppImage | AppImage 文件路径，`args` 前加 `"--mcp"` |
-| macOS | `WriterStudio.app/Contents/MacOS/WriterStudioMCP` |
-| 源码运行 | `writerstudio-mcp`，或 `python -m writerstudio.ai.bridge`（需 `pip install mcp`） |
+Linux AppImage 的 `args` 则是 `["--mcp", "--port", "8765"]`。配置好后
+Agent 可用 18 个工具：查页面/字体/对象，添加文本/Markdown/TikZ/公式，
+移动/变换/删除，`check_layout` 布局自检，`render_preview` 渲染自查，
+导出 G-code，打开/保存项目。
 
 ## 许可
 
