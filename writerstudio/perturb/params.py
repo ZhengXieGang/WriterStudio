@@ -65,8 +65,11 @@ class PerturbParams:
                                          # 两端各随机剪掉 0..该值，长短参差
 
     # -- 线条起伏（矢量/手绘线条的「手抖」效果） -----------------------------
-    line_wobble: float = 0.0             # 沿线法向的整体偏离幅度 (mm)：弓形 +
-                                         # 分段换劲 + 多尺度噪声的合成
+    #: 沿线法向的整体偏离幅度 (mm)：弓形 + 分段换劲 + 多尺度噪声的合成。
+    # 只作用于**图形线条**（表格线/边框/矢量线/公式结构线；字形笔画跳过），
+    # 所以是绝对毫米值，不随字号缩放——人在纸上画一条 15mm 的直线，偏离
+    # 弦线大约 0.2~0.5mm，与他当时写的字多大无关。预设给的也是这个量级。
+    line_wobble: float = 0.0
     line_wobble_wavelength: float = 20.0  # 起伏尺度 (mm)：同时决定分段长度
     line_tremor: float = 0.0             # 微颤振幅 (mm)：快写时的轻微不稳。
                                          # 真实手绘几乎看不出颤抖，按纹理理解，
@@ -170,9 +173,9 @@ class PerturbParams:
         p.char_shear_sigma = 2.0       # 体态各异的「歪斜感」
         p.stroke_stretch_sigma = 0.05
         p.stroke_trim_mm = size_mm * 0.03
-        p.line_wobble = size_mm * 0.02
-        p.line_wobble_wavelength = size_mm * 6.0
-        p.line_tremor = size_mm * 0.0015
+        p.line_wobble = 0.35
+        p.line_wobble_wavelength = 13.0
+        p.line_tremor = 0.035
         p.smoothing = 0.15
         return p
 
@@ -196,9 +199,9 @@ class PerturbParams:
         p.char_shear_sigma = 0.8
         p.stroke_stretch_sigma = 0.02
         p.stroke_trim_mm = size_mm * 0.012
-        p.line_wobble = size_mm * 0.008
-        p.line_wobble_wavelength = size_mm * 8.0
-        p.line_tremor = size_mm * 0.0008
+        p.line_wobble = 0.18
+        p.line_wobble_wavelength = 16.0
+        p.line_tremor = 0.020
         p.smoothing = 0.1
         return p
 
@@ -224,9 +227,9 @@ class PerturbParams:
         p.char_shear_sigma = 4.5
         p.stroke_stretch_sigma = 0.11
         p.stroke_trim_mm = size_mm * 0.06
-        p.line_wobble = size_mm * 0.04
-        p.line_wobble_wavelength = size_mm * 4.0
-        p.line_tremor = size_mm * 0.003
+        p.line_wobble = 0.75
+        p.line_wobble_wavelength = 9.0
+        p.line_tremor = 0.060
         p.smoothing = 0.2
         return p
 

@@ -22,7 +22,7 @@ from writerstudio.perturb.engine import (
     smooth_stroke,
     wobble_strokes,
 )
-from writerstudio.perturb.params import PerturbParams
+from writerstudio.perturb.params import PRESETS, PerturbParams
 
 
 # ------------------------------------------------------------------ 夹具
@@ -647,6 +647,48 @@ def test_structural_lines_keep_endpoints():
     for src, dst in zip(grid, out):
         assert dst.points[0] == pytest.approx(src.points[0], abs=1e-9)
         assert dst.points[-1] == pytest.approx(src.points[-1], abs=1e-9)
+
+
+def _max_chord_deviation(stroke: Stroke) -> float:
+    """折线各点到首末点连线的最大垂距（mm）。"""
+    p = stroke.points
+    x0, y0 = p[0]
+    x1, y1 = p[-1]
+    length = math.hypot(x1 - x0, y1 - y0)
+    if length < 1e-9:
+        return 0.0
+    return max(abs((x1 - x0) * (y0 - y) - (x0 - x) * (y1 - y0)) / length
+               for x, y in p)
+
+
+def test_preset_line_wobble_is_visible_on_table_lines():
+    """自带预设应用到表格线后，线的弯曲必须**看得出来**。
+
+    历史问题：图形线条的起伏按字号缩放（自然预设 = 字号×0.02），5mm 字号
+    的表格只有 0.1mm ——比笔迹宽度还细，用户把预设应用到表格后看着和没
+    加一样（表格线真正的「手绘感」来自 markdown 自己的线端抖动）。现在
+    预设按绝对毫米给（0.18/0.35/0.75mm），与字号无关。
+    """
+    grid = _table_grid()
+    for name, factory in sorted(PRESETS.items()):
+        if factory is None or name == "手绘线条":   # 「关闭」；手绘线条按对象尺寸另算
+            continue
+        p = factory(5.0)
+        # 图形线条的起伏是绝对毫米量：与字号无关（按字号缩放正是老 bug）
+        assert factory(3.0).line_wobble == p.line_wobble, name
+        assert factory(12.0).line_wobble == p.line_wobble, name
+        # 5mm 字号下也要有肉眼可见的弯曲（约半个笔迹宽度 0.35mm 的量级）
+        assert p.line_wobble >= 0.15, (name, p.line_wobble)
+        out = perturb_strokes(grid, p)
+        devs = [_max_chord_deviation(s) for s in out]
+        assert max(devs) >= p.line_wobble * 0.4, (name, devs)
+        assert max(devs) <= p.line_wobble * 1.05 + 1e-6, (name, devs)
+
+
+def test_preset_line_wobble_is_invisible_without_preset():
+    """没启用扰动时表格线保持笔直（预设不是「默认就抖」）。"""
+    out = perturb_strokes(_table_grid(), PerturbParams())
+    assert all(_max_chord_deviation(s) == 0.0 for s in out)
 
 
 def test_structural_lines_have_whole_waves():
