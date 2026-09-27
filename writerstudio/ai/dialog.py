@@ -39,6 +39,15 @@ command 用 "python"，args 用 ["-m", "writerstudio.ai.bridge",
 服务只监听本机(127.0.0.1)，AI 修改的内容全部可在软件里撤销。"""
 
 
+def _fill(text: str, port: int) -> str:
+    """替换模板中的 ``{port}`` 占位符。
+
+    配置模板就是 JSON 正文，含大量字面花括号，不能用 ``str.format``
+    （它会把 JSON 的 ``{`` 当占位符解析、抛 KeyError），只能做字面替换。
+    """
+    return text.replace("{port}", str(port))
+
+
 class AiServiceDialog(QDialog):
     """AI 排版服务（MCP）状态与配置。"""
 
@@ -83,7 +92,9 @@ class AiServiceDialog(QDialog):
         copy_row.addWidget(copy_btn)
         layout.addLayout(copy_row)
 
-        note = QLabel(_CONFIG_NOTE, self)
+        note = QLabel(_fill(_CONFIG_NOTE, self._win.settings.ai_service_port()),
+                      self)
+        self._note = note
         note.setWordWrap(True)
         note.setStyleSheet("color: #888;")
         layout.addWidget(note)
@@ -104,7 +115,8 @@ class AiServiceDialog(QDialog):
         else:
             self._status.setText("状态：已停止")
         self._config.setPlainText(
-            _CONFIG_TEMPLATE.format(port=port) + "\n" + _CONFIG_NOTE)
+            _fill(_CONFIG_TEMPLATE, port) + "\n" + _fill(_CONFIG_NOTE, port))
+        self._note.setText(_fill(_CONFIG_NOTE, port))
 
     def _apply(self) -> None:
         st: Settings = self._win.settings
@@ -117,5 +129,5 @@ class AiServiceDialog(QDialog):
     def _copy_config(self) -> None:
         from PySide6.QtWidgets import QApplication
         QApplication.clipboard().setText(
-            _CONFIG_TEMPLATE.format(port=self._port.value()))
+            _fill(_CONFIG_TEMPLATE, self._port.value()))
         self._status.setText("已复制 MCP 客户端配置到剪贴板")
