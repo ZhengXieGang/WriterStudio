@@ -714,6 +714,31 @@ def test_isolated_long_line_still_perturbed_normally():
     assert out.bbox().width != pytest.approx(100.0, abs=1.0)
 
 
+def test_tagged_structure_line_ignores_junction_geometry():
+    """显式标注的结构线按结构线处理，不依赖端点相接的几何判定。
+
+    回归：markdown 表格自带的线端随机会把本应相交的端点推到判定容差
+    之外，同一种表格里少数几条线因此没被认成结构线、被整体旋转几度，
+    成了网格里「莫名其妙歪掉的那一条」。标注后判定与几何无关：再短、
+    再孤立的标注线也按结构线处理。
+    """
+    from writerstudio.core.strokes import ROLE_STRUCTURE
+    from writerstudio.perturb.engine import _is_structural_strokes
+
+    tagged = Stroke([(0.0, 0.0), (3.0, 0.0)], False, ROLE_STRUCTURE)
+    plain = Stroke([(0.0, 0.0), (3.0, 0.0)], False, "")
+    assert _is_structural_strokes([tagged]) == [True]
+    assert _is_structural_strokes([plain]) == [False]
+
+    p = PerturbParams(enabled=True, seed=9, stroke_theta_sigma=6.0,
+                      stroke_x_sigma=0.4, stroke_y_sigma=0.4,
+                      stroke_stretch_sigma=0.2, stroke_trim_mm=1.5,
+                      line_wobble=0.4)
+    out = perturb_strokes([tagged], p)[0]
+    assert out.points[0] == pytest.approx((0.0, 0.0), abs=1e-9)
+    assert out.points[-1] == pytest.approx((3.0, 0.0), abs=1e-9)
+
+
 # ===================================================== 任意对象的扰动
 def test_apply_perturb_works_on_equation(manager_fixture=None):
     from writerstudio.content.builder import make_equation_object

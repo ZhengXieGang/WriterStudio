@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from writerstudio.core.geometry import AffineTransform
-from writerstudio.core.strokes import Stroke
+from writerstudio.core.strokes import ROLE_STRUCTURE, Stroke
 from writerstudio.content.builder import (
     SOURCE_EQUATION,
     SOURCE_MARKDOWN,
@@ -250,6 +250,10 @@ def test_markdown_table_auto_respects_wrap_width(fonts):
 _MD_TABLE = ("| ab | cd | ef |\n|:--|:--|:--|\n"
              "| gh | ij | kl |\n| mn | op | qr |\n")
 
+# 合并单元格表格：中间两格并入上一行，行界被合并区切成两段
+_MD_TABLE_SPLIT = ("| aa | bb | cc | dd |\n|:--|:--|:--|:--|\n"
+                   "| ^^ | xx | ^^ | yy |\n| ee | ff | gg | hh |\n")
+
 
 def _hlines(result):
     """表格横线（2 点、两端 y 相近、非零长度）。"""
@@ -292,6 +296,81 @@ def test_table_end_jitter_offsets_and_tilts_lines(fonts):
     assert any(x < -1e-6 or x > total + 1e-6 for pts in hs for x, _ in pts)
     # 微倾：存在两端 y 不同的横线（垂直分量生效）
     assert any(abs(pts[0][1] - pts[1][1]) > 1e-6 for pts in hs)
+
+
+def _grid_strokes(result):
+    """表格网格线/分隔线（带结构线标记的两点直线）。"""
+    return [s for s in result.strokes if s.role == ROLE_STRUCTURE]
+
+
+def test_table_and_rules_marked_structural(fonts):
+    """表格线、水平线、引述竖线带结构线标记；文字笔画不受影响。"""
+    r = render_markdown("| ab | cd |\n|:--|:--|\n| ef | gh |\n\n---\n\n"
+                        "> quote here\n", fonts, MarkdownStyle(size=5))
+    struct = _grid_strokes(r)
+    horiz = [s for s in struct
+             if abs(s.points[1][0] - s.points[0][0])
+             > abs(s.points[1][1] - s.points[0][1])]
+    vert = [s for s in struct
+            if abs(s.points[1][1] - s.points[0][1])
+            > abs(s.points[1][0] - s.points[0][0])]
+    # 表格 2 行 2 列 → 3 条行界 + 3 条列界；外加水平线与引述竖线各一条
+    assert len(horiz) == 3 + 1
+    assert len(vert) == 3 + 1
+    assert all(s.role == "glyph" for s in r.strokes if s.role == "glyph")
+    assert all(s.role != ROLE_STRUCTURE for s in r.strokes
+               if s.role == "glyph")
+
+
+def test_table_grid_lines_not_rotated_by_perturb(fonts):
+    """表格线开启扰动后端点与方向原样保留（不整笔旋转 → 不会莫名倾斜）。
+
+    回归：结构线判定原先只看「端点相接」——表格自带的线端随机把本应相交
+    的端点推到判定容差之外，同一种表格里少数几条线没被认成结构线，被整体
+    旋转几度，成了端端正正的网格里「莫名其妙歪掉的那一条」。
+    """
+    src = _MD_TABLE + "\n" + _MD_TABLE_SPLIT
+    r = render_markdown(src, fonts, MarkdownStyle(size=5))
+    grid = _grid_strokes(r)
+    assert len(grid) > 4
+    p = PerturbParams.natural(5.0, seed=20240910)
+    from writerstudio.perturb.engine import perturb_strokes
+    out = perturb_strokes(list(r.strokes), p)
+    for src_s, dst in zip(r.strokes, out):
+        if src_s.role != ROLE_STRUCTURE:
+            continue
+        assert dst.points[0] == pytest.approx(src_s.points[0], abs=1e-9)
+        assert dst.points[-1] == pytest.approx(src_s.points[-1], abs=1e-9)
+
+
+def test_merged_table_runs_of_one_boundary_stay_collinear(fonts):
+    """被合并区切成多段的同一条行界仍在同一条直线上（不只方向相同）。
+
+    回归：每段各取一次线端随机，同一条界线的两段会一段一个斜率、接缝处
+    还错开零点几毫米，看上去就是「莫名其妙歪掉的那一截」。
+    """
+    import math
+
+    r = render_markdown(_MD_TABLE_SPLIT, fonts, MarkdownStyle(size=5))
+    hs = [s for s in _grid_strokes(r)
+          if abs(s.points[1][0] - s.points[0][0]) > 1.0]
+    assert len(hs) > 3                  # 行界确实被切成了多段
+    # 按中点高度聚成「同一条行界」（行距 4.5mm，阈值 2mm 足够分辨）
+    groups: list[list] = []
+    for s in sorted(hs, key=lambda s: (s.points[0][1] + s.points[1][1]) / 2):
+        mid = (s.points[0][1] + s.points[1][1]) / 2
+        if groups and abs(mid - groups[-1][0]) < 2.0:
+            groups[-1][1].append(s)
+        else:
+            groups.append([mid, [s]])
+    split = [g for _mid, g in groups if len(g) > 1]
+    assert split                        # 存在被切成多段的行界
+    for runs in split:
+        (x0, y0), (x1, y1) = runs[0].points
+        for s in runs[1:]:
+            for x, y in s.points:
+                dev = abs((x1 - x0) * (y0 - y) - (x0 - x) * (y1 - y0))
+                assert dev / math.hypot(x1 - x0, y1 - y0) < 1e-9
 
 
 def test_table_row_jitter_moves_internal_boundaries_only(fonts):
@@ -830,18 +909,22 @@ def test_markdown_style_char_spacing_serialization():
 
 
 def test_markdown_glyph_and_rule_roles(fonts):
-    """Markdown：字形笔画带 glyph 标记，表格线未标记。
+    """Markdown：文字笔画带 glyph 标记，表格线带结构线标记。
 
-    线条起伏（弯折）只作用于未标记的图形线条，文字笔画不弯折。
+    两个标记各自对应扰动引擎的一种处理：字形笔画不做线条起伏（文字形态
+    由字体决定），结构线不做整笔刚性变换（那会让线从角上被撕开）。
     """
     r = render_markdown(
         "# 标题 Head\n\n| 甲 A | 乙 B |\n| --- | --- |\n| 1 | 2 |\n",
         fonts, MarkdownStyle(size=5))
     assert any(s.role == "glyph" for s in r.strokes)     # 文字笔画已标记
-    rules = [s for s in r.strokes if s.role == ""]
-    assert rules                                          # 表格线未标记
-    # 未标记笔画应包含长的水平线（表格横线），而非只有字形残余
+    rules = [s for s in r.strokes if s.role == ROLE_STRUCTURE]
+    assert rules                                          # 表格线带结构线标记
+    # 结构线应包含长的水平线（表格横线），而非只有字形残余
     assert any(s.bbox().width >= 9.0 for s in rules)
+    # 两种标记互斥：字形笔画不会被当成结构线
+    assert not any(s.role == ROLE_STRUCTURE for s in r.strokes
+                   if s.role == "glyph")
 
 
 # ==================================== 手工笔画编辑层

@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import Iterable, Optional, Sequence
 
 from ..core.geometry import AffineTransform, Vec2, rdp_simplify
-from ..core.strokes import Stroke
+from ..core.strokes import ROLE_GLYPH, ROLE_STRUCTURE, Stroke
 from .params import PerturbParams
 
 
@@ -414,19 +414,28 @@ def _hash_junctions(strokes: Sequence[Stroke],
 def _is_structural_strokes(strokes: Sequence[Stroke]) -> list[bool]:
     """逐笔判断是否为「结构长线」（表格线/边框/下划线等）。
 
-    判据：非字形、长度 ≥ :data:`_STRUCTURAL_MIN_MM`，且通过端点相接
-    与另一条同类线连通。单独一条长线没有可被撕开的接缝，整体旋转反而
-    能带来自然的手写变化，应照常处理（返回 False）。
+    两类来源：
+
+    * 排版器显式标注的（``role=ROLE_STRUCTURE``）：表格网格、分隔线、
+      引述竖线。这些线由排版器自己画、连线关系是已知的，直接按结构线
+      处理，不依赖几何判定。
+    * 未标注的长线：长度 ≥ :data:`_STRUCTURAL_MIN_MM`，且通过端点相接
+      与另一条同类线连通。单独一条长线没有可被撕开的接缝，整体旋转反而
+      能带来自然的手写变化，应照常处理（返回 False）。
+
+    端点相接的几何判定只对未标注线生效，是因为它靠不住：表格自带的线端
+    随机（``table_end_jitter``）会把本应相交的端点推开到容差之外，同一条
+    线判不判得成结构线全看那一把随机数——没判成的线被整体旋转几度，在
+    一张端端正正的表格里就是「莫名其妙歪掉的那一条」。
 
     实测：markdown 表格开启扰动后，网格线被各自整体旋转/平移，端点从
     交叉处错开，看起来像「沿正弦波斜切」而非手绘——正是这类互相连接的
     长线被当作字形笔画做了刚性变换。
     """
-    n = len(strokes)
-    flags = [False] * n
+    flags = [s.role == ROLE_STRUCTURE for s in strokes]
     candidate = [
         i for i, s in enumerate(strokes)
-        if s.role != "glyph" and len(s.points) >= 2
+        if not flags[i] and s.role != ROLE_GLYPH and len(s.points) >= 2
         and s.length() >= _STRUCTURAL_MIN_MM
     ]
     if len(candidate) < 2:
@@ -619,7 +628,7 @@ def _finish_stroke(s: Stroke, rng: random.Random, params: PerturbParams,
     只保留平滑起伏，且起伏波长收敛到线长以内，短线上也有完整波形。
     随机数仍照常取用，保证序列不受分类影响。
     """
-    is_glyph = s.role == "glyph"
+    is_glyph = s.role == ROLE_GLYPH
     f = params.intensity_factor
     stretch = _gauss(rng, params.stroke_stretch_sigma * f)
     trim = _scaled(params.stroke_trim_mm, params)
@@ -850,6 +859,6 @@ def wobble_strokes(strokes: Iterable[Stroke], amplitude: float,
     if amplitude <= 0.0 and tremor <= 0.0:
         return [s.clone() for s in strokes]
     rng = random.Random(seed if seed is not None else 0)
-    return [s.clone() if s.role == "glyph"
+    return [s.clone() if s.role == ROLE_GLYPH
             else _wobble_stroke(s, rng, amplitude, wavelength, octaves, tremor)
             for s in strokes]

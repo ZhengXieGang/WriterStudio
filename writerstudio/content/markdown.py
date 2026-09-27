@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Sequence
 
 from ..core.geometry import BBox
-from ..core.strokes import Stroke
+from ..core.strokes import ROLE_STRUCTURE, Stroke
 from ..fonts.layout import (
     ALIGN_LEFT,
     TextStyle,
@@ -548,7 +548,9 @@ class _Renderer:
             self._emit_line(line, size, ind)
         bottom = self.y
         x = ind * 0.4
-        self.strokes.append(Stroke([(x, top - size * 0.4), (x, bottom + size * 0.4)]))
+        self.strokes.append(Stroke([(x, top - size * 0.4),
+                                    (x, bottom + size * 0.4)],
+                                   role=ROLE_STRUCTURE))
         self.blocks.append("quote")
 
     def code_block(self, code: str) -> None:
@@ -561,12 +563,21 @@ class _Renderer:
     def hr(self) -> None:
         size = self.style.size
         y = self.y - size * 0.5
-        self.strokes.append(Stroke([(0.0, y), (self.style.wrap_width, y)]))
+        self.strokes.append(Stroke([(0.0, y), (self.style.wrap_width, y)],
+                                   role=ROLE_STRUCTURE))
         self.y = y - size * 0.5
         self.blocks.append("hr")
 
     def table(self, header: list[str], rows: list[list[str]],
               aligns: list[str]) -> None:
+        """排一张表格。
+
+        合并单元格：单元格内容只写 ``<<`` 表示并入左邻格（跨列），只写
+        ``^^`` 表示并入上邻格（跨行）——两层表头（如「透镜位置/cm」横跨
+        x1、x2，两行高的「次数」）与末行「平均焦距 | f̄=…」都靠它拼出来。
+        合并区在列宽、行高、画线与文字各步都当一个格子处理，格线不会
+        穿过合并区。
+        """
         size = self.style.size
         # 列数取表头/各行最大值：短行补空、长行扩列，内容不静默丢弃
         ncol = max([len(header)] + [len(r) for r in rows])
@@ -578,24 +589,64 @@ class _Renderer:
         rng = random.Random((int(self.style.table_seed) * 1000003
                              + self._table_n * 7919) & 0xFFFFFFFF)
         self._table_n += 1
+        # 0) 合并单元格 → 矩形合并区（r0/r1/c0/c1 闭区间）。`<<` 并左、
+        # `^^` 并上，且只认「紧邻」的格子（左邻区右界正好在本格左边、
+        # 上邻区下界正好在本格上边），越界或够不着的标记当普通文字。
+        nrow = len(all_rows)
+        reg_of: list[list[int]] = [[-1] * ncol for _ in range(nrow)]
+        regions: list[dict] = []
+
+        def _new_reg(r: int, c: int, text: str) -> int:
+            reg_of[r][c] = len(regions)
+            regions.append({"r0": r, "r1": r, "c0": c, "c1": c, "text": text})
+            return len(regions) - 1
+
+        for r in range(nrow):
+            row_cells = all_rows[r]
+            for c in range(ncol):
+                raw = (row_cells[c] if c < len(row_cells) else "").strip()
+                if raw == "<<" and c > 0:
+                    p = reg_of[r][c - 1]
+                    if p >= 0 and regions[p]["r1"] == r \
+                            and regions[p]["c1"] == c - 1:
+                        regions[p]["c1"] = c
+                        reg_of[r][c] = p
+                        continue
+                elif raw == "^^" and r > 0:
+                    p = reg_of[r - 1][c]
+                    if p >= 0 and regions[p]["r1"] == r - 1:
+                        regions[p]["r1"] = r
+                        reg_of[r][c] = p
+                        continue
+                _new_reg(r, c, raw)
         # 1) 自然列宽（按最宽单元格 + 两侧内边距）与最小列宽（放得下一个字）
-        natural: list[float] = []
-        mins: list[float] = []
-        for c in range(ncol):
-            w = 0.0
-            widest_char = 0.0
-            for r in all_rows:
-                if c < len(r):
-                    txt = _strip_inline(r[c])
-                    # 列宽按**实际排出来的宽度**量：行内公式按渲染后的
-                    # 包围盒（原始 `$\sum…$` 文本宽度跟成品差很远，按它定
-                    # 列宽会让公式格永远「放不下」）
-                    w = max(w, _segments_width(_cell_segments(r[c]),
-                                               self.fonts, ls, size))
-                    widest_char = max(widest_char,
-                                      _widest_char_width(txt, self.fonts, ls))
-            natural.append(w + 2 * CELL_PAD_MM)
-            mins.append(max(widest_char, size * 0.6) + 2 * CELL_PAD_MM)
+        natural = [0.0] * ncol
+        mins = [0.0] * ncol
+        for reg in regions:
+            txt = _strip_inline(reg["text"])
+            # 列宽按**实际排出来的宽度**量：行内公式按渲染后的
+            # 包围盒（原始 `$\sum…$` 文本宽度跟成品差很远，按它定
+            # 列宽会让公式格永远「放不下」）
+            w = _segments_width(_cell_segments(reg["text"]),
+                                self.fonts, ls, size)
+            reg["need"] = w + 2 * CELL_PAD_MM
+            reg["minw"] = (max(_widest_char_width(txt, self.fonts, ls),
+                               size * 0.6) + 2 * CELL_PAD_MM)
+            if reg["c0"] == reg["c1"]:
+                natural[reg["c0"]] = max(natural[reg["c0"]], reg["need"])
+                mins[reg["c0"]] = max(mins[reg["c0"]], reg["minw"])
+        # 跨列区：本区放不下的宽度摊到各列（两轮足够——合并区互不重叠，
+        # 一轮摊完，第二轮兜住首轮撑宽后仍不够的极端情形）
+        for _ in range(2):
+            for reg in regions:
+                if reg["c0"] == reg["c1"] or reg["need"] <= 0:
+                    continue
+                span = reg["c1"] - reg["c0"] + 1
+                avail = sum(natural[reg["c0"]:reg["c1"] + 1])
+                if avail < reg["need"]:
+                    add = (reg["need"] - avail) / span
+                    for c in range(reg["c0"], reg["c1"] + 1):
+                        natural[c] += add
         # 2) 宽度限制：显式表格宽度（拖手柄）精确贴合；否则不超过换行宽度
         explicit = self.style.table_width > 0
         max_total = self.style.table_width if explicit else self.style.wrap_width
@@ -625,31 +676,41 @@ class _Renderer:
         # 3) 每格按列内宽折行 → 行高取该行最高单元格。含行内公式（$…$）
         # 的单元格按「文字 + 公式」混排（公式与正文同一支笔，整块不可拆，
         # 放不下就换行）；公式墨迹的上下缘另记，供绘制时在行内垂直居中。
-        cell_lines: list[list[list[list[tuple[str, bool]]]]] = []
-        cell_math: dict[tuple[int, int, int], tuple[float, float]] = {}
-        row_heights: list[float] = []
-        for r, _row in enumerate(all_rows):
-            lines_row: list[list[list[tuple[str, bool]]]] = []
-            nlines = 1
+        # 合并区按整块宽度折行、整块高度占位（跨行的区不够高时把差额
+        # 摊给被跨的几行）。
+        cell_lines: dict[int, list] = {}
+        cell_math: dict[tuple[int, int], tuple[float, float]] = {}
+        row_heights = [0.0] * nrow
+        spans: list[tuple[int, float]] = []
+        for p, reg in enumerate(regions):
+            inner = max(1.0, sum(col_widths[reg["c0"]:reg["c1"] + 1])
+                        - 2 * CELL_PAD_MM)
+            segs = _cell_segments(reg["text"])
+            ls_cell = _wrap_segments(segs, self.fonts, ls, size, inner)
+            cell_lines[p] = ls_cell
             tall = 0.0
-            for c in range(ncol):
-                inner = max(1.0, col_widths[c] - 2 * CELL_PAD_MM)
-                segs = _cell_segments(_row[c]) if c < len(_row) else []
-                ls_cell = _wrap_segments(segs, self.fonts, ls, size, inner)
-                lines_row.append(ls_cell)
-                nlines = max(nlines, len(ls_cell))
-                # 带上下限的公式（∑ ∫）比一行字高得多，行高得让它装得下
-                for k, ln in enumerate(ls_cell):
-                    for seg, is_math in ln:
-                        if not is_math:
-                            continue
-                        box = _math_bbox(seg, size, self.fonts)
-                        if box.is_empty:
-                            continue
-                        tall = max(tall, box.height + size * 0.3)
-                        cell_math[(r, c, k)] = (box.y0, box.y1)
-            cell_lines.append(lines_row)
-            row_heights.append(max(nlines * lh, tall))
+            # 带上下限的公式（∑ ∫）比一行字高得多，行高得让它装得下
+            for k, ln in enumerate(ls_cell):
+                for seg, is_math in ln:
+                    if not is_math:
+                        continue
+                    box = _math_bbox(seg, size, self.fonts)
+                    if box.is_empty:
+                        continue
+                    tall = max(tall, box.height + size * 0.3)
+                    cell_math[(p, k)] = (box.y0, box.y1)
+            need = max(len(ls_cell) * lh, tall)
+            if reg["r0"] == reg["r1"]:
+                row_heights[reg["r0"]] = max(row_heights[reg["r0"]], need)
+            else:
+                spans.append((p, need))
+        for p, need in spans:
+            reg = regions[p]
+            have = sum(row_heights[reg["r0"]:reg["r1"] + 1])
+            if have < need:
+                add = (need - have) / (reg["r1"] - reg["r0"] + 1)
+                for r in range(reg["r0"], reg["r1"] + 1):
+                    row_heights[r] += add
 
         # 4) 表格线（可变行高 + 随机化）
         # 线端随机化：两端沿轴向各自平移（高斯 σ=线端偏移），并按上限
@@ -695,63 +756,131 @@ class _Renderer:
                     ys[i] = ys[i - 1] - min_h
             if ys[-2] < ys[-1] + min_h:
                 ys[-2] = ys[-1] + min_h
-            row_heights = [ys[r] - ys[r + 1] for r in range(len(all_rows))]
-        # 记录每条行界的实际线段（含端点随机的微倾/位移）：单元格文字
-        # 随后逐字符贴着所属行的底界线段走。RNG 消耗顺序与随机化参数
-        # 完全一致——线本身的随机效果不受文字跟随影响。
-        hsegs: dict[int, tuple] = {}
-        for i, yy in enumerate(ys):
-            seg = _jline((0.0, yy), (total_w, yy))
-            hsegs[i] = (seg[0], seg[1])
-            self.strokes.append(Stroke([seg[0], seg[1]]))
-        for x in col_x:
-            self.strokes.append(Stroke(_jline((x, top), (x, bottom))))
-        self.strokes.append(Stroke(_jline((total_w, top), (total_w, bottom))))
+            row_heights = [ys[r] - ys[r + 1] for r in range(nrow)]
+        # 跨行区被随机化挤矮了：把区域底界（含）以下的边界整体下推，
+        # 补回该区应有的高度，之下各行高度不变
+        for p, need in spans:
+            reg = regions[p]
+            have = ys[reg["r0"]] - ys[reg["r1"] + 1]
+            if have < need:
+                delta = need - have
+                for i in range(reg["r1"] + 1, len(ys)):
+                    ys[i] -= delta
+        bottom = ys[-1]
+        # 4.5) 表格线：按合并区分段画——横线只在上下邻格不是同一合并区
+        # 的列区间上画、竖线只在左右邻格不是同一合并区的行区间上画。
+        # 一条界线（一整条横线/竖线）只抖**一次**，各段是这条抖动线的
+        # 裁剪：同一条界线的几段共享同一个走向与倾斜，接缝处不会一段一个
+        # 斜率。合并区内部没有格线穿过（那些区间不画）。
+        # 记录每格底界线的实际线段（含端点随机的微倾/位移）：单元格文字
+        # 随后逐字符贴着它走。RNG 消耗顺序与随机化参数完全一致——线本身
+        # 的随机效果不受文字跟随影响。
+        hsegs: dict[tuple[int, int], tuple] = {}
+        span_x = total_w if total_w > 1e-9 else 1.0
+        span_y = (ys[0] - ys[-1]) if ys[0] > ys[-1] else 1.0
 
-        # 5) 单元格文字（按对齐方式水平定位；垂直方向**贴着所属行的底界
+        def _clip(a, b, t0, t1):
+            """按整体线段的归一化位置裁出一段（端点线性插值）。"""
+            return ((a[0] + (b[0] - a[0]) * t0, a[1] + (b[1] - a[1]) * t0),
+                    (a[0] + (b[0] - a[0]) * t1, a[1] + (b[1] - a[1]) * t1))
+
+        for i, yy in enumerate(ys):
+            if i == 0 or i == nrow:
+                runs = [(0, ncol - 1)]
+            else:
+                runs = []
+                cs = None
+                for c in range(ncol):
+                    if reg_of[i - 1][c] != reg_of[i][c]:
+                        if cs is None:
+                            cs = c
+                    elif cs is not None:
+                        runs.append((cs, c - 1))
+                        cs = None
+                if cs is not None:
+                    runs.append((cs, ncol - 1))
+            if not runs:
+                continue
+            line = _jline((0.0, yy), (total_w, yy))
+            for cs, ce in runs:
+                x0 = col_x[cs]
+                x1 = col_x[ce + 1] if ce + 1 < ncol else total_w
+                seg = _clip(line[0], line[1], x0 / span_x, x1 / span_x)
+                self.strokes.append(Stroke([seg[0], seg[1]],
+                                           role=ROLE_STRUCTURE))
+                for c in range(cs, ce + 1):
+                    hsegs[(i, c)] = (seg[0], seg[1])
+        for j in range(ncol + 1):
+            if j == 0 or j == ncol:
+                runs = [(0, nrow - 1)]
+            else:
+                runs = []
+                rs = None
+                for r in range(nrow):
+                    if reg_of[r][j - 1] != reg_of[r][j]:
+                        if rs is None:
+                            rs = r
+                    elif rs is not None:
+                        runs.append((rs, r - 1))
+                        rs = None
+                if rs is not None:
+                    runs.append((rs, nrow - 1))
+            if not runs:
+                continue
+            x = col_x[j] if j < ncol else total_w
+            line = _jline((x, ys[0]), (x, ys[-1]))
+            for rs, re in runs:
+                seg = _clip(line[0], line[1],
+                            (ys[0] - ys[rs]) / span_y,
+                            (ys[0] - ys[re + 1]) / span_y)
+                self.strokes.append(Stroke([seg[0], seg[1]],
+                                           role=ROLE_STRUCTURE))
+
+        # 5) 单元格文字（按对齐方式水平定位；垂直方向**贴着所属格的底界
         # 线**书写，多行时自底向上叠——与人在格子/横线本上写字的习惯一致，
-        # 居中会把字悬在格子中部，看着不像手写）；基线逐字符贴着该行的
-        # **底界线段**实际位置走——线端随机的微倾、行界抖动都会原样带动
-        # 文字，字符刚体平移、不旋转不剪切
-        for r, lines_row in enumerate(cell_lines):
-            seg_r = hsegs.get(r + 1)
-            seg_y0 = ys[r + 1]
-            for c, cell in enumerate(lines_row):
-                if c >= len(col_x):
-                    continue
-                align = (aligns[c] if c < len(aligns)
-                         else self.style.table_align_default)
-                cw = col_widths[c]
-                # 末行基线落在底界线略上方（留出笔迹下缘的空隙），
-                # 其余行按行距向上叠
-                base_y = (ys[r + 1] + size * 0.14
-                          + (len(cell) - 1) * lh)
-                for k, line in enumerate(cell):
-                    tw, parts = _cell_parts(line, self.fonts, ls, size)
-                    base = base_y - k * lh
-                    # 这一行有公式时按公式墨迹在行内垂直居中：公式比一行
-                    # 字高（∑ 的上下限、∫ 的上下钩），贴底线会让限溢出框外
-                    ext = cell_math.get((r, c, k))
-                    if ext is not None:
-                        y0, y1 = ext
-                        row_h = ys[r] - ys[r + 1]
-                        base = ys[r + 1] + (row_h - (y1 - y0)) / 2.0 - y0
-                    if align == "right":
-                        tx = col_x[c] + cw - CELL_PAD_MM - tw
-                    elif align == "center":
-                        tx = col_x[c] + (cw - tw) / 2.0
+        # 居中会把字悬在格子中部，看着不像手写）；合并区按其矩形定位与
+        # 折行；基线逐字符贴着该格**底界线段**实际位置走——线端随机的
+        # 微倾、行界抖动都会原样带动文字，字符刚体平移、不旋转不剪切
+        for p, reg in enumerate(regions):
+            cell = cell_lines[p]
+            c0, r1 = reg["c0"], reg["r1"]
+            if c0 >= len(col_x):
+                continue
+            align = (aligns[c0] if c0 < len(aligns)
+                     else self.style.table_align_default)
+            cw = sum(col_widths[c0:reg["c1"] + 1])
+            seg_r = hsegs.get((r1 + 1, c0))
+            seg_y0 = ys[r1 + 1]
+            # 末行基线落在底界线略上方（留出笔迹下缘的空隙），
+            # 其余行按行距向上叠
+            base_y = (ys[r1 + 1] + size * 0.14
+                      + (len(cell) - 1) * lh)
+            for k, line in enumerate(cell):
+                tw, parts = _cell_parts(line, self.fonts, ls, size)
+                base = base_y - k * lh
+                # 这一行有公式时按公式墨迹在格内垂直居中：公式比一行
+                # 字高（∑ 的上下限、∫ 的上下钩），贴底线会让限溢出框外
+                ext = cell_math.get((p, k))
+                if ext is not None:
+                    y0, y1 = ext
+                    row_h = ys[reg["r0"]] - ys[r1 + 1]
+                    base = ys[r1 + 1] + (row_h - (y1 - y0)) / 2.0 - y0
+                if align == "right":
+                    tx = col_x[c0] + cw - CELL_PAD_MM - tw
+                elif align == "center":
+                    tx = col_x[c0] + (cw - tw) / 2.0
+                else:
+                    tx = col_x[c0] + CELL_PAD_MM
+                xx = tx
+                for payload, is_math in parts:
+                    if is_math:
+                        w = _append_math_on_line(self.strokes, payload, xx,
+                                                 base, seg_r, seg_y0)
+                        xx += w + size * 0.2
                     else:
-                        tx = col_x[c] + CELL_PAD_MM
-                    xx = tx
-                    for payload, is_math in parts:
-                        if is_math:
-                            w = _append_math_on_line(self.strokes, payload, xx,
-                                                     base, seg_r, seg_y0)
-                            xx += w + size * 0.2
-                        else:
-                            xx += _append_text_on_line(
-                                self.strokes, payload, self.fonts, ls, xx,
-                                base, seg_r, seg_y0, self.missing)
+                        xx += _append_text_on_line(
+                            self.strokes, payload, self.fonts, ls, xx,
+                            base, seg_r, seg_y0, self.missing)
         self.y = bottom - size * 0.6
         self.max_x = max(self.max_x, total_w)
         self.blocks.append("table")
