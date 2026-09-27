@@ -53,6 +53,7 @@ K_PAGE_MARGIN = "page/margin"
 K_PAGE_PRESET = "page/preset_name"
 K_AI_ENABLED = "ai/mcp_enabled"    # AI 排版服务（MCP，仅本机回环）
 K_AI_PORT = "ai/mcp_port"          # AI 排版服务端口
+K_EXPORT_DPI = "export/png_dpi"    # PNG 导出分辨率（记住上次使用值）
 K_GEOMETRY = "ui/geometry"
 K_UI_THEME = "ui/theme"
 K_MAX_RECENT = 10
@@ -435,3 +436,16 @@ class Settings:
 
     def set_ai_service_port(self, port: int) -> None:
         self.set(K_AI_PORT, int(port))
+
+    # ------------------------------------------------------------ 导出
+    PNG_DPI_DEFAULT = 300
+    PNG_DPI_MIN, PNG_DPI_MAX = 36, 1200
+
+    def png_export_dpi(self) -> int:
+        """PNG 导出分辨率：记住上次使用值（钳制到合法范围）。"""
+        v = self.get_int(K_EXPORT_DPI, self.PNG_DPI_DEFAULT)
+        return max(self.PNG_DPI_MIN, min(self.PNG_DPI_MAX, v))
+
+    def set_png_export_dpi(self, dpi: int) -> None:
+        dpi = max(self.PNG_DPI_MIN, min(self.PNG_DPI_MAX, int(dpi)))
+        self.set(K_EXPORT_DPI, dpi)

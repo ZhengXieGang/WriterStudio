@@ -430,6 +430,12 @@ class MainWindow(QMainWindow):
         self.act_export_gcode = QAction("导出 G-code…", self)
         self.act_export_gcode.triggered.connect(self._export_gcode)
 
+        self.act_export_png = QAction("导出为 PNG…", self)
+        self.act_export_png.triggered.connect(lambda: self._export_image("png"))
+
+        self.act_export_svg = QAction("导出为 SVG…", self)
+        self.act_export_svg.triggered.connect(lambda: self._export_image("svg"))
+
         self.act_send_job = QAction("发送到机器", self)
         self.act_send_job.triggered.connect(self._send_job)
 
@@ -538,6 +544,8 @@ class MainWindow(QMainWindow):
         m_rotate.addAction(self.act_rotate_180)
         m_file.addSeparator()
         m_file.addAction(self.act_export_gcode)
+        m_file.addAction(self.act_export_png)
+        m_file.addAction(self.act_export_svg)
         m_file.addSeparator()
         m_file.addAction(self.act_quit)
 
@@ -2880,6 +2888,53 @@ class MainWindow(QMainWindow):
             self, "导出完成",
             f"已导出 {len(result.lines)} 行到\n{path}\n"
             f"绘制 {result.draw_length:.1f} mm，空程 {result.travel_length:.1f} mm")
+
+    def _export_image(self, fmt: str) -> None:
+        """导出整页为 PNG（位图，分辨率可选）或 SVG（矢量）。
+
+        与 G-code 导出的取源一致：先提交挂起的扰动编辑，确保导出内容
+        与画布上所见相同。
+        """
+        if not self.controller.doc.objects:
+            self.statusBar().showMessage("文档为空，没有可导出的内容", 5000)
+            return
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+        from ..export import save_page_png, save_page_svg
+
+        doc = self.controller.doc
+        dpi = None
+        if fmt == "png":
+            from .export_dialog import PngExportDialog
+            dpi = PngExportDialog.ask(doc.page, self.settings.png_export_dpi(),
+                                      self)
+            if dpi is None:
+                return
+            self.settings.set_png_export_dpi(dpi)   # 记住本次选择
+            title, filt, default = ("导出为 PNG", "PNG 图片 (*.png)",
+                                    "output.png")
+        else:
+            title, filt, default = ("导出为 SVG", "SVG 矢量图 (*.svg)",
+                                    "output.svg")
+        path, _ = QFileDialog.getSaveFileName(
+            self, title, filedialog.path_for(default), filt)
+        if not path:
+            return
+        if not path.lower().endswith("." + fmt):
+            path += "." + fmt                # 扩展名与内容保持一致
+        filedialog.remember(path)
+        self.global_perturb.flush()
+        try:
+            if fmt == "png":
+                w, h = save_page_png(doc, path, float(dpi))
+                detail = f"{w}×{h} 像素（{dpi} DPI）"
+            else:
+                n = save_page_svg(doc, path)
+                detail = f"{n} 个对象，1 单位 = 1 mm"
+        except Exception as exc:
+            QMessageBox.critical(self, "导出失败", str(exc))
+            return
+        QMessageBox.information(self, "导出完成", f"已导出到\n{path}\n{detail}")
 
     def _warn_stale_marker(self) -> bool:
         """起点标记显示在页面外 → 标记/校准已因轴映射或页面几何变化失效。
