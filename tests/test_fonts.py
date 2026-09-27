@@ -158,6 +158,40 @@ def test_gcode_lib_has_pen_up_splits():
     assert len(g.strokes) >= 2  # 点 + 竖
 
 
+# ------------------------------------------------------- 括号尺寸归一
+def test_bracket_size_norm_shrinks_oversized_only():
+    """括号按类别收小：只缩不放，写法正常的括号不动。
+
+    手写造字时括号常照书写格子写满，而按大写字高定 em 的字库里格子
+    比字身高出一截，全角括号能到正文两倍高。
+    """
+    from writerstudio.fonts.gfont import _size_norm_scale
+
+    cap, em = 20.0, 28.6                     # cap = 0.70 em
+    round_s = _size_norm_scale(ord("（"), 6.0, 2.32 * cap, cap, em)
+    assert 2.32 * cap * round_s == pytest.approx(1.15 * cap, rel=1e-6)
+    # 书写正常的括号（1.2 cap）与矮符号不动
+    assert _size_norm_scale(ord("("), 6.0, 1.20 * cap, cap, em) == 1.0
+    assert _size_norm_scale(ord("<"), 6.0, 1.10 * cap, cap, em) == 1.0
+    assert _size_norm_scale(ord("A"), 15.0, cap, cap, em) == 1.0
+    # 花括号印刷惯例本身就高
+    curl_s = _size_norm_scale(ord("{"), 6.0, 1.54 * cap, cap, em)
+    assert 1.54 * cap * curl_s == pytest.approx(1.35 * cap, rel=1e-6)
+
+
+def test_bracket_size_norm_uses_char_height_when_cjk_present():
+    """字体里有汉字时，全角括号跟字身中位高比，不跟大写字高比。"""
+    from writerstudio.fonts.gfont import _size_norm_scale
+
+    cap, em, cjk_h = 20.0, 28.6, 80.0        # 大写高远小于字身
+    s = _size_norm_scale(ord("（"), 6.0, 1.30 * cjk_h, cap, em, cjk_h)
+    assert 1.30 * cjk_h * s == pytest.approx(1.15 * cjk_h, rel=1e-6)
+    assert _size_norm_scale(ord("（"), 6.0, 1.10 * cjk_h, cap, em, cjk_h) == 1.0
+    # 没有汉字时退回大写高
+    s2 = _size_norm_scale(ord("（"), 6.0, 1.30 * cjk_h, cap, em, 0.0)
+    assert 1.30 * cjk_h * s2 == pytest.approx(1.15 * cap, rel=1e-6)
+
+
 # ---------------------------------------------------------------- 管理器
 def test_manager_lists_builtin_fonts():
     m = FontManager(user_font_dir="/nonexistent-xyz")

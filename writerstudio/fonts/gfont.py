@@ -202,6 +202,49 @@ _PUNCT_SIZE = {
     "punct-tall": (1.02, 1.15),
 }
 
+# 括号与全角符号的尺寸归一：(目标墨迹高, 触发阈值)，只缩不放。手写造字
+# 时常照「格子」把它们写满，而纯西文/符号字库的 em 是按大写字高反推的
+# （cap ≈ 0.70 em，见 parse_gfont）——格子比字身高出一截，于是同一行里
+# 全角括号能比正文大一倍。目标高按印刷惯例取参考高的倍数；全角括号/全角
+# 符号与汉字同属一个字身，参考高改用字身中位高（没有汉字时退回大写高）。
+# 写法正常的括号不动。
+_SYMBOL_SIZE = {
+    "round": (1.22, 1.42),    # ( ) 印刷惯例 ≈ 1.15~1.3 cap
+    "square": (1.12, 1.32),   # [ ]
+    "curl": (1.35, 1.50),     # { } 印刷惯例本身最高
+    "angle": (1.02, 1.25),    # < > 居中在数学轴上，本来就矮
+    "wide": (1.15, 1.22),     # 全角括号/书名号/引号、全角货币符号
+}
+
+_ASCII_BRACKET_KIND = {
+    "(": "round", ")": "round", "[": "square", "]": "square",
+    "{": "curl", "}": "curl", "<": "angle", ">": "angle",
+}
+
+# 全角括号：（）［］｛｝｟｠、CJK 标点里的〈〉《》「」『』【】〔〕〖〗〘〙〚〛
+# 以及半角小号形式 ﹙﹚﹛﹜﹝﹞。
+_WIDE_BRACKETS = frozenset(
+    "（）［］｛｝｟｠"
+    "〈〉《》「」『』【】〔〕〖〗〘〙〚〛"
+    "﹙﹚﹛﹜﹝﹞"
+)
+
+#: 全角符号块（￥￡￠￦ 等货币符号）：与全角括号同属「照格子写满」的一类
+_FULLWIDTH_SYMBOL_RANGE = (0xFFE0, 0xFFE6)
+
+
+def _symbol_kind(cp: int) -> Optional[str]:
+    """括号/全角符号码点 → 尺寸归一类别；不属于这类返回 None。"""
+    ch = chr(cp)
+    kind = _ASCII_BRACKET_KIND.get(ch)
+    if kind is not None:
+        return kind
+    if ch in _WIDE_BRACKETS:
+        return "wide"
+    lo, hi = _FULLWIDTH_SYMBOL_RANGE
+    return "wide" if lo <= cp <= hi else None
+
+
 # 孤立扁平横画（「一」）的收窄：手写里单横画明显短于字身，不该撑满格子。
 _FLAT_CJK_H = 0.30      # 扁平判定：墨迹高 < 该值 × em
 _FLAT_HZ_CAP = 0.60     # 扁平横画目标宽度（× em）
@@ -339,15 +382,26 @@ def _all_points_near_perimeter(strokes, ink_w: float, ink_h: float) -> bool:
 
 
 def _size_norm_scale(cp: int, ink_w: float, ink_h: float, cap: float,
-                     em: float) -> float:
+                     em: float, cjk_h: float = 0.0) -> float:
     """个别「写大了」的字形的收小系数（只缩不放，1.0=不动）。
 
+    * 括号与全角符号按类别相对参考高归一（见 ``_SYMBOL_SIZE``）：手写时
+      常照格子写满，全角括号在按大写字高定 em 的符号字库里能有正文两倍高；
     * 孤立扁平横画（「一」这类，墨迹高 < 0.30 em）→ 收到 0.60 em。手写单横
       画明显短于字身，若与其它宽字同走 0.90 em 上限，仍会比整行字都长；
     * 其余汉字墨迹宽超过 0.90 em → 收到 0.90 em。「二」「三」的长横与字身
       同宽，属这一档，不能跟着扁平规则一起压低；
     * 标点按类别相对 cap 高归一（顿号/句号 ≈ 0.24 cap、比字高 1.02 cap）。
     """
+    kind = _symbol_kind(cp)
+    if kind is not None:
+        ref = cjk_h if (kind == "wide" and cjk_h > 0) else cap
+        if ref <= 0:
+            ref = 0.70 * em
+        target, limit = _SYMBOL_SIZE[kind]
+        if ink_h > limit * ref:
+            return target * ref / ink_h
+        return 1.0
     cls = _glyph_class(cp)
     if cls == "cjk":
         if ink_h < _FLAT_CJK_H * em:
@@ -564,7 +618,7 @@ def parse_gfont(path: str | Path, name: Optional[str] = None,
         # Y 向下 → Y 向上，基线归零；随后按类别归一尺寸（绕基线缩放）。
         # 盒形字走专项通道（上面的 xs/ys），不再叠加统一缩放
         s = 1.0 if is_frame else _size_norm_scale(cp, ink_w, ink_h, cap_h,
-                                                  units_per_em)
+                                                  units_per_em, med_h)
         conv = [[(x * s * xs, (baseline_raw - y) * s * ys) for x, y in st]
                 for st in strokes]
         # 步距 = 墨迹宽 + 类别边距（.gfont 数据只有墨迹，无步距信息）
