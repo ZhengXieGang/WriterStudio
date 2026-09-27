@@ -38,6 +38,8 @@ def test_config_template_json_braces_survive_substitution():
 
 def test_dialog_opens_and_shows_port(qapp):
     """对话框能正常构造（历史 bug 在构造时即崩溃）并显示实际端口。"""
+    from PySide6.QtWidgets import QLabel
+
     from writerstudio.ui.main_window import MainWindow
     from writerstudio.ai.dialog import AiServiceDialog
 
@@ -47,13 +49,13 @@ def test_dialog_opens_and_shows_port(qapp):
     win = MainWindow(st)
     try:
         dlg = AiServiceDialog(win)
-        text = dlg._config.toPlainText()
-        cfg, _, note = text.partition("\n\n")
+        # 配置框里只有配置本身（可直接整段复制），不含说明文字
+        cfg = dlg._config.toPlainText()
         assert json.loads(cfg)["mcpServers"]["writerstudio"]["args"] == [
             "--port", "8899"]
-        assert "8899" in note
-        assert "{port}" not in text            # 占位符全部替换，不留原文
-        assert "{port}" not in dlg._note.text()
+        # 界面上不残留任何未替换的占位符
+        texts = [cfg] + [w.text() for w in dlg.findChildren(QLabel)]
+        assert not any("{port}" in t for t in texts)
     finally:
         win.confirm_on_close = False
         win.close()

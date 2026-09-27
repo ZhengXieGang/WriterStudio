@@ -29,14 +29,11 @@ _CONFIG_TEMPLATE = """\
 """
 
 _CONFIG_NOTE = """\
-把上面的配置加入你的 AI 应用（Claude Desktop 的 claude_desktop_config.json、
-ZCode/其他 MCP 客户端的 mcpServers 配置），重启该应用即可连接本软件。
-command 按安装方式选择：发行版 Windows 用 WriterStudioMCP.exe；Linux
-AppImage 用其文件路径且 args 前加 "--mcp"；macOS 用
-WriterStudio.app/Contents/MacOS/WriterStudioMCP；源码运行无该命令时
-command 用 "python"，args 用 ["-m", "writerstudio.ai.bridge",
-"--port", "{port}"]。
-服务只监听本机(127.0.0.1)，AI 修改的内容全部可在软件里撤销。"""
+配置加入 AI 应用的 MCP 设置（如 Claude Desktop 的 claude_desktop_config.json）
+后重启该应用即可连接。command 因安装方式而异：Windows 发行版用
+WriterStudioMCP.exe；Linux AppImage 用其文件路径（args 前加 "--mcp"）；
+macOS 用 app 包内的 WriterStudioMCP；源码运行用
+python -m writerstudio.ai.bridge。服务仅监听本机，AI 改动可在软件里撤销。"""
 
 
 def _fill(text: str, port: int) -> str:
@@ -92,9 +89,7 @@ class AiServiceDialog(QDialog):
         copy_row.addWidget(copy_btn)
         layout.addLayout(copy_row)
 
-        note = QLabel(_fill(_CONFIG_NOTE, self._win.settings.ai_service_port()),
-                      self)
-        self._note = note
+        note = QLabel(_CONFIG_NOTE, self)
         note.setWordWrap(True)
         note.setStyleSheet("color: #888;")
         layout.addWidget(note)
@@ -114,9 +109,8 @@ class AiServiceDialog(QDialog):
                 f"（共 {len(server._tools.names())} 个工具可用）")
         else:
             self._status.setText("状态：已停止")
-        self._config.setPlainText(
-            _fill(_CONFIG_TEMPLATE, port) + "\n" + _fill(_CONFIG_NOTE, port))
-        self._note.setText(_fill(_CONFIG_NOTE, port))
+        # 框内只放配置本身（可直接整段复制）；使用说明放在框外
+        self._config.setPlainText(_fill(_CONFIG_TEMPLATE, port))
 
     def _apply(self) -> None:
         st: Settings = self._win.settings
