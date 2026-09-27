@@ -35,6 +35,8 @@ GRBL 写字机上位机软件。文字、表格、LaTeX公式、TikZ、SVG矢量
 * 纸张预设与**参考层**：可导入图片/SVG 底图作为位置参考
 * **导出**：G-code（发写字机）、PNG（位图，分辨率可自定义，默认 300 DPI）、
   SVG（矢量，1 单位 = 1 mm）
+* **崩溃恢复**：编辑中的文档每分钟留一次快照（`~/.writerstudio/recovery.wsproj`），
+  软件异常退出后重新打开会询问是否恢复；正常保存或正常关闭即清除
 
 ## 支持的字体格式
 
@@ -78,9 +80,23 @@ AI 服务设置…」对话框显示为准，默认 8765）：
 ```
 
 Linux AppImage 的 `args` 则是 `["--mcp", "--port", "8765"]`。配置好后
-Agent 可用 18 个工具：查页面/字体/对象，添加文本/Markdown/TikZ/公式，
-移动/变换/删除，`check_layout` 布局自检，`render_preview` 渲染自查，
-导出 G-code，打开/保存项目。
+Agent 可用 24 个工具：
+
+* **查询**：页面/字体（可按名称或类型过滤）/对象/参考图层；
+* **内容**：文本、Markdown（表格/多段落）、TikZ 图形、数学公式——
+  都支持 `anchor`（`top-left`/`center`/`bottom-left`/`baseline-left` 等）
+  直接贴到行格线上，`measure_text` 可在不动文档的情况下先量尺寸；
+* **底图对齐**：`add_reference_image` 等四个工具管理参考图层（不参与
+  输出），`render_preview(include_references=true)` 把底图按透明度画进
+  预览图，套打表单时用来核对是否对齐；
+* **检查与产出**：`check_layout`（越界/越边距/重叠，附相交矩形）、
+  `check_tex`（TeX/TikZ 环境自检）、`render_preview`、`export_gcode`、
+  打开/保存项目。
+
+**连不上时怎么办**：桥会自己诊断并给出可读错误——「没有程序在监听」（软件
+没开或服务关闭）、「端口被别的程序占用」（连得上但不回话，会 3 秒内报出），
+并在 MCP 配置的端口不通时自动改试软件配置里的端口。软件菜单
+「AI 排版 → AI 服务设置…」可查看服务状态与实际端口。
 
 ## 许可
 

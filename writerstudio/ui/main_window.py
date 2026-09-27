@@ -57,6 +57,7 @@ from ..fonts.builder import (
     make_text_object,
     update_text_object,
 )
+from .. import recovery
 from ..fonts.manager import FontManager
 from ..machine.config import machine_to_page, page_to_machine
 from ..machine.gcode_gen import generate_from_document
@@ -140,6 +141,12 @@ class MainWindow(QMainWindow):
         self._pen_read_pending = False   # 「读取当前笔位」等待状态回报
         self._pen_register_pending = False   # 「以当前笔位校准标记」等待状态回报
         self._origin_job_pending = None  # 「以机械原点为起点」待发送的作业
+        # 未保存内容的定期快照（意外终止后可恢复；_mark_clean 会清掉）
+        self._recovery_armed = False      # 本次会话是否已建立过快照
+        self._recovery_timer = QTimer(self)
+        self._recovery_timer.setInterval(60_000)
+        self._recovery_timer.setSingleShot(False)
+        self._recovery_timer.timeout.connect(self._autosave_recovery)
         # 文字就地编辑会话（Photoshop 文本工具式：光标/框选/直接输入）
         self._text_session: TextEditSession | None = None
         self._session_sel: tuple[int, int] | None = None
@@ -2019,10 +2026,58 @@ class MainWindow(QMainWindow):
         if not self._dirty:
             self._dirty = True
             self._update_title()
+        self._recovery_armed = True       # 本次会话写过/该管快照了
+        self._recovery_timer.start()      # 有未保存修改 → 开始定期快照
 
     def _mark_clean(self) -> None:
         self._dirty = False
         self._update_title()
+        self._recovery_timer.stop()
+        # 只有本次会话建立的快照才在这里清：启动时 _mark_clean 会把
+        # 上次异常退出留下的快照删掉，用户就再也没机会恢复它了
+        if self._recovery_armed:
+            recovery.clear()
+            self._recovery_armed = False
+
+    def _autosave_recovery(self) -> None:
+        """定期把未保存的文档写进恢复文件（意外终止后可找回）。"""
+        if not self._dirty:
+            self._recovery_timer.stop()
+            return
+        if not self.controller.doc.objects:
+            return
+        recovery.write(self._collect_project())
+
+    def maybe_offer_recovery(self) -> bool:
+        """启动时若有异常退出留下的快照，问一句是否恢复。
+
+        只由程序入口（``writerstudio/__main__.py``）在 ``show()`` 之后调用，
+        窗口构造与测试都不触发弹窗。返回是否恢复。
+        """
+        if not recovery.exists():
+            return False
+        from PySide6.QtWidgets import QMessageBox
+        ans = QMessageBox.question(
+            self, "恢复未保存的文档",
+            "检测到上次异常退出时未保存的内容，是否恢复？\n（选「否」将丢弃"
+            "该快照，不影响已保存的项目文件）",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes)
+        if ans != QMessageBox.StandardButton.Yes:
+            recovery.clear()
+            return False
+        try:
+            project = recovery.load()
+        except Exception as exc:
+            QMessageBox.warning(self, "恢复失败", str(exc))
+            recovery.clear()
+            return False
+        self._apply_project(project)
+        self.project_path = None          # 恢复到未命名文档，另存为准
+        self._mark_dirty()                # 仍是未保存状态
+        self.statusBar().showMessage("已恢复上次未保存的内容，请另存为项目文件",
+                                     8000)
+        return True
 
     def _collect_project(self) -> ProjectData:
         """把当前界面状态汇总为项目数据（含撤销历史日志）。"""
@@ -2757,6 +2812,12 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self.stop_ai_server()
+        # 走到这里说明用户已确认（保存或明确放弃）——快照的使命结束。
+        # 若此刻仍保留它，下次启动会再问一次「是否恢复」，与用户刚才的
+        # 选择自相矛盾
+        self._recovery_timer.stop()
+        recovery.clear()
+        self._recovery_armed = False
         super().closeEvent(event)
 
     # ------------------------------------------------------------ 机器命令

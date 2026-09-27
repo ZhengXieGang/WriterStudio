@@ -29,6 +29,11 @@ def main() -> int:
         win._load_project_path(args[0])
 
     win.show()
+    # 异常退出留下的未保存内容：问一句是否恢复（正常启动无该文件则跳过）
+    try:
+        win.maybe_offer_recovery()
+    except Exception:
+        pass
     try:
         return app.exec()
     finally:

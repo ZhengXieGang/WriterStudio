@@ -306,3 +306,171 @@ def test_add_text_direction_vertical(tools, win):
     assert r["bbox"]["w"] > 0 and r["bbox"]["h"] > 0
     with pytest.raises(ToolError):
         tools.call("add_text", {"text": "x", "direction": "斜排"})
+
+
+# --------------------------------------------------------- 锚点与干跑测量
+def test_add_text_anchor_bottom_left(tools, win):
+    """bottom-left：包围盒左下角落到 (x,y)——往格子里写字时贴线用。"""
+    r = tools.call("add_text", {"text": "ABC", "size": 8.0, "x": 50, "y": 60,
+                                "anchor": "bottom-left",
+                                "font_names": ["futural"]})
+    b = r["bbox"]
+    assert b["x"] == pytest.approx(50.0, abs=0.01)
+    assert b["y"] + b["h"] == pytest.approx(60.0, abs=0.01)   # 下沿贴到 y
+
+
+def test_add_text_anchor_baseline_left(tools, win):
+    """baseline-left：首行基线左端落到 (x,y)（比 bottom-left 更精确贴线）。"""
+    r = tools.call("add_text", {"text": "ABC", "size": 10.0, "x": 40, "y": 80,
+                                "anchor": "baseline-left",
+                                "font_names": ["futural"]})
+    b = r["bbox"]
+    assert b["x"] == pytest.approx(40.0, abs=0.01)
+    # 基线在包围盒内（字形主体在基线上方、下缘略低于基线）
+    assert b["y"] + b["h"] <= 80.0 + 0.01
+
+
+def test_move_object_with_anchor(tools, win):
+    r = tools.call("add_text", {"text": "ABC", "size": 8.0, "x": 20, "y": 20,
+                                "font_names": ["futural"]})
+    oid = r["id"]
+    m = tools.call("move_object", {"object_id": oid, "x": 100, "y": 150,
+                                   "anchor": "bottom-left"})
+    b = m["bbox"]
+    assert b["x"] == pytest.approx(100.0, abs=0.01)
+    assert b["y"] + b["h"] == pytest.approx(150.0, abs=0.01)
+
+
+def test_add_text_rejects_bad_anchor(tools):
+    with pytest.raises(ToolError) as ei:
+        tools.call("add_text", {"text": "A", "anchor": "middle"})
+    assert "anchor" in str(ei.value)
+
+
+def test_measure_text_does_not_add_object(tools, win):
+    before = len(win.controller.doc.objects)
+    r = tools.call("measure_text", {"text": "床前明月光", "size": 8.0,
+                                    "font_names": ["STRK-Kaiti"]})
+    assert len(win.controller.doc.objects) == before      # 干跑，不改文档
+    assert r["width_mm"] > 0 and r["height_mm"] > 0
+    assert r["line_count"] == 1
+    assert 0 <= r["first_baseline_from_top_mm"] <= r["height_mm"]
+
+
+def test_measure_text_reports_missing(tools):
+    # Ω 由内置单线符号补上（不再整字丢失），真正画不出的才进 missing
+    r = tools.call("measure_text", {"text": "kΩ☃", "size": 6.0,
+                                    "font_names": ["STRK-Kaiti"]})
+    assert "☃" in r["missing"] and "Ω" not in r["missing"]
+    assert "warning" in r
+
+
+# ------------------------------------------------------------- 参考图层
+def _form_image(tmp_path):
+    from PIL import Image, ImageDraw
+    p = tmp_path / "form.png"
+    im = Image.new("RGB", (600, 300), "white")
+    ImageDraw.Draw(im).rectangle([10, 10, 590, 290], outline="black", width=2)
+    im.save(p)
+    return p
+
+
+def test_reference_crud_and_preview(tools, win, tmp_path):
+    img = _form_image(tmp_path)
+    r = tools.call("add_reference_image", {"path": str(img), "opacity": 0.5})
+    ref_id = r["id"]
+    assert r["bbox"]["w"] > 0
+    listed = tools.call("list_references", {})["references"]
+    assert [x["id"] for x in listed] == [ref_id]
+    assert "不会写进 G-code" in tools.call("list_references", {})["note"]
+
+    # 更新：改透明度 + 用锚点重新落点
+    u = tools.call("update_reference", {"reference_id": ref_id, "opacity": 0.2,
+                                        "x": 30, "y": 40,
+                                        "anchor": "bottom-left"})
+    assert u["bbox"]["x"] == pytest.approx(30.0, abs=0.05)
+    assert u["bbox"]["y"] + u["bbox"]["h"] == pytest.approx(40.0, abs=0.05)
+    assert tools.call("list_references", {})["references"][0]["opacity"] == \
+        pytest.approx(0.2)
+
+    # 预览：include_references 会计入绘制（且不影响内容渲染）
+    p1 = tools.call("render_preview", {"width_px": 600,
+                                       "include_references": True})
+    p2 = tools.call("render_preview", {"width_px": 600})
+    assert p1["references_drawn"] == 1
+    assert p2["references_drawn"] == 0
+    assert p1["png_base64"] != p2["png_base64"]
+
+    # 删除（可撤销）
+    d = tools.call("remove_reference", {"reference_id": ref_id})
+    assert d["removed"] == 1
+    assert tools.call("list_references", {})["count"] == 0
+    win.controller.undo_stack.undo()
+    assert tools.call("list_references", {})["count"] == 1
+
+
+def test_add_reference_missing_file(tools, tmp_path):
+    with pytest.raises(ToolError) as ei:
+        tools.call("add_reference_image",
+                   {"path": str(tmp_path / "nope.png")})
+    assert "不存在" in str(ei.value)
+
+
+def test_remove_all_references(tools, win, tmp_path):
+    img = _form_image(tmp_path)
+    tools.call("add_reference_image", {"path": str(img)})
+    tools.call("add_reference_image", {"path": str(img)})
+    assert tools.call("remove_reference", {})["removed"] == 2
+    assert tools.call("list_references", {})["count"] == 0
+
+
+# --------------------------------------------------- 字体过滤 / 布局检查
+def test_list_fonts_filter_and_kind(tools):
+    all_fonts = tools.call("list_fonts", {})
+    assert all_fonts["total"] >= 1
+    one = all_fonts["fonts"][0]["name"]
+    f = tools.call("list_fonts", {"filter": one})
+    assert f["matched"] >= 1
+    assert all(one.lower() in x["name"].lower()
+               or one.lower() in (x["display_name"] or "").lower()
+               for x in f["fonts"])
+    k = tools.call("list_fonts", {"kind": "hershey"})
+    assert k["fonts"] and all(x["kind"] == "hershey" for x in k["fonts"])
+
+
+def test_check_layout_overlap_has_bbox(tools):
+    tools.call("add_text", {"text": "AAAA", "size": 10.0, "x": 40, "y": 60,
+                            "font_names": ["futural"]})
+    tools.call("add_text", {"text": "BBBB", "size": 10.0, "x": 42, "y": 62,
+                            "font_names": ["futural"]})
+    r = tools.call("check_layout", {})
+    overlaps = [i for i in r["issues"] if i["type"] == "overlap"]
+    assert overlaps
+    ov = overlaps[0]
+    # 相交矩形与双方 bbox 都在，程序化修版不必自己再算
+    assert ov["overlap_bbox"]["w"] > 0 and ov["overlap_bbox"]["h"] > 0
+    assert len(ov["bbox"]) == 2
+    assert ov["overlap_area_mm2"] > 0
+
+
+def test_check_tex_reports_environment(tools):
+    r = tools.call("check_tex", {})
+    assert set(r) >= {"ok", "engine", "converter", "notes", "texmf"}
+    # texmf 诊断必须包含隔离 HOME 场景下的关键路径
+    assert "TEXMFHOME" in r["texmf"] and "xelatex_fmt" in r["texmf"]
+
+
+def test_markdown_reports_missing_chars(tools):
+    """Markdown 的缺字不再静默消失（此前只有文本对象才上报）。
+
+    Ω 走内置单线符号兜底，画得出；真正没有字形来源的 ☃ 必须上报。
+    """
+    r = tools.call("add_markdown", {
+        "markdown": "| 电阻 | 值 |\n|---|---|\n| R1 | 10kΩ |\n",
+        "size": 4.0, "font_names": ["STRK-Kaiti"]})
+    assert "Ω" not in (r.get("missing") or []), r
+    r2 = tools.call("add_markdown", {
+        "markdown": "| 电阻 | 值 |\n|---|---|\n| R1 | 10k☃ |\n",
+        "size": 4.0, "font_names": ["STRK-Kaiti"]})
+    assert "☃" in (r2.get("missing") or []), r2
+    assert "无法绘制" in r2.get("warning", "")
