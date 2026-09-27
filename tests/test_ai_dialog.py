@@ -76,3 +76,30 @@ def test_copy_config_puts_valid_json_on_clipboard(qapp):
     finally:
         win.confirm_on_close = False
         win.close()
+
+
+def test_apply_starts_service_and_shows_running(qapp):
+    """「保存并应用」按新端口拉起服务，状态行随之更新为运行中。"""
+    import socket
+
+    from writerstudio.ui.main_window import MainWindow
+    from writerstudio.ai.dialog import AiServiceDialog
+
+    with socket.socket() as s:            # 取一个空闲端口，避免与 CI 上
+        s.bind(("127.0.0.1", 0))          # 其它服务冲突
+        port = s.getsockname()[1]
+
+    st = Settings()
+    st.set(K_AI_ENABLED, False)
+    win = MainWindow(st)
+    try:
+        dlg = AiServiceDialog(win)
+        dlg._enabled.setChecked(True)
+        dlg._port.setValue(port)
+        dlg._apply()
+        assert getattr(win, "ai_server", None) is not None
+        assert str(port) in dlg._status.text()
+        assert "运行中" in dlg._status.text()
+    finally:
+        win.confirm_on_close = False
+        win.close()                       # 关闭时停止服务，不泄漏端口
