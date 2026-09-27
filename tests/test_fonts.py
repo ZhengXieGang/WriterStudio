@@ -19,6 +19,8 @@ from writerstudio.fonts.hershey import parse_hershey_jhf
 from writerstudio.fonts.layout import (
     ALIGN_CENTER,
     ALIGN_RIGHT,
+    DIR_V_RL,
+    SYMBOL_FONT_NAME,
     TextStyle,
     layout_text,
 )
@@ -242,6 +244,40 @@ def test_layout_missing_char_skipped():
     latin, _ = _two_fonts()
     lay = layout_text("A文B", [latin], TextStyle(size=10.0))
     assert [c.char for c in lay.chars] == ["A", "B"]
+
+
+def test_layout_builtin_symbol_fallback():
+    """链上一款字体都没有的数学符号（Ω ± ≤ ≈）由内置单线符号补上。
+
+    这正是「kΩ 的 Ω 整字消失」的场景：中文字体链里没有拉丁/希腊字形。
+    """
+    latin, _ = _two_fonts()
+    lay = layout_text("AΩ±≤", [latin], TextStyle(size=10.0))
+    assert [c.char for c in lay.chars] == ["A", "Ω", "±", "≤"]
+    assert lay.missing == []
+    for c in lay.chars[1:]:
+        assert c.font_name == SYMBOL_FONT_NAME
+        assert c.strokes and c.advance > 0
+    # 单线笔画：总点数远小于 mathtext 轮廓（一个 Σ 轮廓单笔就 40+ 点）
+    assert sum(len(s.points) for c in lay.chars[1:] for s in c.strokes) <= 40
+
+
+def test_layout_builtin_symbol_fallback_vertical():
+    """竖排也要兜底（列内自上而下堆叠）。"""
+    latin, _ = _two_fonts()
+    lay = layout_text("Ω≤", [latin],
+                      TextStyle(size=10.0, direction=DIR_V_RL))
+    assert [c.char for c in lay.chars] == ["Ω", "≤"]
+    assert lay.missing == []
+    assert lay.chars[0].origin[1] > lay.chars[1].origin[1]
+
+
+def test_layout_uncovered_char_still_missing():
+    """兜底也画不出的字照旧进 missing（别把兜底当过万能）。"""
+    latin, _ = _two_fonts()
+    lay = layout_text("A☃", [latin], TextStyle(size=10.0))
+    assert [c.char for c in lay.chars] == ["A"]
+    assert lay.missing == ["☃"]
 
 
 def test_layout_multiline_baseline_step():

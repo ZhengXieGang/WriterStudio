@@ -14,6 +14,7 @@ TikZ 是 LaTeX 里最常用的矢量绘图宏包，适合画精确的几何图�
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
@@ -277,8 +278,30 @@ def tikz_available() -> bool:
     return bool(_TIKZ_CACHE)
 
 
+def _texmf_env() -> dict:
+    """TeX 查找路径诊断：个人 texmf 树 / 变量树 / xelatex 格式文件。
+
+    **隔离 HOME 或自定义 TEXMFHOME 时最容易踩的坑**：pgf/tikz 可能装在
+    用户个人树（``~/texmf``）里，xelatex 的格式文件在
+    ``~/.texlive/texmf-var``；换一个 HOME 跑（自动化环境）就全都找不到，
+    报错却像是「没装 TeX」。这里把路径与存在性一并列出，便于对症设置。
+    """
+    defaults = {"TEXMFHOME": "~/texmf",
+                "TEXMFVAR": "~/.texlive/texmf-var",
+                "TEXMFCONFIG": "~/.texlive/texmf-config"}
+    out: dict = {}
+    for var, default in defaults.items():
+        path = os.path.expanduser(os.environ.get(var) or default)
+        out[var] = {"path": path, "exists": os.path.exists(path)}
+    fmt = os.path.expanduser(
+        "~/.texlive/texmf-var/web2c/xetex/xelatex.fmt")
+    out["xelatex_fmt"] = {"path": fmt, "exists": os.path.exists(fmt)}
+    out["HOME"] = os.path.expanduser("~")
+    return out
+
+
 def tikz_report() -> dict:
-    """诊断信息，供界面提示如何补齐依赖。"""
+    """诊断信息，供界面/AI 提示如何补齐依赖（或该设哪个环境变量）。"""
     engine = find_engine()
     converter = find_pdf_converter()
     notes: list[str] = []
@@ -287,9 +310,19 @@ def tikz_report() -> dict:
     if converter is None:
         notes.append("缺少 PDF→SVG 转换器，请安装 poppler（pdftocairo）或 dvisvgm")
     if engine is not None and not _has_tikz_package(engine):
-        notes.append("缺少 TikZ 宏包，请安装 texlive-pictures（提供 pgf/tikz）")
+        notes.append(
+            "缺少 TikZ 宏包（pgf/tikz.sty）：除未装 texlive-pictures 外，"
+            "隔离 HOME/TEXMFHOME 下也会查不到个人 texmf 树——见 texmf 字段")
+    if engine is not None and not find_pdf_converter():
+        pass
+    if engine is not None and engine.endswith("xelatex"):
+        fmt = _texmf_env()["xelatex_fmt"]
+        if not fmt["exists"]:
+            notes.append(
+                f"xelatex 格式文件缺失（{fmt['path']}）：隔离 HOME 下需把"
+                " TEXMFVAR/TEXMFCONFIG 指回真实 HOME，或跑一次 fmtutil 生成")
     return {"engine": engine, "converter": converter,
-            "ok": not notes, "notes": notes}
+            "ok": not notes, "notes": notes, "texmf": _texmf_env()}
 
 
 def _ensure_picture(body: str, measurement_font: Optional[str] = None) -> str:

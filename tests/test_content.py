@@ -92,6 +92,103 @@ def test_markdown_table_cell_text_present(fonts):
     assert box.width > 0 and box.height > 0
 
 
+def test_markdown_cell_math_keeps_underscore():
+    """单元格里的行内公式必须原样送进 LaTeX 渲染。
+
+    历史 bug：``_strip_inline`` 会把 ``_`` ``*`` 当内联标记删掉，
+    ``$\\oint_C f\\,dz$`` 于是变成非法的 ``$\\ointC f\\,dz$``，整格退回
+    原文显示。公式片段现在绕过去内标记这一步。
+    """
+    from writerstudio.content.markdown import _cell_segments
+    segs = _cell_segments(r"值 $R_1$ 与 $\oint_C f\,dz$")
+    math = [s for s, m in segs if m]
+    assert r"R_1" in math and r"\oint_C f\,dz" in math
+    text = [s for s, m in segs if not m]
+    assert all("_" not in s for s in text)      # 正文里的标记照旧去掉
+
+
+def test_markdown_table_cell_math_rendered(fonts):
+    """表格单元格里的公式按公式渲染（不是原样输出 $...$ 文本）。"""
+    from writerstudio.content.markdown import _cell_parts, _math_bbox
+    from writerstudio.fonts.layout import TextStyle
+    size = 5.0
+    st = TextStyle(size=size)
+    box = _math_bbox(r"\oint_C f\,dz", size, fonts)
+    assert not box.is_empty
+    tw, parts = _cell_parts([(r"\oint_C f\,dz", True)], fonts, st, size)
+    payload, is_math = parts[0]
+    assert is_math and isinstance(payload, list) and payload
+    assert tw >= box.width                       # 公式宽度按渲染结果算
+
+
+def test_markdown_table_cell_math_row_taller(fonts):
+    """带上下限的公式（∑）把行撑高——否则限会压到行界线上。"""
+    src = "| A | B |\n|---|---|\n| SUM | $\\sum_{i=1}^{n} x_i$ |\n"
+    r = render_markdown(src, fonts, MarkdownStyle(size=4))
+    plain = render_markdown("| A | B |\n|---|---|\n| SUM | S |\n",
+                            fonts, MarkdownStyle(size=4))
+    assert r.bbox().height > plain.bbox().height + 1.0
+    assert r.missing == []
+
+
+def _table_hlines(r, min_span: float):
+    """表格横线（足够宽、接近水平）的 y 值（去重后升序）。
+
+    表格线默认带线端随机（两端垂直偏移不同 → 线条微倾），因此按「斜率
+    < 20°」判定水平，取平均 y 作为该线位置；竖线（dx 小）自动排除。
+    """
+    ys = []
+    for s in r.strokes:
+        pts = s.points
+        if len(pts) != 2:
+            continue
+        dx = abs(pts[-1][0] - pts[0][0])
+        dy = abs(pts[-1][1] - pts[0][1])
+        if dx < min_span or dy > 0.35 * dx:
+            continue
+        ys.append((pts[0][1] + pts[-1][1]) / 2.0)
+    out = []
+    for y in sorted(ys):
+        if not out or abs(y - out[-1]) > 0.15:
+            out.append(y)
+    return out
+
+
+def test_markdown_table_header_rule_not_doubled(fonts):
+    """表头下的分隔线只画一条。
+
+    历史 bug：表头下额外叠了一条「加粗示意」线（两条独立随机、几乎重合），
+    纸面上显示成两根横线。行界总数 = 行数 + 1，多一条即回归。
+    """
+    src = "| A | B |\n|:--|--:|\n| 1 | 2 |\n| 3 | 4 |\n"
+    r = render_markdown(src, fonts, MarkdownStyle(size=5))
+    widest = max(abs(s.points[-1][0] - s.points[0][0])
+                 for s in r.strokes if len(s.points) >= 2)
+    ys = _table_hlines(r, min_span=widest * 0.8)
+    assert len(ys) == 4                     # 3 行 → 4 条行界，不多不少
+
+
+def test_markdown_table_cell_text_sits_on_bottom_line(fonts):
+    """单元格文字贴着行的底界线书写（像写在横线上），不是垂直居中。
+
+    居中排时文字下缘到行界线约半个字号；贴线书写应只有一点点缝。
+    """
+    size = 5.0
+    src = "| A |\n|---|\n| B |\n"
+    r = render_markdown(src, fonts, MarkdownStyle(size=size))
+    widest = max(abs(s.points[-1][0] - s.points[0][0])
+                 for s in r.strokes if len(s.points) >= 2)
+    ys = _table_hlines(r, min_span=widest * 0.8)
+    assert len(ys) == 3                     # 顶界 + 两条行界
+    lh = size * MarkdownStyle().line_spacing
+    rule = ys[1]                            # 表头行的底界线（y 升序，取第 2 条）
+    band = [y for s in r.strokes for _, y in s.points
+            if rule + 0.02 < y < rule + lh]
+    assert band
+    gap = min(band) - rule                  # 文字下缘到行界线的缝隙
+    assert 0.0 <= gap <= size * 0.35, gap
+
+
 def test_markdown_list_and_quote(fonts):
     src = "- one\n- two\n\n> quoted text\n"
     r = render_markdown(src, fonts, MarkdownStyle(size=5))
@@ -531,8 +628,11 @@ def test_latex_document_graceful_failure_when_unavailable():
 def test_tikz_report_shape():
     from writerstudio.content.tikz import tikz_report
     rep = tikz_report()
-    assert set(rep) == {"engine", "converter", "ok", "notes"}
+    assert set(rep) == {"engine", "converter", "ok", "notes", "texmf"}
     assert isinstance(rep["notes"], list)
+    # texmf：TEXMFHOME/TEXMFVAR 等路径与 xelatex.fmt 是否存在（隔离 HOME
+    # 场景下 xelatex 找不到格式文件，报错里得能看出这一点）
+    assert {"HOME", "TEXMFHOME", "TEXMFVAR", "xelatex_fmt"} <= set(rep["texmf"])
 
 
 def test_tikz_ensure_picture_wraps_fragment():
@@ -1394,10 +1494,20 @@ def test_equation_math_symbols_render_single_line():
     # 单线笔画：任何一笔的点数都远小于 mathtext 轮廓（Σ 轮廓单笔 40+ 点）
     assert max(len(s.points) for s in st) <= 30
 
-    # 兜底表覆盖常见数学符号，且每个键位在对应内置字体里真实存在
-    for ch in "∑∏π∞√∫±÷·≤≥≠∂∇°αβγθλωΣΩ":
+    # 常见数学符号必须被「兜底表 / 几何画线」覆盖，一个都不许落回
+    # mathtext 填充轮廓（空心字）——≈ ⊂ ∪ ∅ ⊕ 等此前正是这样漏掉的
+    common = ("×≤≥≈≃≅≌∼∝≪≫≮≯⊂⊃⊆⊇⊊∪∩∅⊕⊖⊗⊘⊚⊙○∈∉∋∀∄∴∵⇒⇐⇔↔↦∓∗∘△□◇∮′″‰≐≑"
+              "∑∏√∞°≠≡→←↓∂∇∫∃÷∥⊥∠±·⋅")
+    for ch in common:
         assert ch in _SYMBOL_FALLBACK or ch in _PROCEDURAL_SYMBOLS, ch
     for ch, (fname, key) in _SYMBOL_FALLBACK.items():
         fam = m.get(fname)
         assert fam is not None, (ch, fname)
         assert fam.has(key), (ch, fname, key)
+
+    # 几何画线的符号：实际渲染为少量点的单线笔画（不是轮廓）
+    for ch in "≈⊂∪∅⊕∀⇒‰∉○":
+        st = render_equation(f"${ch}$", size_mm=10,
+                             font_names=["futural"], manager=m)
+        assert st, ch
+        assert max(len(s.points) for s in st) <= 24, (ch, len(st))

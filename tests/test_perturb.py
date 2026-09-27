@@ -904,3 +904,51 @@ def test_char_spacing_positive_still_spreads():
     pr = perturb_layout(lay, p, seed=5)
     dxs = [c.dx for c in pr.chars]
     assert max(dxs) - min(dxs) > 0.5     # 字距确实拉开了
+
+
+# ===================================================== 线条手绘感（噪声模型）
+def test_tremor_band_limited_not_vibrating_wire():
+    """微颤是 2~4mm 尺度的低幅不稳，不是亚毫米级的细密波纹。
+
+    历史问题：微颤波长压到 0.5~1.6mm，画出来是「振动金属丝」式的锯齿
+    波纹（比不做还假）；同时采样步长按主波长取（约 2.6mm），微颤被
+    欠采样混叠成慢波。现在波长下限 1.8mm，采样按最细波长取值。
+    """
+    line = Stroke([(i * 0.1, 0.0) for i in range(401)])       # 40mm 直线
+    p = PerturbParams(enabled=True, seed=3, line_tremor=0.3)
+    pts = perturb_strokes([line], p)[0].points
+    # 1) 采样足够密：相邻点间距远小于微颤波长（否则高频成分被混叠）
+    gaps = [abs(pts[i + 1][0] - pts[i][0]) for i in range(len(pts) - 1)]
+    assert max(gaps) < 0.6
+    # 2) 频带受限：半个周期 ≥ 1mm → 40mm 内的过零次数不超过 ~40
+    ys = [y for _, y in pts]
+    zeros = sum(1 for i in range(1, len(ys))
+                if (ys[i - 1] < 0) != (ys[i] < 0))
+    assert zeros <= 40, zeros
+    # 3) 幅度受控（不因叠加包络/漂移而明显超出设定值）
+    assert max(abs(v) for v in ys) <= 0.3 * 1.05 + 1e-9
+
+
+def test_wobble_amplitude_varies_along_line():
+    """起伏不是等幅正弦：沿线局部振幅应有明显差异（手压包络 + 慢漂移）。
+
+    等幅的规则起伏叠上去，长线看起来仍是「波浪形的机器线」。
+    """
+    line = Stroke([(i * 0.5, 0.0) for i in range(801)])       # 400mm
+    p = PerturbParams(enabled=True, seed=8, line_wobble=1.0,
+                      line_wobble_wavelength=25.0)
+    ys = [y for _, y in perturb_strokes([line], p)[0].points]
+    seg = 80                                                  # 每段 40mm
+    local = [max(abs(v) for v in ys[i:i + seg])
+             for i in range(0, len(ys) - seg, seg)]
+    assert max(local) > 1.4 * min(local), local
+
+
+def test_wobble_peak_respects_amplitude_plus_tremor():
+    """起伏 + 微颤叠加后的峰值仍受参数约束（不因新增分量翻倍）。"""
+    line = Stroke([(i * 0.5, 0.0) for i in range(801)])
+    amp, tremor = 0.8, 0.25
+    p = PerturbParams(enabled=True, seed=12, line_wobble=amp,
+                      line_wobble_wavelength=30.0, line_tremor=tremor)
+    ys = [y for _, y in perturb_strokes([line], p)[0].points]
+    assert max(abs(v) for v in ys) <= (amp + tremor) * 1.06

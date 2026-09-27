@@ -68,6 +68,9 @@ class MarkdownResult:
     # 每个表格的外框 (x0, y_top, x1, y_bottom)（渲染局部坐标，Y 向上）。
     # 供画布给 Markdown 对象显示「表格宽度」手柄（改 table_width 重排）。
     tables: list = field(default_factory=list)
+    #: 字体链画不出的字符（去重、按出现顺序）。此前 Markdown 的缺字从不
+    #: 上报，表格表头里的 kΩ 会静默变成 k——AI 与用户都只能靠肉眼发现。
+    missing: list[str] = field(default_factory=list)
 
     def bbox(self) -> BBox:
         return BBox.from_points(p for s in self.strokes for p in s.points)
@@ -128,12 +131,26 @@ def _fit_widths(natural: list[float], max_total: float,
     return [m + s * avail / slack_total for m, s in zip(mins, slack)]
 
 
+def _note_missing(sink: Optional[list], lay) -> None:
+    """把一次排版里画不出的字符并入汇总（去重、保持出现顺序）。"""
+    if sink is None:
+        return
+    for ch in (getattr(lay, "missing", None) or []):
+        if ch not in sink:
+            sink.append(ch)
+
+
 def _append_text(strokes: list[Stroke], text: str, fonts: Sequence[FontFamily],
-                 style: TextStyle, x: float, baseline_y: float) -> float:
-    """在 (x, baseline_y) 处追加一行文字，返回行宽。"""
+                 style: TextStyle, x: float, baseline_y: float,
+                 missing: Optional[list] = None) -> float:
+    """在 (x, baseline_y) 处追加一行文字，返回行宽。
+
+    ``missing`` 给定时汇总该行画不出的字符（供上层上报）。
+    """
     if not text:
         return 0.0
     lay = layout_text(text, fonts, style, origin=(x, baseline_y))
+    _note_missing(missing, lay)
     strokes.extend(lay.strokes())
     return lay.lines[0].width if lay.lines else 0.0
 
@@ -141,7 +158,8 @@ def _append_text(strokes: list[Stroke], text: str, fonts: Sequence[FontFamily],
 def _append_text_on_line(strokes: list[Stroke], text: str,
                          fonts: Sequence[FontFamily], style: TextStyle,
                          x: float, baseline_y: float,
-                         seg: Optional[tuple], seg_nominal_y: float) -> float:
+                         seg: Optional[tuple], seg_nominal_y: float,
+                         missing: Optional[list] = None) -> float:
     """追加一行文字，基线贴着行界**线段**的实际位置（返回行宽）。
 
     ``seg`` 是行界的实际线段（含端点随机的微倾/垂直位移）、
@@ -152,6 +170,7 @@ def _append_text_on_line(strokes: list[Stroke], text: str,
     if not text:
         return 0.0
     lay = layout_text(text, fonts, style, origin=(x, baseline_y))
+    _note_missing(missing, lay)
     if seg is None or not lay.lines:
         strokes.extend(lay.strokes())
         return lay.lines[0].width if lay.lines else 0.0
@@ -169,6 +188,137 @@ def _append_text_on_line(strokes: list[Stroke], text: str,
             strokes.append(Stroke([(px, py + dy) for px, py in st.points],
                                   st.closed, st.role))
     return line0.width
+
+
+def _math_bbox(latex: str, size: float, fonts: Sequence[FontFamily]) -> BBox:
+    """渲染一个行内公式并返回其包围盒（渲染失败返回空盒）。"""
+    from .equation import render_equation
+    try:
+        eq = render_equation(latex, size_mm=size, fonts=fonts)
+    except Exception:
+        return BBox()
+    if not eq:
+        return BBox()
+    return BBox.from_points(p for s in eq for p in s.points)
+
+
+def _wrap_segments(segs, fonts: Sequence[FontFamily], style: TextStyle,
+                   size: float, max_width: float):
+    """按列宽折行，**公式整块不可拆**（文字部分正常折行）。
+
+    返回 ``[[(片段, 是否公式), …], …]``。公式格放不下时不再退回原样
+    LaTeX 文本，而是把公式整体挪到下一行、文字继续填。
+    """
+    lines: list[list[tuple[str, bool]]] = []
+    cur: list[tuple[str, bool]] = []
+    cur_w = 0.0
+    for seg, is_math in segs:
+        if not seg:
+            continue
+        if is_math:
+            box = _math_bbox(seg, size, fonts)
+            w = (box.width + size * 0.2) if not box.is_empty \
+                else _measure(f"${seg}$", fonts, style) + size * 0.2
+            if cur and cur_w + w > max_width:
+                lines.append(cur)
+                cur, cur_w = [], 0.0
+            cur.append((seg, True))
+            cur_w += w
+            continue
+        rest = seg
+        while rest:
+            room = max_width - cur_w
+            if cur and room <= size * 0.6:      # 本行塞不下了：换行
+                lines.append(cur)
+                cur, cur_w = [], 0.0
+                room = max_width
+            parts = _wrap(rest, fonts, style, room) or [rest]
+            first = parts[0]
+            cur.append((first, False))
+            cur_w += _measure(first, fonts, style)
+            rest = rest[len(first):].lstrip()
+            if rest:
+                lines.append(cur)
+                cur, cur_w = [], 0.0
+    if cur:
+        lines.append(cur)
+    return lines or [[]]
+
+
+def _cell_segments(raw: str) -> list[tuple[str, bool]]:
+    """单元格文本 → ``[(片段, 是否公式)]``。
+
+    公式片段**原样保留**——``_`` ``*`` 在数学里是下标与乘号，被
+    ``_strip_inline`` 当内联标记吃掉的话，``$\\oint_C$`` 就成了非法
+    LaTeX（整格退回原文显示）；文字片段照常去标记。
+    """
+    return [(seg if is_math else _strip_inline(seg), is_math)
+            for seg, is_math in _split_inline_math(raw)]
+
+
+def _segments_width(segs, fonts: Sequence[FontFamily],
+                    style: TextStyle, size: float) -> float:
+    """一行「文字 + 行内公式」的排后宽度（公式按渲染包围盒计）。"""
+    total = 0.0
+    for seg, is_math in segs:
+        if is_math:
+            box = _math_bbox(seg, size, fonts)
+            total += (box.width + size * 0.2) if not box.is_empty \
+                else _measure(f"${seg}$", fonts, style)
+        else:
+            total += _measure(seg, fonts, style)
+    return total
+
+
+def _cell_parts(line, fonts: Sequence[FontFamily], style: TextStyle,
+                size: float):
+    """把一行单元格内容拆成 ``(总宽, [(载荷, 是否公式)])``。
+
+    公式载荷是渲染好的笔画（与正文同一支笔：链上画得出的字符随正文
+    笔迹重排），文字载荷是字符串。测宽与最终绘制共用同一次渲染结果。
+    """
+    parts: list[tuple] = []
+    total = 0.0
+    for seg, is_math in line:
+        if is_math:
+            box = _math_bbox(seg, size, fonts)
+            if box.is_empty:
+                text = f"${seg}$"          # 坏公式原样显示，别丢内容
+                parts.append((text, False))
+                total += _measure(text, fonts, style)
+            else:
+                from .equation import render_equation
+                eq = render_equation(seg, size_mm=size, fonts=fonts)
+                parts.append((eq, True))
+                total += box.width + size * 0.2
+        else:
+            parts.append((seg, False))
+            total += _measure(seg, fonts, style)
+    return total, parts
+
+
+def _append_math_on_line(strokes: list[Stroke], eq, x: float, baseline_y: float,
+                         seg: Optional[tuple], seg_nominal_y: float) -> float:
+    """把公式笔画摆到 ``(x, baseline_y)``；纵向跟随行界线段的实际位置。
+
+    与文字一样按**刚体平移**（公式整块跟着线走，不跟着线的倾角扭曲），
+    位移取公式水平中点处的线高。返回公式宽度（不含尾随间隙）。
+    """
+    if not eq:
+        return 0.0
+    box = BBox.from_points(p for s in eq for p in s.points)
+    dy = 0.0
+    if seg is not None:
+        (ax, ay), (bx, by) = seg
+        span = bx - ax
+        if abs(span) > 1e-9:
+            t = min(max((x + box.width * 0.5 - ax) / span, 0.0), 1.0)
+            dy = (ay + (by - ay) * t) - seg_nominal_y
+    for st in eq:
+        strokes.append(Stroke([(px + x, py + baseline_y + dy)
+                               for px, py in st.points],
+                              st.closed, st.role))
+    return box.width
 
 
 def _strip_inline(text: str) -> str:
@@ -271,6 +421,8 @@ class _Renderer:
         self.blocks: list[str] = []
         self.tables: list[tuple[float, float, float, float]] = []
         self._table_n = 0            # 表格序号：混入随机种子，各表抖动不同
+        #: 本对象渲染中出现过的缺字（供缺字上报，见 MarkdownResult）
+        self.missing: list[str] = []
 
     # -- 基础 ---------------------------------------------------------------
     def _text_style(self, size: float) -> TextStyle:
@@ -287,7 +439,8 @@ class _Renderer:
                    align: str = ALIGN_LEFT, extra_width: float = 0.0) -> None:
         ls = self._text_style(size)
         baseline = self.y - size  # 首行基线在光标下方一个字号
-        _append_text(self.strokes, text, self.fonts, ls, indent, baseline)
+        _append_text(self.strokes, text, self.fonts, ls, indent, baseline,
+                             self.missing)
         w = _measure(text, self.fonts, ls)
         self.max_x = max(self.max_x, indent + w + extra_width)
         self.y = baseline - (self._line_height(size) - size)
@@ -323,14 +476,19 @@ class _Renderer:
         for seg, is_math in segments:
             if is_math:
                 try:
-                    eq = render_equation(seg, size_mm=size * self.style.math_size_scale)
+                    # 带上本对象自己的字体链：公式里的字母与符号随正文笔迹
+                    # 重排（mathtext 原生轮廓会把 ∑ ∫ 画成实心/双线）
+                    eq = render_equation(
+                        seg, size_mm=size * self.style.math_size_scale,
+                        fonts=self.fonts)
                 except Exception:
                     eq = None      # 坏公式（如 $\\frac{1}{2$）不拖垮整段
                 if not eq:
                     # 退化为原样输出公式文本，让用户能看到哪里写错了
                     text = _strip_inline(f"${seg}$")
                     if text:
-                        w = _append_text(self.strokes, text, self.fonts, ls, x, baseline)
+                        w = _append_text(self.strokes, text, self.fonts, ls, x, baseline,
+                                         self.missing)
                         x += w
                     continue
                 # 公式基线对齐到当前文字基线
@@ -342,7 +500,8 @@ class _Renderer:
             else:
                 text = _strip_inline(seg)
                 if text:
-                    w = _append_text(self.strokes, text, self.fonts, ls, x, baseline)
+                    w = _append_text(self.strokes, text, self.fonts, ls, x, baseline,
+                                         self.missing)
                     x += w
         self.max_x = max(self.max_x, x)
         self.y = baseline - (self._line_height(size) - size)
@@ -356,7 +515,8 @@ class _Renderer:
             marker = f"{start + i}." if ordered else "•"
             baseline = self.y - size
             marker_w = _measure(marker, self.fonts, ls)
-            _append_text(self.strokes, marker, self.fonts, ls, 0.0, baseline)
+            _append_text(self.strokes, marker, self.fonts, ls, 0.0, baseline,
+                         self.missing)
             self._append_wrapped(item, ls, size, ind, baseline)
             self.max_x = max(self.max_x, ind
                              + _measure(item, self.fonts, ls) + marker_w * 0)
@@ -371,7 +531,8 @@ class _Renderer:
         lines = _wrap(_strip_inline(text), self.fonts, ls, avail)
         y = baseline
         for k, line in enumerate(lines):
-            _append_text(self.strokes, line, self.fonts, ls, indent, y)
+            _append_text(self.strokes, line, self.fonts, ls, indent, y,
+                         self.missing)
             self.max_x = max(self.max_x, indent
                              + _measure(line, self.fonts, ls))
             if k < len(lines) - 1:
@@ -426,7 +587,11 @@ class _Renderer:
             for r in all_rows:
                 if c < len(r):
                     txt = _strip_inline(r[c])
-                    w = max(w, _measure(txt, self.fonts, ls))
+                    # 列宽按**实际排出来的宽度**量：行内公式按渲染后的
+                    # 包围盒（原始 `$\sum…$` 文本宽度跟成品差很远，按它定
+                    # 列宽会让公式格永远「放不下」）
+                    w = max(w, _segments_width(_cell_segments(r[c]),
+                                               self.fonts, ls, size))
                     widest_char = max(widest_char,
                                       _widest_char_width(txt, self.fonts, ls))
             natural.append(w + 2 * CELL_PAD_MM)
@@ -457,20 +622,34 @@ class _Renderer:
                           - col_x[i] for i in range(ncol)]
 
         lh = self._line_height(size)
-        # 3) 每格按列内宽折行 → 行高取该行最高单元格
-        cell_lines: list[list[list[str]]] = []
+        # 3) 每格按列内宽折行 → 行高取该行最高单元格。含行内公式（$…$）
+        # 的单元格按「文字 + 公式」混排（公式与正文同一支笔，整块不可拆，
+        # 放不下就换行）；公式墨迹的上下缘另记，供绘制时在行内垂直居中。
+        cell_lines: list[list[list[list[tuple[str, bool]]]]] = []
+        cell_math: dict[tuple[int, int, int], tuple[float, float]] = {}
         row_heights: list[float] = []
-        for r in all_rows:
-            lines_row: list[list[str]] = []
+        for r, _row in enumerate(all_rows):
+            lines_row: list[list[list[tuple[str, bool]]]] = []
             nlines = 1
+            tall = 0.0
             for c in range(ncol):
                 inner = max(1.0, col_widths[c] - 2 * CELL_PAD_MM)
-                txt = _strip_inline(r[c]) if c < len(r) else ""
-                ls_cell = _wrap(txt, self.fonts, ls, inner)
+                segs = _cell_segments(_row[c]) if c < len(_row) else []
+                ls_cell = _wrap_segments(segs, self.fonts, ls, size, inner)
                 lines_row.append(ls_cell)
                 nlines = max(nlines, len(ls_cell))
+                # 带上下限的公式（∑ ∫）比一行字高得多，行高得让它装得下
+                for k, ln in enumerate(ls_cell):
+                    for seg, is_math in ln:
+                        if not is_math:
+                            continue
+                        box = _math_bbox(seg, size, self.fonts)
+                        if box.is_empty:
+                            continue
+                        tall = max(tall, box.height + size * 0.3)
+                        cell_math[(r, c, k)] = (box.y0, box.y1)
             cell_lines.append(lines_row)
-            row_heights.append(nlines * lh)
+            row_heights.append(max(nlines * lh, tall))
 
         # 4) 表格线（可变行高 + 随机化）
         # 线端随机化：两端沿轴向各自平移（高斯 σ=线端偏移），并按上限
@@ -525,19 +704,16 @@ class _Renderer:
             seg = _jline((0.0, yy), (total_w, yy))
             hsegs[i] = (seg[0], seg[1])
             self.strokes.append(Stroke([seg[0], seg[1]]))
-        # 表头下加粗线（用双线示意）——两条独立随机，天然错开
-        echo = _jline((0.0, ys[1]), (total_w, ys[1]))
-        self.strokes.append(Stroke([echo[0], echo[1]]))
         for x in col_x:
             self.strokes.append(Stroke(_jline((x, top), (x, bottom))))
         self.strokes.append(Stroke(_jline((total_w, top), (total_w, bottom))))
 
-        # 5) 单元格文字（垂直居中于所属行，按对齐方式水平定位）；基线
-        # 逐字符贴着所属行**底界线段**的实际位置走——线端随机的微倾、
-        # 行界抖动都会原样带动文字，字符刚体平移、不旋转不剪切
+        # 5) 单元格文字（按对齐方式水平定位；垂直方向**贴着所属行的底界
+        # 线**书写，多行时自底向上叠——与人在格子/横线本上写字的习惯一致，
+        # 居中会把字悬在格子中部，看着不像手写）；基线逐字符贴着该行的
+        # **底界线段**实际位置走——线端随机的微倾、行界抖动都会原样带动
+        # 文字，字符刚体平移、不旋转不剪切
         for r, lines_row in enumerate(cell_lines):
-            row_top = ys[r]
-            row_h = row_heights[r]
             seg_r = hsegs.get(r + 1)
             seg_y0 = ys[r + 1]
             for c, cell in enumerate(lines_row):
@@ -546,20 +722,36 @@ class _Renderer:
                 align = (aligns[c] if c < len(aligns)
                          else self.style.table_align_default)
                 cw = col_widths[c]
-                block_h = len(cell) * lh
-                # 首行基线：整块在行内垂直居中
-                base_y = row_top - (row_h - block_h) / 2.0 - size
+                # 末行基线落在底界线略上方（留出笔迹下缘的空隙），
+                # 其余行按行距向上叠
+                base_y = (ys[r + 1] + size * 0.14
+                          + (len(cell) - 1) * lh)
                 for k, line in enumerate(cell):
-                    tw = _measure(line, self.fonts, ls)
+                    tw, parts = _cell_parts(line, self.fonts, ls, size)
+                    base = base_y - k * lh
+                    # 这一行有公式时按公式墨迹在行内垂直居中：公式比一行
+                    # 字高（∑ 的上下限、∫ 的上下钩），贴底线会让限溢出框外
+                    ext = cell_math.get((r, c, k))
+                    if ext is not None:
+                        y0, y1 = ext
+                        row_h = ys[r] - ys[r + 1]
+                        base = ys[r + 1] + (row_h - (y1 - y0)) / 2.0 - y0
                     if align == "right":
                         tx = col_x[c] + cw - CELL_PAD_MM - tw
                     elif align == "center":
                         tx = col_x[c] + (cw - tw) / 2.0
                     else:
                         tx = col_x[c] + CELL_PAD_MM
-                    _append_text_on_line(self.strokes, line, self.fonts, ls,
-                                         tx, base_y - k * lh,
-                                         seg_r, seg_y0)
+                    xx = tx
+                    for payload, is_math in parts:
+                        if is_math:
+                            w = _append_math_on_line(self.strokes, payload, xx,
+                                                     base, seg_r, seg_y0)
+                            xx += w + size * 0.2
+                        else:
+                            xx += _append_text_on_line(
+                                self.strokes, payload, self.fonts, ls, xx,
+                                base, seg_r, seg_y0, self.missing)
         self.y = bottom - size * 0.6
         self.max_x = max(self.max_x, total_w)
         self.blocks.append("table")
@@ -652,6 +844,7 @@ def render_markdown(source: str, fonts: Sequence[FontFamily],
         height=box.height,
         blocks=r.blocks,
         tables=list(r.tables),
+        missing=list(r.missing),
     )
 
 

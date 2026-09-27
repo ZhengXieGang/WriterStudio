@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import bisect
 import math
 import random
 from dataclasses import dataclass, field
@@ -232,18 +233,23 @@ def _smoothstep(t: float) -> float:
 
 
 def _value_noise(rng: random.Random, xs: list[float], wavelength: float,
-                 octaves: int) -> list[float]:
+                 octaves: int, knot_jitter: float = 0.0) -> list[float]:
     """沿弧长 ``xs`` 生成**平滑**的伪随机噪声序列（值域约 [-1, 1]）。
 
     做法是「值噪声」：每隔 ``wavelength`` 放一个随机控制点，控制点之间用
     smoothstep 插值；再叠加若干倍频（频率翻倍、振幅减半）增加细节。相比直接
     给每个点加独立随机数（会得到锯齿状的毛刺），这样得到的是舒展、连贯的
     起伏——正是人手画线时的那种轻微摆动。
+
+    ``knot_jitter``：控制点位置的随机抖动比例（0 = 等间距，上限 0.9）。
+    等间距控制点会让噪声带上固定周期——长线上的规则波纹是一眼能看出来的
+    「程序感」；抖动后各倍频周期不再整齐，接近人手的不规则摆动。
     """
     n = len(xs)
     if n == 0:
         return []
     wl = wavelength if wavelength > 1e-6 else 1.0
+    jitter = max(0.0, min(0.9, knot_jitter))
     out = [0.0] * n
     norm_sq = 0.0
     for o in range(max(1, octaves)):
@@ -253,15 +259,26 @@ def _value_noise(rng: random.Random, xs: list[float], wavelength: float,
         span = xs[-1] / lam if xs[-1] > 0 else 0.0
         n_knots = max(2, int(math.ceil(span)) + 2)
         knots = [rng.uniform(-1.0, 1.0) for _ in range(n_knots)]
+        pos = None
+        if jitter > 0.0:
+            # 端点控制点不抖动：噪声在笔画两端仍由 taper 收敛到 0
+            pos = [float(i) + (rng.uniform(-jitter, jitter)
+                               if 0 < i < n_knots - 1 else 0.0)
+                   for i in range(n_knots)]
         for i, x in enumerate(xs):
             u = x / lam
-            i0 = int(u)
-            if i0 < 0:
-                i0 = 0
+            if pos is None:
+                i0 = int(u)
+                t = u - i0
+            else:
+                i0 = bisect.bisect_right(pos, u) - 1
+                if i0 < 0:
+                    i0 = 0
+                t = ((u - pos[i0]) / (pos[i0 + 1] - pos[i0])
+                     if pos[i0 + 1] > pos[i0] else 0.0)
             if i0 >= n_knots - 1:
                 out[i] += amp * knots[-1]
                 continue
-            t = u - i0
             a, b = knots[i0], knots[i0 + 1]
             out[i] += amp * (a + (b - a) * _smoothstep(t))
         norm_sq += amp * amp
@@ -436,35 +453,93 @@ def _fit_wavelength(wavelength: float, length: float,
 def _wobble_stroke(s: Stroke, rng: random.Random, amplitude: float,
                    wavelength: float, octaves: int = 4,
                    tremor: float = 0.0) -> Stroke:
-    """让一条笔画产生「人手画线」的平滑抖动。
+    """按「人手画线」的规律给笔画施加偏差（全部沿法向、端点端收敛）。
 
-    与旧实现的关键区别：
+    手绘线条的偏差不是一个均匀随机抖动，而是**几种性质不同的分量**叠加：
 
-    * 位移沿笔画的**法向**（垂直于走向）施加，而不是在 x/y 轴向上各自加正弦。
-      法向抖动才像人手「画歪了一点」，轴向上的偏移更像整条线在平移。
-    * 抖动来自**平滑噪声**（见 :func:`_value_noise`），低频、连贯，不会出现
-      逐点独立的毛刺。
-    * 端点用 taper 渐隐到原位，保证相邻笔画/闭合图形接缝处不错开；
-      taper 按弧长参数计算，长短段相间的笔画渐隐节奏一致。
-    * 长直段（如表格线、2 点线段）先按弧长细分再施加噪声，直线也能画弯。
-    * 可选 ``tremor``：叠加一层高频、小振幅的细微颤抖，模拟手部肌肉的微抖。
+    * **整体弓形**（规划误差）：整条线是朝目标「甩」过去的一段平滑弧，
+      中段最容易偏；弓向有系统性偏好（近水平线多半向上弓），约七成
+      同向——零均值的对称摆动一眼就是程序画的。
+    * **子运动**（sub-movement）：长线不是匀速一笔画完，而是 1~2cm 一段
+      的连续「瞄—画」；每段有自己的瞄准点，段界处轻微换劲。瞄准点按
+      AR(1) 游走（有回归、不无界漂移），于是长线整体比短线偏得多、
+      且偏差集中在若干段——这是等幅噪声做不出的节奏。
+    * **分形执行噪声**：1/f 型多倍频连续噪声，幅度随运笔速度变化
+      （速度越快手越不稳；速度曲线取两端慢、中段快的钟形）。
+    * **微颤**（``tremor``）：2~4mm 尺度的低幅不稳，同样按速度加权。
+      人手画线的中心线在毫米以下其实相当平滑，波长压到 1mm 以内或
+      全程均匀颤动，都会呈现「振动金属丝」式的机械波纹——比不加还假。
+    * **每笔的个性**：自信度（整体幅度缩放）、弓向、峰值位置、分段
+      节律逐笔不同，同一张图里两条平行线绝不会一模一样。
+
+    采样步长由**最细**的波长决定：按主波长取样时，微颤会被欠采样
+    （混叠）成慢波。
     """
     pts = s.points
     n = len(pts)
     if n < 2 or (amplitude <= 0.0 and tremor <= 0.0):
         return s.clone()
     wavelength = wavelength if wavelength > 1e-6 else 1.0
-    # 采样步长取波长的 ~1/7：足够表现波形，又不显著膨胀点数
-    pts = _resample_long_segments(pts, max(1.0, wavelength * 0.15))
+    tremor_wl = max(1.8, min(4.0, wavelength * 0.14))
+    step = max(0.2, min(wavelength, tremor_wl) / 6.0)
+    pts = _resample_long_segments(pts, step)
     n = len(pts)
     arc = _arc_lengths(pts)
     total = arc[-1]
     if total <= 1e-9:
         return s.clone()
 
-    main = _value_noise(rng, arc, wavelength, octaves) if amplitude > 0.0 else None
-    fine = _value_noise(rng, arc, max(0.6, wavelength * 0.08), 2) \
-        if tremor > 0.0 else None
+    ts = [a / total for a in arc]                 # 归一化弧长参数
+    # 运笔速度曲线（钟形）：两端慢、中段快
+    speed = [math.sin(math.pi * t) ** 0.7 for t in ts]
+
+    steady = rng.uniform(0.85, 1.15)              # 每笔的「稳度」
+    bow_dir = 1.0 if rng.random() < 0.7 else -1.0  # 弓向偏好
+    peak_pos = rng.uniform(0.35, 0.65)            # 弓峰位置逐笔不同
+
+    dev = [0.0] * n
+    if amplitude > 0.0:
+        # 1) 整体弓形：单峰平滑弧，端点为 0（两端是「看得见的目标点」）
+        bow = amplitude * steady * rng.uniform(0.28, 0.48) * bow_dir
+        p = peak_pos
+        for i, t in enumerate(ts):
+            u = t / p if t <= p else (1.0 - t) / max(1e-6, 1.0 - p)
+            dev[i] += bow * math.sin(math.pi * 0.5 * max(0.0, min(1.0, u)))
+        # 2) 子运动：随机分段，段界瞄准点按 AR(1) 游走（首尾锚定不动）
+        chunk_mm = max(4.0, min(20.0, wavelength * 0.55))
+        n_ch = max(1, min(40, int(round(total / chunk_mm))))
+        bounds = ([0.0]
+                  + sorted(rng.uniform(0.0, 1.0) for _ in range(n_ch - 1))
+                  + [1.0])
+        aims = [0.0]
+        sigma_aim = 0.14 * amplitude * steady
+        for _ in range(n_ch):
+            aims.append(0.75 * aims[-1] + rng.gauss(0.0, sigma_aim))
+        aims[0] = aims[-1] = 0.0
+        for i, t in enumerate(ts):
+            k = max(0, min(n_ch - 1, bisect.bisect_right(bounds, t) - 1))
+            span = bounds[k + 1] - bounds[k]
+            u = (t - bounds[k]) / span if span > 1e-9 else 1.0
+            dev[i] += aims[k] + (aims[k + 1] - aims[k]) * _smoothstep(u)
+        # 3) 分形执行噪声（幅度随速度）
+        frac = _value_noise(rng, arc, wavelength, octaves, knot_jitter=0.45)
+        for i in range(n):
+            dev[i] += (amplitude * 0.42 * steady
+                       * (0.45 + 0.55 * speed[i]) * frac[i])
+    if tremor > 0.0:
+        fine = _value_noise(rng, arc, tremor_wl, 2, knot_jitter=0.45)
+        fe = _value_noise(rng, arc, max(tremor_wl * 3.0, 8.0), 1,
+                          knot_jitter=0.4)
+        for i in range(n):
+            burst = 0.5 + 0.5 * (fe[i] + 1.0) / 2.0   # 成段：一段稳一段颤
+            dev[i] += (tremor * burst * (0.35 + 0.65 * speed[i]) * fine[i])
+
+    # 峰值约束：各分量峰值叠加时不允许明显超出「起伏振幅 + 微颤」的设定
+    peak = max((abs(v) for v in dev), default=0.0)
+    limit = 1.05 * (amplitude + tremor)
+    if peak > limit > 0.0:
+        k = limit / peak
+        dev = [v * k for v in dev]
 
     new_pts: list[Vec2] = []
     for i, (x, y) in enumerate(pts):
@@ -483,12 +558,7 @@ def _wobble_stroke(s: Stroke, rng: random.Random, amplitude: float,
         nx, ny = -ty, tx          # 法向
         t = arc[i] / total        # 弧长参数（端点 0/1，taper 渐隐到原位）
         taper = min(1.0, 4.0 * t * (1.0 - t)) if n > 2 else 1.0
-        off = 0.0
-        if main is not None:
-            off += amplitude * main[i]
-        if fine is not None:
-            off += tremor * fine[i]
-        off *= taper
+        off = dev[i] * taper
         new_pts.append((x + nx * off, y + ny * off))
     return Stroke(new_pts, s.closed, s.role, s.group)
 

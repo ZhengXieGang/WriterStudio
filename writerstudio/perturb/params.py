@@ -65,9 +65,13 @@ class PerturbParams:
                                          # 两端各随机剪掉 0..该值，长短参差
 
     # -- 线条起伏（矢量/手绘线条的「手抖」效果） -----------------------------
-    line_wobble: float = 0.0             # 沿线条法向的平滑起伏振幅 (mm)，0=不抖动
-    line_wobble_wavelength: float = 20.0  # 起伏主波长 (mm)
-    line_tremor: float = 0.0             # 细微高频颤抖振幅 (mm)，模拟手部微抖
+    line_wobble: float = 0.0             # 沿线法向的整体偏离幅度 (mm)：弓形 +
+                                         # 分段换劲 + 多尺度噪声的合成
+    line_wobble_wavelength: float = 20.0  # 起伏尺度 (mm)：同时决定分段长度
+    line_tremor: float = 0.0             # 微颤振幅 (mm)：快写时的轻微不稳。
+                                         # 真实手绘几乎看不出颤抖，按纹理理解，
+                                         # 通常 0.02~0.1mm 就够；调大反而像
+                                         # 「振动的金属丝」，不自然
 
     # -- 笔锋（确定性修饰，非随机扰动） ---------------------------------------
     # 模拟毛笔字「出锋/尖入笔」：收笔沿出笔方向甩出渐细的尖，起笔斜切入笔。
@@ -168,7 +172,7 @@ class PerturbParams:
         p.stroke_trim_mm = size_mm * 0.03
         p.line_wobble = size_mm * 0.02
         p.line_wobble_wavelength = size_mm * 6.0
-        p.line_tremor = size_mm * 0.006
+        p.line_tremor = size_mm * 0.0015
         p.smoothing = 0.15
         return p
 
@@ -194,7 +198,7 @@ class PerturbParams:
         p.stroke_trim_mm = size_mm * 0.012
         p.line_wobble = size_mm * 0.008
         p.line_wobble_wavelength = size_mm * 8.0
-        p.line_tremor = size_mm * 0.003
+        p.line_tremor = size_mm * 0.0008
         p.smoothing = 0.1
         return p
 
@@ -222,7 +226,7 @@ class PerturbParams:
         p.stroke_trim_mm = size_mm * 0.06
         p.line_wobble = size_mm * 0.04
         p.line_wobble_wavelength = size_mm * 4.0
-        p.line_tremor = size_mm * 0.012
+        p.line_tremor = size_mm * 0.003
         p.smoothing = 0.2
         return p
 
@@ -236,9 +240,9 @@ class PerturbParams:
         p = cls()
         p.enabled = True
         ref = max(1.0, reference_mm)
-        p.line_wobble = ref * 0.012          # 约为特征尺寸的 1.2%
-        p.line_wobble_wavelength = ref * 0.35
-        p.line_tremor = ref * 0.004
+        p.line_wobble = ref * 0.016          # 约为特征尺寸的 1.6%
+        p.line_wobble_wavelength = ref * 0.30
+        p.line_tremor = ref * 0.0012
         p.stroke_x_sigma = ref * 0.002
         p.stroke_y_sigma = ref * 0.002
         p.stroke_theta_sigma = 0.8

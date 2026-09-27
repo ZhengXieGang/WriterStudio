@@ -3,9 +3,11 @@
 核心设计 —— **字体回退链（fallback chain）= 单文档多字体的实现机制**：
 
     一次排版传入若干字体构成的候选序列 ``fonts``。逐字符从左到右，
-    第一个包含该字符的字体负责绘制该字符；都不含时跳过并留空。
+    第一个包含该字符的字体负责绘制该字符；都不含时再试**内置单线符号**
+    （Hershey 希腊/数学字体，或 × ≤ ≥ 这类几何画线），仍然没有才跳过并留空。
     因此「中文楷体 + Hershey 英文」组合即可自动实现中英混排，
-    无需用户手动切换字体——这就是「单文档多字体」。
+    无需用户手动切换字体——这就是「单文档多字体」；而「kΩ」「±0.5」
+    这类混在正文里的符号，即使链上一款字体都没有也不会整字丢失。
 
     在回退链之上还支持两种进阶用法：
 
@@ -26,10 +28,12 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
-from typing import Optional, Sequence
+from pathlib import Path
+from typing import Callable, Optional, Sequence
 
 from ..core.geometry import BBox, Vec2
 from ..core.strokes import Stroke
+from .hershey import parse_hershey_jhf
 from .model import FontFamily
 
 ALIGN_LEFT = "left"
@@ -197,6 +201,63 @@ def _pick_font(fonts: Sequence[FontFamily], ch: str, style: TextStyle,
     if sum(weights) <= 0.0:
         return candidates[0]
     return rng.choices(candidates, weights=weights, k=1)[0]
+
+
+# --------------------------------------------------- 内置单线符号（缺字兜底）
+#: 内置 Hershey 符号字体所在目录（数学符号/希腊字母，都是单线笔画）
+_BUILTIN_HERSHEY = Path(__file__).resolve().parent / "builtin" / "hershey"
+#: 内置符号在排版结果里的「字体名」：真实字体名列表里没有它，界面上
+#: 一眼能看出这几个字是软件补的符号
+SYMBOL_FONT_NAME = "内置符号"
+#: 几何画线符号的步距（相对字号）：符号本身宽约 0.62em，两侧留一点间隙
+_SYMBOL_ADVANCE = 0.78
+
+_symbol_fonts: dict[str, Optional[FontFamily]] = {}
+
+
+def _symbol_font(name: str) -> Optional[FontFamily]:
+    """按名字取内置 Hershey 字体（懒加载 + 缓存；没有则 None）。"""
+    if name not in _symbol_fonts:
+        path = _BUILTIN_HERSHEY / f"{name}.jhf"
+        fam: Optional[FontFamily] = None
+        if path.exists():
+            try:
+                fam = parse_hershey_jhf(path, name)
+            except (OSError, ValueError):
+                fam = None
+        _symbol_fonts[name] = fam
+    return _symbol_fonts[name]
+
+
+def _symbol_fallback(ch: str, size: float) -> Optional[
+        tuple[float, Callable[[Vec2], list[Stroke]]]]:
+    """字体链缺字时的内置兜底 → ``(步距, 笔画工厂)``；没有兜底返回 None。
+
+    顺序与公式渲染一致：先内置单线 Hershey 字体（希腊字母、∑ ∫ ± 等
+    有现成键位的符号），再几何画线（× ≤ ≥ ≈ 等键位里没有的）。
+    笔画工厂接字形基线原点、返回该符号的笔画——两种书写方向各按自己的
+    落点规则调用它，保证竖排也能兜底。
+    """
+    from ..content.equation import (
+        _PROCEDURAL_SYMBOLS,
+        _SYMBOL_FALLBACK,
+        _draw_procedural_symbol,
+    )
+
+    fb = _SYMBOL_FALLBACK.get(ch)
+    if fb is not None:
+        fam = _symbol_font(fb[0])
+        if fam is not None and fam.has(fb[1]):
+            scale = fam.scale_for_size(size)
+            g = fam.glyph(fb[1])
+            # 键位存在但没笔画（如 Hershey 的空格）＝没兜底，继续往下试
+            if g is not None and g.strokes:
+                return (g.advance * scale,
+                        lambda o: g.to_strokes(scale, o))
+    if ch in _PROCEDURAL_SYMBOLS:
+        return (size * _SYMBOL_ADVANCE,
+                lambda o: _draw_procedural_symbol(ch, o[0], o[1], size))
+    return None
 
 
 def _line_height(fonts: Sequence[FontFamily], style: TextStyle) -> float:
@@ -387,6 +448,22 @@ def _layout_horizontal(text: str,
         for ci, ch in enumerate(raw):
             font = _pick_font(fonts, ch, style, rng)
             if font is None:
+                # 链上没人能画：先用内置单线符号补（Ω ± ≤ …），补不上才留空
+                sym = _symbol_fallback(ch, style.size)
+                if sym is not None:
+                    sadv, sdraw = sym
+                    adv = sadv + style.char_spacing
+                    cand.append((CharPlacement(
+                        char=ch, font_name=SYMBOL_FONT_NAME,
+                        origin=(origin_x + x, origin_y), scale=1.0,
+                        advance=adv,
+                        strokes=(sdraw((origin_x + x, origin_y))
+                                 if with_strokes else []),
+                        line_index=row_index, char_index=ci,
+                        text_index=text_pos + ci,
+                    ), x))
+                    x += adv
+                    continue
                 if ch != " " and ch not in missing_seen:
                     missing_seen.add(ch)
                     missing.append(ch)
@@ -518,6 +595,22 @@ def _layout_vertical(text: str,
         for ci, ch in enumerate(raw):
             font = _pick_font(fonts, ch, style, rng)
             if font is None:
+                # 内置单线符号兜底（同横向排版）
+                sym = _symbol_fallback(ch, style.size)
+                if sym is not None:
+                    sadv, sdraw = sym
+                    adv = style.size + style.char_spacing if _is_wide(ch) \
+                        else sadv + style.char_spacing
+                    placements.append(CharPlacement(
+                        char=ch, font_name=SYMBOL_FONT_NAME,
+                        origin=(col_x, y - adv), scale=1.0, advance=adv,
+                        strokes=sdraw((col_x, y - adv)),
+                        line_index=li, char_index=ci,
+                        text_index=text_pos + ci,
+                    ))
+                    y -= adv
+                    trailing_cs = style.char_spacing
+                    continue
                 if ch != " " and ch not in missing_seen:
                     missing_seen.add(ch)
                     missing.append(ch)

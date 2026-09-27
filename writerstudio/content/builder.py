@@ -139,6 +139,10 @@ def make_markdown_object(source: str, manager: FontManager,
     )
     _store_table_box(obj, res.tables, box)
     _cache_put(obj.meta, fp, raw, res.tables)
+    # 缺字上报（与文本对象同一套路径）：表格表头里的 kΩ 这类字符此前
+    # 会静默消失，AI 与用户都只能靠肉眼在预览里发现
+    if res.missing:
+        obj.meta["missing"] = list(res.missing)
     return obj
 
 

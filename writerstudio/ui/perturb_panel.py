@@ -191,11 +191,15 @@ class PerturbPanel(QWidget):
         self._add(f6, "line_wobble_wavelength", "起伏波长", 0.5, 2000.0, 0.5, " mm")
         self._add(f6, "line_tremor", "细微颤抖", 0.0, 10.0, 0.01, " mm", 3)
         self._spin["line_wobble"].setToolTip(
-            "沿图形线条法向的平滑抖动，模拟人手画线的轻微摆动；\n"
-            "作用于 SVG/表格线/边框等图形线条，不影响文字笔画。")
+            "整条线偏离理想位置的最大幅度：弓形（整条线微微弯向一侧）、\n"
+            "分段换劲（长线一段一段地「瞄—画」）与多尺度噪声的合成；\n"
+            "作用于 SVG/TikZ/表格线/边框等图形线条，不影响文字笔画。")
+        self._spin["line_wobble_wavelength"].setToolTip(
+            "起伏的尺度：大值 = 长而缓的整体弯弧，小值 = 短而密的波纹；\n"
+            "同时决定分段「换劲」的长度（约 0.55 倍）。")
         self._spin["line_tremor"].setToolTip(
-            "在起伏之上叠加一层高频微抖，模拟手部肌肉的细微颤抖；\n"
-            "同样只作用于图形线条，不影响文字笔画。")
+            "快写时的手部不稳（2~4mm 尺度的小幅波动）：中段运笔快处明显、\n"
+            "两端慢处收敛，且成段忽强忽弱；只作用于图形线条。")
         vbox.addWidget(g_wobble)
 
         g_misc = QGroupBox("笔锋与平滑")
