@@ -20,7 +20,7 @@ import math
 from enum import Enum, auto
 from typing import Optional
 
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -61,7 +61,25 @@ ROTATE_OFFSET_PX = 22  # 旋转手柄距包围盒顶部的屏幕距离(px)
 MARGIN_MM = 6.0        # 包围盒外扩(mm)，用于容纳手柄/旋转柄
 HIT_GRAB_MM = 1.6      # 线条命中区沿线的抓取宽度(mm)
 MAX_IMAGE_PX = 3000    # 参考图最大解码边长(px)，避免超大图拖慢界面
+# 参考图位图的总像素预算：位图按 4 字节/像素常驻（3000×2250 的 A4 扫描件
+# ≈ 27 MB/张，几张就把内存吃掉一大块）。参考层只用于对位，按显示尺寸给到
+# 约 8 像素/毫米（≈200 DPI）足够看清模板线条，故再叠一个总像素上限。
+MAX_IMAGE_PIXELS = 3_500_000
 SNAP_PX = 8.0          # 缩放吸附的屏幕容差(px)，换算成页面 mm 后比较
+#: SVG 参考图按「每毫米多少像素」栅格化（显示尺寸变了会重建缓存）。取
+#: 16 px/mm（≈400 DPI）照顾小幅面模板的锐度——大幅面的那份会被上面的
+#: 像素预算压回来，浪费不了内存。
+_REFERENCE_PX_PER_MM = 16.0
+
+
+def _reference_pixmap_size(w: int, h: int) -> tuple[int, int]:
+    """参考图的解码尺寸：最长边与总像素双上限（等比缩，不放大）。"""
+    if w <= 0 or h <= 0:
+        return max(1, w), max(1, h)
+    k = min(1.0,
+            MAX_IMAGE_PX / max(w, h),
+            (MAX_IMAGE_PIXELS / (w * h)) ** 0.5)
+    return max(1, int(w * k)), max(1, int(h * k))
 
 
 def _snap_coord(targets, value: float, tol: float) -> Optional[float]:
@@ -930,10 +948,11 @@ class ReferenceGraphicsItem(TransformGraphicsItem):
         r = QSvgRenderer(ref.path)
         if not r.isValid():
             return None
-        w = max(1.0, ref.width_mm)
-        h = max(1.0, ref.height_mm)
-        scale = MAX_IMAGE_PX / max(w, h)
-        iw, ih = max(1, int(w * scale)), max(1, int(h * scale))
+        # SVG 本身是矢量的：按显示尺寸 × 每毫米像素数栅格化即可（显示尺寸
+        # 变了会重建缓存），同样受像素预算约束
+        iw, ih = _reference_pixmap_size(
+            int(max(1.0, ref.width_mm) * _REFERENCE_PX_PER_MM),
+            int(max(1.0, ref.height_mm) * _REFERENCE_PX_PER_MM))
         img = QImage(iw, ih, QImage.Format_ARGB32_Premultiplied)
         img.fill(Qt.transparent)
         p = QPainter(img)
@@ -945,11 +964,11 @@ class ReferenceGraphicsItem(TransformGraphicsItem):
         reader = QImageReader(ref.path)
         reader.setAutoTransform(True)
         size = reader.size()
-        if size.isValid() and max(size.width(), size.height()) > MAX_IMAGE_PX:
-            k = MAX_IMAGE_PX / max(size.width(), size.height())
-            reader.setScaledSize(size.scaled(int(size.width() * k),
-                                             int(size.height() * k),
-                                             Qt.KeepAspectRatio))
+        if size.isValid():
+            iw, ih = _reference_pixmap_size(size.width(), size.height())
+            if (iw, ih) != (size.width(), size.height()):
+                # 解码时就缩到目标尺寸（不先解出整张原图）
+                reader.setScaledSize(QSize(iw, ih))
         img = reader.read()
         if img.isNull():
             return None

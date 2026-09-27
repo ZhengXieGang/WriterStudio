@@ -2090,6 +2090,7 @@ class MainWindow(QMainWindow):
             metadata={},
             # 撤销历史日志（已撤销的 redo 分支随保存丢弃，与文档一致）
             history=self.controller.saved_history(),
+            history_pool=self.controller.saved_history_pool(),
         )
 
     def _apply_project(self, project: ProjectData) -> None:
@@ -2104,7 +2105,7 @@ class MainWindow(QMainWindow):
         n = regenerate_all(project, self.font_manager)
         self.controller.set_document(project.document)
         # 撤销历史日志重建（当前文档 = 最终状态，重放到此即可回撤）
-        self.controller.rebuild_history(project.history)
+        self.controller.rebuild_history(project.history, project.history_pool)
         # 机器配置与起点（含笔位标记）
         self.machine_panel.config = project.machine_config.clone()
         self.machine_panel.start_point = project.start_point.clone()

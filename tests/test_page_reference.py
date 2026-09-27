@@ -245,6 +245,46 @@ def test_references_serialization_roundtrip(tmp_path):
     assert ref.opacity == pytest.approx(0.6)
 
 
+def test_reference_pixmap_size_budget():
+    """参考图位图有像素预算：A4 扫描件不再按原尺寸常驻 20+MB。"""
+    from writerstudio.ui.items import (
+        MAX_IMAGE_PIXELS,
+        MAX_IMAGE_PX,
+        _reference_pixmap_size,
+    )
+
+    # 小图不放大
+    assert _reference_pixmap_size(800, 600) == (800, 600)
+    # 超预算的大图按总像素缩（等比）
+    w, h = _reference_pixmap_size(3000, 2250)
+    assert w * h <= MAX_IMAGE_PIXELS
+    assert w / h == pytest.approx(3000 / 2250, rel=0.02)
+    # 极长条图也不会把单边撑爆
+    assert max(_reference_pixmap_size(20000, 400)) <= MAX_IMAGE_PX
+
+
+def test_reference_image_item_downsamples_large_pixmap(qapp, tmp_path):
+    """画布上的参考图位图确实按预算解码（不是先解原图再缩）。"""
+    from PySide6.QtGui import QColor, QImage
+
+    from writerstudio.ui.items import MAX_IMAGE_PIXELS, ReferenceGraphicsItem
+
+    img = QImage(2500, 3300, QImage.Format_ARGB32)   # 8.25 MP，超预算
+    img.fill(QColor("white"))
+    path = tmp_path / "big.png"
+    assert img.save(str(path))
+
+    ctrl = DocumentController(Document())
+    ref = ReferenceItem(name="扫描件", path=str(path),
+                        width_mm=210.0, height_mm=277.2)
+    item = ReferenceGraphicsItem(ref, ctrl)
+    item.sync()
+    pix = item._pix
+    assert pix is not None and not pix.isNull()
+    assert pix.width() * pix.height() <= MAX_IMAGE_PIXELS
+    assert pix.width() < 2500 and pix.height() < 3300
+
+
 def test_make_reference_from_image_file(qapp, tmp_path):
     from PySide6.QtGui import QColor, QImage
     img = QImage(120, 60, QImage.Format_ARGB32)

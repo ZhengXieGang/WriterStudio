@@ -133,6 +133,80 @@ def test_stroke_json_y_flip():
     assert 0.3 < box.y1 < 0.7
 
 
+# --------------------------------------- 单线笔画 JSON：紧凑存储与内存上限
+def _write_stroke_json(path: Path, glyphs: dict[str, list], *, indent=None) -> Path:
+    import json
+    data = {f"U+{ord(ch):04X}": strokes for ch, strokes in glyphs.items()}
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=indent),
+                    encoding="utf-8")
+    return path
+
+
+def test_stroke_json_parses_synthetic_font(tmp_path):
+    """合成字库：逐点解析、Y 翻转、度量与查询接口。"""
+    p = _write_stroke_json(tmp_path / "t.json", {
+        "一": [[[0.1, 0.5], [0.9, 0.5]]],
+        "中": [[[0.5, 0.1], [0.5, 0.9]], [[0.2, 0.6], [0.8, 0.6]]],
+    })
+    f = parse_stroke_json(p, name="合成")
+    assert f.name == "合成" and f.coverage() == 2 and f.units_per_em == 1.0
+    assert f.has("中") and not f.has("国")
+    g = f.glyph("一")
+    assert g.strokes == [[(0.1, 0.5), (0.9, 0.5)]]     # Y 向下 0.5 → 翻转后 0.5
+    up = f.glyph("中").strokes[0]
+    assert up[0] == pytest.approx((0.5, 0.9))           # 0.1 → 1-0.1
+    assert f.glyph("中").advance == 1.0
+
+
+def test_stroke_json_storage_is_compact(tmp_path):
+    """坐标压成数组表：每个点只占十几字节，而不是 Python 浮点列表的 ~200。"""
+    import tracemalloc
+
+    npts = 8000
+    strokes = [[[i / 100.0, (i % 50) / 100.0] for i in range(8)]
+               for _ in range(25)]
+    glyphs = {chr(0x4E00 + k): strokes for k in range(npts // (8 * 25))}
+    p = _write_stroke_json(tmp_path / "big.json", glyphs)
+
+    tracemalloc.start()
+    try:
+        base = tracemalloc.take_snapshot()
+        f = parse_stroke_json(p)
+        got = sum(st.size_diff
+                  for st in tracemalloc.take_snapshot().compare_to(base, "lineno"))
+    finally:
+        tracemalloc.stop()
+    assert f.coverage() == len(glyphs)
+    per_point = got / npts
+    assert per_point < 40, f"每点 {per_point:.0f} 字节，紧凑存储没生效"
+
+
+def test_stroke_json_glyph_cache_is_bounded(tmp_path):
+    """转换后的字形缓存有上限：整套大字库用一遍也不会把内存顶上 100MB。"""
+    glyphs = {chr(0x4E00 + k): [[[0.1, 0.1], [0.9, 0.9]]] for k in range(3000)}
+    p = _write_stroke_json(tmp_path / "many.json", glyphs)
+    f = parse_stroke_json(p)
+    limit = type(f.glyphs).CACHE_LIMIT
+    assert f.coverage() == 3000
+    for ch in glyphs:
+        pts = f.glyph(ch).strokes[0]          # 输入 Y 向下 → 输出 Y 向上
+        assert pts[0] == pytest.approx((0.1, 0.9))
+        assert pts[1] == pytest.approx((0.9, 0.1))
+    assert len(f.glyphs._cache) <= limit      # 用完全部字形仍在上限内
+
+
+def test_stroke_json_tolerates_pretty_printed_json(tmp_path):
+    """缩进/换行（含 json.dumps(indent=2) 的排版）也要能逐条解析。"""
+    glyphs = {chr(0x4E00 + k): [[[0.2, 0.3], [0.8, 0.7]]] for k in range(5)}
+    pretty = _write_stroke_json(tmp_path / "pretty.json", glyphs, indent=2)
+    compact = _write_stroke_json(tmp_path / "compact.json", glyphs)
+    a, b = parse_stroke_json(pretty), parse_stroke_json(compact)
+    assert a.coverage() == b.coverage() == 5
+    for ch in glyphs:
+        assert a.glyph(ch).strokes == b.glyph(ch).strokes
+    assert (a.ascent, a.descent) == (b.ascent, b.descent)
+
+
 # ------------------------------------------------------------ gcode 字库
 @skip_no_refs
 @pytest.mark.skipif(not GCODE_DIR.exists(), reason="gcode 字库不存在")

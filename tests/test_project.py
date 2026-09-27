@@ -19,6 +19,7 @@ from writerstudio.project import (
     FILE_SUFFIX,
     FORMAT_ID,
     ProjectData,
+    history_entry_doc,
     load_project,
     object_from_data,
     object_to_data,
@@ -693,12 +694,18 @@ def test_history_pool_dedup_and_roundtrip(tmp_path):
     loaded = load_project(path)
     assert [e["text"] for e in loaded.history] == \
         [e["text"] for e in entries]
+    # 内存里保持池化：条目只存下标，不展开成整份文档（展开是取用时的事）
+    assert all("doc" not in e and "objects" in e for e in loaded.history)
+    assert len(loaded.history_pool) == 4
     for got, want in zip(loaded.history, entries):
-        assert got["doc"]["objects"] == want["doc"]["objects"]
-        assert got["doc"]["page"] == want["doc"]["page"]
-    # 各条目的对象数据相互独立（深拷贝，不共享可变字典）
-    loaded.history[1]["doc"]["objects"][1]["transform"] = ["tampered"]
-    assert loaded.history[2]["doc"]["objects"][1]["transform"] != ["tampered"]
+        doc = history_entry_doc(got, loaded.history_pool)
+        assert doc["objects"] == want["doc"]["objects"]
+        assert doc["page"] == want["doc"]["page"]
+    # 每次展开都是全新对象：改一份不会串染另一条（池里是不可变文本）
+    d1 = history_entry_doc(loaded.history[1], loaded.history_pool)
+    d1["objects"][1]["transform"] = ["tampered"]
+    d2 = history_entry_doc(loaded.history[2], loaded.history_pool)
+    assert d2["objects"][1]["transform"] != ["tampered"]
 
 
 def test_history_pool_load_then_undo_restores_state(tmp_path):
@@ -707,7 +714,7 @@ def test_history_pool_load_then_undo_restores_state(tmp_path):
 
     from writerstudio.ui.controller import DocumentController
     ctrl = DocumentController(loaded.document)
-    ctrl.rebuild_history(loaded.history)
+    ctrl.rebuild_history(loaded.history, loaded.history_pool)
     assert ctrl.can_undo
     # 日志第 k 条是第 k 条命令执行前的快照：撤销一次回到最后一条快照
     # （内容与最终状态相同），撤销两次才回到「移动」前的状态
@@ -744,6 +751,118 @@ def test_history_pool_corrupt_pool_drops_history_keeps_doc(tmp_path):
     loaded = load_project(bad)
     assert loaded.history == []
     assert len(loaded.document.objects) == 2     # 文档本体不受影响
+
+
+# ------------------------------------------------ 运行期日志的池化与内存
+def _ten_object_controller():
+    from writerstudio.ui.controller import DocumentController
+    doc = Document()
+    objs = [make_static_object([Stroke([(0, 0), (10, 10)])], name=f"o{i}")
+            for i in range(10)]
+    for o in objs:
+        doc.add(o)
+    return DocumentController(doc), objs
+
+
+def test_journal_is_pooled_not_full_snapshots():
+    """运行期日志同样池化：内存跟「改动过的对象版本数」走，不跟步数×文档走。"""
+    ctrl, objs = _ten_object_controller()
+    assert len(ctrl.undo_stack.pool) == 0    # 还没编辑过就没有快照
+    for step in range(30):
+        ctrl.set_transform(objs[step % 10],
+                           AffineTransform.translate(0.5, 0.0), "移动")
+    journal = ctrl.undo_stack.journal
+    assert len(journal) == 30
+    assert all("doc" not in e for e in journal)      # 不再逐条存整份文档
+    pool_n = len(ctrl.undo_stack.pool)
+    assert pool_n <= 40                      # 10 初始 + 30 次改动各一版
+    # 条目仍能完整展开（10 个对象一个不少）
+    for e in journal:
+        assert len(history_entry_doc(e, ctrl.undo_stack.pool.items)["objects"]) == 10
+
+
+def test_journal_skips_snapshot_for_merged_steps():
+    """连续合并的编辑（滑杆拖动）只记一条快照——被合并掉的快照本来就作废。"""
+    from writerstudio.ui.controller import snapshot_object
+    ctrl, objs = _ten_object_controller()
+    # 先来一步普通编辑（不吃 merge_key）：池里落下 10 个对象的初始版本
+    ctrl.set_transform(objs[1], AffineTransform.translate(1.0, 0.0), "移动")
+    obj = objs[0]
+    pool0 = len(ctrl.undo_stack.pool)
+    journal0 = len(ctrl.undo_stack.journal)
+    assert pool0 == 10 and journal0 == 1
+    for _ in range(10):
+        before = snapshot_object(obj)
+        obj.local_strokes = [s.clone() for s in obj.local_strokes]
+        obj.touch()
+        ctrl.replace_objects([(obj, before, snapshot_object(obj))],
+                            "调整手写扰动", merge_key="k")
+    assert ctrl.undo_stack.count() == 2       # 初始移动 1 条 + 十步合并成 1 条
+    assert len(ctrl.undo_stack.journal) == journal0 + 1
+    assert len(ctrl.undo_stack.pool) == pool0 + 1   # 只多了一份对象版本
+    # 不同 merge_key 的下一步不被吞掉：照常记一条
+    before = snapshot_object(obj)
+    obj.local_strokes = [s.clone() for s in obj.local_strokes]
+    obj.touch()
+    ctrl.replace_objects([(obj, before, snapshot_object(obj))],
+                         "调整字号", merge_key="other")
+    assert ctrl.undo_stack.count() == 3
+    assert len(ctrl.undo_stack.journal) == journal0 + 2
+
+
+def test_journal_pool_release_keeps_entries_resolvable():
+    """日志裁掉旧条目后释放池对象，留下的条目仍能一个不少地展开。"""
+    from writerstudio.ui.controller import JOURNAL_LIMIT
+    ctrl, objs = _ten_object_controller()
+    for step in range(JOURNAL_LIMIT + 10):
+        ctrl.set_transform(objs[step % 10],
+                           AffineTransform.translate(0.5, 0.0), "移动")
+    journal = ctrl.undo_stack.journal
+    assert len(journal) == JOURNAL_LIMIT
+    assert len(ctrl.undo_stack.pool) <= JOURNAL_LIMIT + 10
+    for e in journal:
+        doc = history_entry_doc(e, ctrl.undo_stack.pool.items)
+        assert len(doc["objects"]) == 10
+    # 撤销/重做仍然正确（池被释放过，下标不能错位）
+    while ctrl.can_undo:
+        ctrl.undo()
+    assert len(ctrl.doc.objects) == 10
+    for _ in range(5):
+        ctrl.redo()
+    assert len(ctrl.doc.objects) == 10
+
+
+def test_history_survives_load_then_save(tmp_path):
+    """打开后直接另存，撤销历史要原样写回（不再在重存时丢掉）。"""
+    path, entries = _history_project(tmp_path)
+    loaded = load_project(path)
+    from writerstudio.ui.controller import DocumentController
+    ctrl = DocumentController(loaded.document)
+    ctrl.rebuild_history(loaded.history, loaded.history_pool)
+
+    out = tmp_path / "again.wsproj"
+    save_project(out, ProjectData(document=ctrl.doc,
+                                  history=ctrl.saved_history(),
+                                  history_pool=ctrl.saved_history_pool()))
+    raw = json.loads(out.read_text(encoding="utf-8"))
+    assert [e["text"] for e in raw["history_refs"]] == \
+        [e["text"] for e in entries]
+    assert len(raw["history_pool"]) == 4        # 池仍然去重，没有重复对象
+    again = load_project(out)
+    assert [e["text"] for e in again.history] == [e["text"] for e in entries]
+
+
+def test_project_file_written_compact(tmp_path):
+    """项目文件紧凑写：缩进空白能占文件三分之二（坐标一行一个数字）。"""
+    doc = Document()
+    doc.add(make_static_object([Stroke([(0.125, 0.25), (10.5, 20.25)])],
+                               name="a"))
+    path = tmp_path / "compact.wsproj"
+    save_project(path, ProjectData(document=doc))
+    text = path.read_text(encoding="utf-8")
+    assert "\n" not in text
+    assert len(text) == len(json.dumps(json.loads(text), ensure_ascii=False,
+                                       separators=(",", ":")))
 
 
 def test_history_pool_actually_shrinks_file(tmp_path):

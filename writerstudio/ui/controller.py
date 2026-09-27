@@ -16,7 +16,12 @@ from PySide6.QtGui import QUndoCommand, QUndoStack
 from ..core.document import Document, DocumentObject, PageSpec
 from ..core.geometry import AffineTransform
 from ..core.reference import ReferenceItem
-from ..project import apply_document_data, doc_to_data
+from ..project import (
+    SnapshotPool,
+    apply_document_data,
+    history_entry_doc,
+    snapshot_entry,
+)
 
 #: 撤销历史日志的最大条数（超出丢弃最旧的快照，控制项目文件体积）
 JOURNAL_LIMIT = 60
@@ -276,21 +281,53 @@ class MoveZCommand(_DocCommand):
 
 
 class RestoreSnapshotCommand(_DocCommand):
-    """把整份文档恢复到快照（打开项目时重建撤销历史用）。"""
+    """把整份文档恢复到快照（打开项目时重建撤销历史用）。
+
+    ``before``/``after`` 是**历史条目**（池化下标或旧式全量快照），只在执行
+    时才展开成完整文档数据——历史条目在内存里保持池化形态，不再各存一份
+    整份文档（见 :class:`~writerstudio.project.SnapshotPool`）。
+    """
 
     def __init__(self, controller: "DocumentController",
-                 before: dict, after: dict, text: str) -> None:
+                 before: dict, after: dict, pool: SnapshotPool,
+                 text: str) -> None:
         super().__init__(controller, text)
-        self._before = before
-        self._after = after
+        self.before = before
+        self.after = after
+        self._pool = pool
+
+    def _apply(self, entry: dict) -> None:
+        apply_document_data(self._ctrl.doc,
+                            history_entry_doc(entry, self._pool.items))
+        self._notify()
 
     def redo(self) -> None:
-        apply_document_data(self._ctrl.doc, self._after)
-        self._notify()
+        self._apply(self.after)
 
     def undo(self) -> None:
-        apply_document_data(self._ctrl.doc, self._before)
-        self._notify()
+        self._apply(self.before)
+
+
+def _will_merge(top, cmd) -> bool:
+    """预判 ``cmd`` 入栈时会不会与栈顶命令合并（QUndoStack 的合并规则）。
+
+    Qt 只在 ``cmd.id() != -1 且与栈顶 id 相同 且 mergeWith 返回真`` 时合并；
+    本工程的合并只发生在 :class:`ObjectStateCommand`（同 merge_key、同对象），
+    因此这里的判定与 :meth:`ObjectStateCommand.mergeWith` 逐条对应。合并进
+    栈顶意味着这一条**不需要**记录执行前快照（合并后栈顶原来的快照就是正确
+    的那一份），滑杆拖动这类连续合并的操作用它省掉整份文档的快照开销。
+    万一预判偏保守（判成要合并、实际没合并），后果只是这一步并进上一档，
+    历史仍是真实状态序列，不会损坏。
+    """
+    if top is None or cmd.id() == -1 or cmd.id() != top.id():
+        return False
+    if not isinstance(top, ObjectStateCommand) or \
+            not isinstance(cmd, ObjectStateCommand):
+        return False
+    if top._merge_key != cmd._merge_key:
+        return False
+    return ([id(o) for o, _, _ in top._entries]
+            == [id(o) for o, _, _ in cmd._entries])
 
 
 class JournalingUndoStack(QUndoStack):
@@ -299,33 +336,71 @@ class JournalingUndoStack(QUndoStack):
     每次 ``push`` 前记录执行前的文档快照（连同命令文字），供项目文件保存/
     恢复撤销历史——关闭程序再打开后仍能逐步回撤。日志与栈条目一一对应
     （合并命令在重建后会拆回多步，粒度略有差异，不影响正确性）。
+
+    日志是**池化**的：条目只存对象池下标，池里每个对象内容一份（见
+    :class:`~writerstudio.project.SnapshotPool`），因此内存占用取决于
+    「改动过的对象版本数」而不是「编辑步数 × 文档大小」。
     """
 
     def __init__(self, snapshot_fn, parent=None) -> None:
         super().__init__(parent)
+        # snapshot_fn(pool) -> 一条池化快照
         self._snapshot_fn = snapshot_fn
+        self._pool = SnapshotPool()
         self._journal: list[dict] = []
         self._suspended = False      # 历史重建（重放）期间不再记日志
         self._dropped = 0            # 日志头部被裁掉的条数（对齐栈下标用）
 
+    @property
+    def pool(self) -> SnapshotPool:
+        return self._pool
+
+    def set_pool(self, pool: SnapshotPool) -> None:
+        """接手一份已有对象池（打开项目后继续记日志用）。"""
+        self._pool = pool
+
     def push(self, cmd) -> None:  # noqa: N802
-        if not self._suspended and self._snapshot_fn is not None:
+        top = self.command(self.index() - 1) if self.index() > 0 else None
+        if not self._suspended and self._snapshot_fn is not None \
+                and not _will_merge(top, cmd):
             try:
-                self._journal.append(
-                    {"text": cmd.text(), "doc": self._snapshot_fn()})
+                entry = self._snapshot_fn(self._pool)
+                entry["text"] = cmd.text()
+                self._journal.append(entry)
             except Exception:
                 pass                  # 日志失败不影响正常撤销
             while len(self._journal) > JOURNAL_LIMIT:
                 self._journal.pop(0)
                 self._dropped += 1
+            self.release_unused()
         super().push(cmd)
         # 撤销后重新 push：栈会截掉 redo 分支，日志按对齐偏移同步截断
         keep = self.index() - self._dropped
         if 0 <= keep < len(self._journal):
             del self._journal[keep:]
+            self.release_unused()
+
+    def live_entries(self) -> list[dict]:
+        """仍被引用的历史条目（日志 + 撤销栈里的重建命令）。
+
+        重放出来的命令与日志共享同一批条目对象，这里只用来收集池下标，
+        重复计入无妨。
+        """
+        out = list(self._journal)
+        for i in range(self.count()):
+            cmd = self.command(i)
+            if isinstance(cmd, RestoreSnapshotCommand):
+                out.append(cmd.before)
+                out.append(cmd.after)
+        return out
+
+    def release_unused(self) -> int:
+        """释放不再被任何历史条目引用的池对象（见 ``SnapshotPool.release``）。"""
+        return self._pool.release(self.live_entries())
 
     def clear(self) -> None:  # noqa: N802
         self._journal.clear()
+        self._pool = SnapshotPool()
         self._dropped = 0
         super().clear()
 
@@ -349,7 +424,7 @@ class DocumentController(QObject):
     def __init__(self, doc: Optional[Document] = None, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
         self._doc = doc if doc is not None else Document()
-        self.undo_stack = JournalingUndoStack(self._snapshot_doc, self)
+        self.undo_stack = JournalingUndoStack(self._snapshot_entry, self)
         self.undo_stack.setUndoLimit(200)
         # 双击对象时的回调（由主窗口设置）：on_object_activated(obj)
         self.on_object_activated = None
@@ -366,37 +441,48 @@ class DocumentController(QObject):
         self.undo_stack.clear()
         self.documentReplaced.emit()
 
-    def _snapshot_doc(self) -> dict:
-        """当前文档的快照（撤销历史日志用）。"""
-        return doc_to_data(self._doc)
+    def _snapshot_entry(self, pool: SnapshotPool) -> dict:
+        """当前文档的一条池化快照（撤销历史日志用；不复制整份文档）。"""
+        return snapshot_entry(self._doc, pool)
 
     def saved_history(self) -> list[dict]:
         """可保存的撤销历史日志（不含已撤销的 redo 分支）。"""
         return self.undo_stack.journal_upto(self.undo_stack.index())
 
-    def rebuild_history(self, entries: list[dict]) -> None:
+    def saved_history_pool(self) -> list[str]:
+        """日志配套的对象池（紧凑 JSON 文本，可能有已释放的空槽）。"""
+        return list(self.undo_stack.pool.items)
+
+    def rebuild_history(self, entries: list[dict],
+                        pool: Optional[list[str]] = None) -> None:
         """按保存的快照日志重建撤销历史（当前文档内容 = 最终状态）。
 
         日志第 k 项是第 k 条命令执行**前**的文档快照：把文档先回到日志[0]，
         再逐条 push 快照替换命令推进到当前状态——push 的重放过程即恢复历史，
         完成后与保存时的文档一致、撤销链可用。期间屏蔽信号（界面只重建一次）。
+
+        ``entries``/``pool`` 保持池化形态直接用（不再展开成逐条全量快照），
+        重放命令执行时才展开那一步——打开复杂项目的内存因此只与「改动过的
+        对象版本数」有关，而不是「步数 × 文档大小」。
         """
         entries = [e for e in (entries or [])
-                   if isinstance(e, dict) and e.get("doc")]
-        self.undo_stack.clear()
+                   if isinstance(e, dict) and ("doc" in e or "objects" in e)]
+        stack = self.undo_stack
+        stack.clear()
+        stack.set_pool(SnapshotPool(pool or ()))
         if not entries:
             return
-        final = doc_to_data(self._doc)
-        stack = self.undo_stack
+        final = snapshot_entry(self._doc, stack.pool)
         stack._suspended = True
         self.blockSignals(True)
         ok = True
         try:
-            apply_document_data(self._doc, entries[0]["doc"])
+            apply_document_data(
+                self._doc, history_entry_doc(entries[0], stack.pool.items))
             for i, e in enumerate(entries):
-                after = entries[i + 1]["doc"] if i + 1 < len(entries) else final
+                after = entries[i + 1] if i + 1 < len(entries) else final
                 stack.push(RestoreSnapshotCommand(
-                    self, e["doc"], after,
+                    self, e, after, stack.pool,
                     str(e.get("text") or f"步骤 {i + 1}")))
         except Exception:
             ok = False
@@ -405,6 +491,11 @@ class DocumentController(QObject):
             stack._suspended = False
         if not ok:
             stack.clear()
+        else:
+            # 重放出来的这些命令与日志一一对应（日志[k] = 第 k 条命令之前的
+            # 状态），把日志接上去，之后保存项目时历史原样写回，不会丢。
+            stack._journal = list(entries)
+            stack._dropped = 0
         self.documentReplaced.emit()
         stack.setClean()
 

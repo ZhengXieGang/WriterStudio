@@ -36,19 +36,21 @@
 撤销命令执行**前**的文档状态。相邻快照间绝大多数对象完全相同，因此把
 对象数据抽进 ``history_pool`` 去重（相同内容只存一份），``history_refs``
 按序引用池下标——否则每次小移动都会存一整份文档，文件随操作次数线性
-膨胀（见 ``_history_pool_pack``）。打开项目时还原成逐条完整快照重放到
-当前状态，撤销语义与旧版完全一致。
-旧版的 ``"history": [{"text", "doc"}]`` 全量快照格式仍可读取（见
-``project_from_data``）。
+膨胀（见 ``_history_pool_pack``）。
+
+**内存里也保持这个池化形态**（:class:`SnapshotPool`），池对象以紧凑 JSON
+文本存放：旧实现打开项目时把池展开成逐条完整快照，5.58 MB 的项目文件
+光历史就常驻 113 MB，编辑时每步再追加一份全量快照。展开是**用的时候才做**
+的（:func:`history_entry_doc`），撤销/重放时会得到全新对象，绝无共享可变
+结构之虞。旧版的 ``"history": [{"text", "doc"}]`` 全量快照格式仍可读取。
 """
 
 from __future__ import annotations
 
-import copy
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from .core.document import Document, DocumentObject, PageSpec, SourceSpec
 from .core.geometry import AffineTransform
@@ -77,8 +79,12 @@ class ProjectData:
     search_dirs: list[str] = field(default_factory=list)
     preferred_fonts: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
-    # 撤销历史日志（每项 = 一条命令执行前的文档快照），见模块 docstring
+    # 撤销历史日志（每项 = 一条命令执行前的文档快照），见模块 docstring。
+    # 条目有两种形态：池化条目（``objects``/``references`` 存池下标）与旧式
+    # 全量快照（``doc``）——后者只出现在旧文件与历史重建路径里。
     history: list[dict[str, Any]] = field(default_factory=list)
+    #: 池化历史的对象池（紧凑 JSON 文本，按内容去重），与 ``history`` 配套
+    history_pool: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -142,19 +148,169 @@ def project_to_data(project: ProjectData) -> dict:
         },
         "metadata": dict(project.metadata),
     }
-    entries = [
-        {"text": str(e.get("text", "")), "doc": e["doc"]}
-        for e in project.history if isinstance(e, dict) and e.get("doc")
-    ]
+    entries = [e for e in project.history if isinstance(e, dict)]
     if entries:
-        packed, pool = _history_pool_pack(entries)
-        data["history_refs"] = packed
-        data["history_pool"] = pool
+        if any("doc" in e for e in entries):
+            # 旧式全量快照（历史重建/外部构造）：打包成池化条目
+            packed, pool = _history_pool_pack(
+                [{"text": str(e.get("text", "")), "doc": e["doc"]}
+                 for e in entries if e.get("doc")])
+            data["history_refs"] = packed
+            data["history_pool"] = pool
+        else:
+            # 池化条目（运行期日志/刚读入的文件）：池里是 JSON 文本，
+            # 写出时才解析成对象——内存里始终只留紧凑文本。
+            # 池可能有已释放的空洞（日志裁掉旧条目后留下的），写出前压实并
+            # 同步重编条目下标。
+            texts, remap = _compact_pool(project.history_pool)
+            data["history_refs"] = [_remap_entry(e, remap) for e in entries]
+            data["history_pool"] = history_pool_to_data(texts)
     return data
 
 
+def _compact_pool(pool: Sequence[Optional[str]]
+                  ) -> tuple[list[str], dict[int, int]]:
+    """压实带空洞的对象池，返回 ``(紧凑文本列表, 旧下标→新下标)``。"""
+    texts: list[str] = []
+    remap: dict[int, int] = {}
+    for i, text in enumerate(pool):
+        if text is not None:
+            remap[i] = len(texts)
+            texts.append(text)
+    return texts, remap
+
+
+def _remap_entry(entry: dict[str, Any], remap: dict[int, int]) -> dict[str, Any]:
+    """按下标映射复制一条历史条目（不改动原条目——撤销栈还在用它）。"""
+    out = dict(entry)
+    for key in ("objects", "references"):
+        out[key] = [remap[i] for i in entry.get(key) or [] if i in remap]
+    return out
+
+
 # ---------------------------------------------------------------------------
-# 撤销历史的体积去重：对象池 + 池下标引用
+# 撤销历史：对象池（内容去重）+ 池下标引用
+#
+# 相邻两步快照之间绝大多数对象完全没变。逐条存整份文档会让内存与文件都随
+# 编辑步数线性膨胀（实测 59 步 × 5.1 MB ≈ 300 MB 常驻），因此历史一律是
+# 「条目 + 池」两段式：
+#
+#     entry = {"text", "page", "objects": [池下标...],
+#              "references": [池下标...], "metadata"}
+#     pool  = 每个对象内容一份，按内容去重
+#
+# 池里存的是**紧凑 JSON 文本**而不是可变 dict：体积比 Python 对象小一个
+# 数量级（同一份 0.72 MB 文档：对象图 ≈ 5 MB，文本 ≈ 0.7 MB），而且天然
+# 只读——取用时 ``json.loads`` 得到全新对象，绝不会与文档里的活对象共享
+# 可变结构（旧实现逐条深拷贝整份快照，正是内存暴增的来源）。
+# ---------------------------------------------------------------------------
+def compact_dumps(value: Any) -> str:
+    """紧凑 JSON 文本（去重键与池内存储都用它）。"""
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+class SnapshotPool:
+    """按内容去重的快照对象池（内存形态 = 文件里的 ``history_pool``）。"""
+
+    __slots__ = ("_items", "_index")
+
+    def __init__(self, items: Optional[Sequence[str]] = None) -> None:
+        self._items: list[Optional[str]] = list(items or ())
+        self._index: dict[str, int] = {t: i for i, t in enumerate(self._items)
+                                       if t is not None}
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    @property
+    def items(self) -> list[Optional[str]]:
+        return self._items
+
+    def ref(self, data: dict[str, Any]) -> int:
+        """把一个对象/参考图数据登记进池（内容相同只存一份），返回池下标。"""
+        text = compact_dumps(data)
+        i = self._index.get(text)
+        if i is None:
+            i = len(self._items)
+            self._index[text] = i
+            self._items.append(text)
+        return i
+
+    def release(self, entries: list[dict[str, Any]]) -> int:
+        """释放不再被任何历史条目引用的池对象（日志裁掉旧条目后调用）。
+
+        只把槽位清成 ``None``，**不重编号**：历史条目里存的是池下标，重编号
+        就得把所有持有者（日志条目 + 撤销栈里的重建命令，它们可能共享同一个
+        条目对象）统统改写一遍，改漏或改两遍都会让撤销恢复到错误状态。
+        留洞只多几个空指针，返回释放的条目数。
+        """
+        keep = {i for e in entries
+                for i in (e.get("objects") or []) + (e.get("references") or [])
+                if isinstance(i, int)}
+        freed = 0
+        for i, text in enumerate(self._items):
+            if text is not None and i not in keep:
+                self._items[i] = None
+                self._index.pop(text, None)
+                freed += 1
+        return freed
+
+
+def page_to_data(page: PageSpec) -> dict[str, Any]:
+    return {
+        "width": page.width,
+        "height": page.height,
+        "margin": page.margin,
+        "preset_name": page.preset_name,
+    }
+
+
+def snapshot_entry(doc: Document, pool: SnapshotPool) -> dict[str, Any]:
+    """当前文档的一条**池化**快照（撤销日志用；不复制整份文档）。"""
+    return {
+        "page": page_to_data(doc.page),
+        "objects": [pool.ref(object_to_data(o)) for o in doc.objects],
+        "references": [pool.ref(r.to_data()) for r in doc.references],
+        "metadata": dict(doc.metadata),
+    }
+
+
+def history_entry_doc(entry: dict[str, Any],
+                      pool: Sequence[Optional[str]]) -> dict[str, Any]:
+    """把一条历史条目展开成完整文档快照（每次调用都产出全新对象）。
+
+    旧版 ``{"text", "doc"}`` 全量快照条目直接返回其中的 ``doc``（老文件与
+    历史重建路径仍在用），池化条目按池下标取对象；下标越界或已释放的槽位
+    跳过（损坏/异常时尽量少丢内容，与读文件时的容错一致）。
+    """
+    doc = entry.get("doc")
+    if isinstance(doc, dict):
+        return doc
+    out: dict[str, Any] = {
+        "page": entry.get("page") or {},
+        "objects": [],
+        "references": [],
+        "metadata": dict(entry.get("metadata") or {}),
+    }
+    for key, target in (("objects", out["objects"]), ("references", out["references"])):
+        for i in entry.get(key) or []:
+            if isinstance(i, int) and 0 <= i < len(pool) and pool[i] is not None:
+                target.append(json.loads(pool[i]))
+    return out
+
+
+def history_pool_to_data(pool: Sequence[str]) -> list[dict[str, Any]]:
+    """池（JSON 文本）→ 文件里的 ``history_pool``（对象列表）。"""
+    return [json.loads(t) for t in pool]
+
+
+def history_pool_from_data(pool_data: Sequence[Any]) -> list[str]:
+    """文件里的 ``history_pool``（对象列表）→ 池（JSON 文本）。"""
+    return [compact_dumps(o) for o in pool_data if isinstance(o, dict)]
+
+
+# ---------------------------------------------------------------------------
+# 旧式全量快照 → 池化条目（历史重建路径与旧调用方用）
 # ---------------------------------------------------------------------------
 def _history_pool_pack(entries: list[dict[str, Any]]
                        ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -167,70 +323,26 @@ def _history_pool_pack(entries: list[dict[str, Any]]
         history_refs[k] = {"text", "page", "objects": [池下标...],
                            "references": [池下标...], "metadata"}
 
-    页面参数与元数据每条单独存（几十字节，不值得进池）。还原见
-    :func:`_history_pool_unpack`。
+    页面参数与元数据每条单独存（几十字节，不值得进池）。
     """
-    pool: list[dict[str, Any]] = []
-    index: dict[str, int] = {}
-
-    def _ref(data: dict[str, Any]) -> int:
-        key = json.dumps(data, ensure_ascii=False, sort_keys=True)
-        i = index.get(key)
-        if i is None:
-            i = len(pool)
-            index[key] = i
-            pool.append(data)
-        return i
-
+    pool = SnapshotPool()
     packed: list[dict[str, Any]] = []
     for e in entries:
         doc = e.get("doc") or {}
         packed.append({
             "text": str(e.get("text", "")),
             "page": doc.get("page", {}),
-            "objects": [_ref(o) for o in doc.get("objects", [])],
-            "references": [_ref(r) for r in doc.get("references", [])],
+            "objects": [pool.ref(o) for o in doc.get("objects", [])],
+            "references": [pool.ref(r) for r in doc.get("references", [])],
             "metadata": doc.get("metadata", {}),
         })
-    return packed, pool
-
-
-def _history_pool_unpack(packed: list[dict[str, Any]],
-                         pool: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """把池化历史还原成旧式全量快照（``[{"text", "doc"}, ...]``）。
-
-    还原出的对象数据逐份深拷贝——历史各条目会长期驻留在撤销栈日志里，
-    不能共享同一份可变字典（一条命令的重建若原地改动会串染其它条目）。
-    池下标越界按缺失对象跳过（文件损坏时尽量少丢内容）。
-    """
-    n = len(pool)
-    entries: list[dict[str, Any]] = []
-    for e in packed:
-        entries.append({
-            "text": str(e.get("text", "")),
-            "doc": {
-                "page": copy.deepcopy(e.get("page", {})),
-                "objects": [copy.deepcopy(pool[i])
-                            for i in e.get("objects", [])
-                            if isinstance(i, int) and 0 <= i < n],
-                "references": [copy.deepcopy(pool[i])
-                               for i in e.get("references", [])
-                               if isinstance(i, int) and 0 <= i < n],
-                "metadata": dict(e.get("metadata", {})),
-            },
-        })
-    return entries
+    return packed, history_pool_to_data(pool.items)
 
 
 def doc_to_data(doc: Document) -> dict:
     """文档（页面 + 对象 + 参考层 + 元数据）的快照——也是项目文件的主体。"""
     return {
-        "page": {
-            "width": doc.page.width,
-            "height": doc.page.height,
-            "margin": doc.page.margin,
-            "preset_name": doc.page.preset_name,
-        },
+        "page": page_to_data(doc.page),
         "objects": [object_to_data(o) for o in doc.objects],
         "references": [r.to_data() for r in doc.references],
         "metadata": dict(doc.metadata),
@@ -310,19 +422,22 @@ def project_from_data(data: dict) -> ProjectData:
 
     mach = data.get("machine", {})
     fonts = data.get("fonts", {})
-    # 撤销历史：新版为池化格式（history_refs + history_pool），
-    # 旧版为逐条全量快照（history），两者都能读。
+    # 撤销历史：池化格式（history_refs + history_pool）保持池化读入——展开成
+    # 逐条全量快照会让内存随编辑步数线性膨胀（实测 5.58 MB 的项目文件展开后
+    # 常驻 113 MB）。旧版逐条全量快照（history）也照读，语义由 project_to_data
+    # 与历史重建统一处理。
     # 池缺失/损坏时整体放弃历史——半份池会让撤销重放出空文档，
     # 比没有历史危险得多；文档本体不受影响。
+    history_pool: list[str] = []
     if isinstance(data.get("history_refs"), list):
         pool = data.get("history_pool")
         if isinstance(pool, list):
             try:
-                history = _history_pool_unpack(
-                    [e for e in data["history_refs"] if isinstance(e, dict)],
-                    [o for o in pool if isinstance(o, dict)])
+                history_pool = history_pool_from_data(pool)
+                history = [dict(e) for e in data["history_refs"]
+                           if isinstance(e, dict)]
             except Exception:
-                history = []
+                history, history_pool = [], []
         else:
             history = []
     else:
@@ -336,6 +451,7 @@ def project_from_data(data: dict) -> ProjectData:
         preferred_fonts=list(fonts.get("preferred", [])),
         metadata=dict(data.get("metadata", {})),
         history=history,
+        history_pool=history_pool,
     )
 
 
@@ -343,7 +459,10 @@ def project_from_data(data: dict) -> ProjectData:
 # 文件读写
 # ---------------------------------------------------------------------------
 def save_project(path: str | Path, project: ProjectData,
-                 *, indent: Optional[int] = 1) -> None:
+                 *, indent: Optional[int] = None) -> None:
+    """写项目文件。默认紧凑 JSON：坐标数组缩进后每行一个数字，缩进空白能占
+    文件的三分之二（实测 9.86 MB 的项目紧凑写只有 3.21 MB），白白拖慢读写、
+    抬高打开时的文本/解析峰值。``indent`` 仅调试用。"""
     path = Path(path)
     if path.suffix.lower() != FILE_SUFFIX:
         path = path.with_suffix(FILE_SUFFIX)
