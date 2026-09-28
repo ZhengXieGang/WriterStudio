@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "writerstudio"
-version = "0.1.0"
+version = "0.2.0"
 description = "ESP32 GRBL 写字机软件：多字体、手写扰动、Markdown/LaTeX、矢量绘图"
 readme = "README.md"
 requires-python = ">=3.10"
