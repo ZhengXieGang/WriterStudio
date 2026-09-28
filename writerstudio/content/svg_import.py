@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from ..core.geometry import BBox
-from ..core.strokes import Stroke
+from ..core.strokes import ROLE_STRUCTURE, Stroke
 
 # 常用单位 → mm
 _UNIT_TO_MM = {
@@ -142,6 +142,11 @@ def import_svg(path: str | Path,
 
     ``target_width_mm`` 给定时按宽度等比缩放；否则按 ``natural_scale``
     （缺省 px→mm，即文件物理尺寸）。``tolerance`` 为曲线离散容差（mm）。
+
+    笔画带 ``role="structure"``：导入的图形是**几何**——端点、长度、位置
+    都是内容本身（坐标轴要交于原点、方框要闭合、刻度线要贴住轴）。扰动
+    引擎只给它们叠线条起伏，不做整笔旋转/伸缩/修剪；否则每根线各歪一两度、
+    各挪两三毫米，一副精确的图就成了「草稿」。（TikZ/LaTeX 也走本函数。）
     """
     result = SVGImportResult()
     raw, warnings = parse_svg_geometry(path, tolerance)
@@ -153,7 +158,7 @@ def import_svg(path: str | Path,
     box, scale = normalize_params(raw, target_width_mm, natural_scale)
     for s in raw:
         pts = [normalize_point(x, y, box, scale) for x, y in s.points]
-        result.strokes.append(Stroke(pts, s.closed))
+        result.strokes.append(Stroke(pts, s.closed, ROLE_STRUCTURE))
 
     nb = BBox.from_points(p for s in result.strokes for p in s.points)
     result.width = nb.width

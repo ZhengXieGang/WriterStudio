@@ -325,6 +325,14 @@ _STRUCTURAL_MIN_MM = 4.0        # 结构长线的绝对长度下限
 _STRUCTURAL_MIN_WAVES = 2.0     # 起伏至少铺满几个波，避免退化成单向倾斜
 _JUNCTION_TOL_MM = 0.6          # 端点相接/落在对方上的判定容差
 
+# 短笔画的幅度收敛：起伏/微颤的幅度与末端修剪都按绝对毫米给（线条起伏
+# 0.35mm、修剪 0.3mm 是 15mm 量级线条的合适值），但同一组数字放到 1~2mm
+# 的细碎线段（刻度线、虚线小段、箭头、图形细部）上就是 20% 的弯折和明显
+# 缩短——人手画这么短的线几乎是直的。幅度与修剪因此再按线长封顶。
+_WOBBLE_MAX_REL = 0.04          # 起伏幅度 ≤ 线长的 4%
+_TREMOR_MAX_REL = 0.02          # 微颤幅度 ≤ 线长的 2%
+_TRIM_MAX_REL = 0.05            # 单端修剪 ≤ 线长的 5%
+
 
 def _point_near_segment(p, a, b, tol: float) -> bool:
     """点 ``p`` 是否落在（或贴着）线段 ``a-b`` 上。"""
@@ -416,9 +424,9 @@ def _is_structural_strokes(strokes: Sequence[Stroke]) -> list[bool]:
 
     两类来源：
 
-    * 排版器显式标注的（``role=ROLE_STRUCTURE``）：表格网格、分隔线、
-      引述竖线。这些线由排版器自己画、连线关系是已知的，直接按结构线
-      处理，不依赖几何判定。
+    * 显式标注的（``role=ROLE_STRUCTURE``）：排版器画的表格网格、分隔线、
+      引述竖线，以及导入的矢量图形（SVG/TikZ/LaTeX）。这些笔画的端点与
+      长度本身就是内容，直接按结构线处理，不依赖几何判定。
     * 未标注的长线：长度 ≥ :data:`_STRUCTURAL_MIN_MM`，且通过端点相接
       与另一条同类线连通。单独一条长线没有可被撕开的接缝，整体旋转反而
       能带来自然的手写变化，应照常处理（返回 False）。
@@ -426,7 +434,9 @@ def _is_structural_strokes(strokes: Sequence[Stroke]) -> list[bool]:
     端点相接的几何判定只对未标注线生效，是因为它靠不住：表格自带的线端
     随机（``table_end_jitter``）会把本应相交的端点推开到容差之外，同一条
     线判不判得成结构线全看那一把随机数——没判成的线被整体旋转几度，在
-    一张端端正正的表格里就是「莫名其妙歪掉的那一条」。
+    一张端端正正的表格里就是「莫名其妙歪掉的那一条」。判定本身也只认
+    「端点在对方线上」，交叉（十字）相接的两条长线（TikZ 的坐标轴就是）
+    一直漏判。
 
     实测：markdown 表格开启扰动后，网格线被各自整体旋转/平移，端点从
     交叉处错开，看起来像「沿正弦波斜切」而非手绘——正是这类互相连接的
@@ -483,6 +493,11 @@ def _wobble_stroke(s: Stroke, rng: random.Random, amplitude: float,
 
     采样步长由**最细**的波长决定：按主波长取样时，微颤会被欠采样
     （混叠）成慢波。
+
+    幅度与微颤都按线长封顶（:data:`_WOBBLE_MAX_REL` / :data:`_TREMOR_MAX_REL`）：
+    参数按绝对毫米给是为 15mm 量级的线条定的，落在 1~2mm 的细碎线段上
+    就成了 20% 的弯折（刻度线被扭成小钩子）。封顶只对短线生效，长线
+    完全不受影响；取用随机数的顺序不变，同 seed 结果仍然确定。
     """
     pts = s.points
     n = len(pts)
@@ -496,6 +511,10 @@ def _wobble_stroke(s: Stroke, rng: random.Random, amplitude: float,
     arc = _arc_lengths(pts)
     total = arc[-1]
     if total <= 1e-9:
+        return s.clone()
+    amplitude = min(amplitude, total * _WOBBLE_MAX_REL)
+    tremor = min(tremor, total * _TREMOR_MAX_REL)
+    if amplitude <= 0.0 and tremor <= 0.0:
         return s.clone()
 
     ts = [a / total for a in arc]                 # 归一化弧长参数
@@ -627,6 +646,10 @@ def _finish_stroke(s: Stroke, rng: random.Random, params: PerturbParams,
     末端修剪与笔锋——这些都会改变端点，等于把线条从结构接缝处撕开；
     只保留平滑起伏，且起伏波长收敛到线长以内，短线上也有完整波形。
     随机数仍照常取用，保证序列不受分类影响。
+
+    末端修剪按线长封顶（:data:`_TRIM_MAX_REL`）：固定的 0.3mm 修剪在
+    15mm 的笔画上是 2%，在 1.5mm 的短笔画上却是 20%——短笔画会被剪得
+    明显短一截。取用随机数的个数不变。
     """
     is_glyph = s.role == ROLE_GLYPH
     f = params.intensity_factor
@@ -634,8 +657,9 @@ def _finish_stroke(s: Stroke, rng: random.Random, params: PerturbParams,
     trim = _scaled(params.stroke_trim_mm, params)
     trim_u1 = trim_u2 = 0.0
     if trim > 0.0:
-        trim_u1 = rng.uniform(0.0, trim)
-        trim_u2 = rng.uniform(0.0, trim)
+        cap = s.length() * _TRIM_MAX_REL
+        trim_u1 = min(rng.uniform(0.0, trim), cap)
+        trim_u2 = min(rng.uniform(0.0, trim), cap)
     if structural:
         ps = s.clone()
     else:

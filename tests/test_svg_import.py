@@ -85,3 +85,37 @@ def test_mixed_path_single_stroke(tmp_path):
     res = import_svg(path)
     assert len(res.strokes) == 1
     assert len(res.strokes[0].points) >= 5
+
+
+def test_imported_strokes_marked_structural(tmp_path):
+    """导入的图形笔画带结构线标记：几何是内容，扰动不得整笔旋转/伸缩/修剪。
+
+    回归：TikZ/SVG 的坐标轴、方框、刻度线此前与手写笔画同等对待，各自
+    被整体旋转几度、平移两三毫米、两端随机修剪——一副精确的图被搅成草稿
+    （坐标轴不再交于原点、方框歪成梯形、刻度线缩成小钩子）。
+    """
+    from writerstudio.core.strokes import ROLE_STRUCTURE
+    from writerstudio.perturb.engine import perturb_strokes
+    from writerstudio.perturb.params import PerturbParams
+
+    path = _write(tmp_path, '<path d="M 0 50 H 100 M 50 0 V 100"/>')
+    res = import_svg(path)
+    assert len(res.strokes) == 2
+    assert all(s.role == ROLE_STRUCTURE for s in res.strokes)
+
+    p = PerturbParams.natural(6.0, seed=4242)
+    out = perturb_strokes(list(res.strokes), p)
+
+    def _bend(s):
+        """折线各点到首末点连线的最大垂距（mm）。"""
+        (x0, y0), (x1, y1) = s.points[0], s.points[-1]
+        span = math.hypot(x1 - x0, y1 - y0)
+        return max(abs((x1 - x0) * (y0 - y) - (x0 - x) * (y1 - y0)) / span
+                   for x, y in s.points)
+
+    for src, dst in zip(res.strokes, out):
+        # 端点（= 坐标轴的相交处）原样保留
+        assert dst.points[0] == pytest.approx(src.points[0], abs=1e-9)
+        assert dst.points[-1] == pytest.approx(src.points[-1], abs=1e-9)
+        # 但线条本身不再笔直：起伏照常生效（否则「手绘感」就没了）
+        assert _bend(dst) > 0.02

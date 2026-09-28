@@ -739,6 +739,61 @@ def test_tagged_structure_line_ignores_junction_geometry():
     assert out.points[-1] == pytest.approx((3.0, 0.0), abs=1e-9)
 
 
+def _bend(s: Stroke) -> float:
+    """折线各点到首末点连线的最大垂距（mm）。"""
+    (x0, y0), (x1, y1) = s.points[0], s.points[-1]
+    span = math.hypot(x1 - x0, y1 - y0)
+    if span < 1e-9:
+        return 0.0
+    return max(abs((x1 - x0) * (y0 - y) - (x0 - x) * (y1 - y0)) / span
+               for x, y in s.points)
+
+
+def test_short_stroke_wobble_scaled_by_length():
+    """起伏幅度按线长封顶：短线不被绝对毫米值扭成钩子，长线保持原幅度。
+
+    回归：TikZ 图形里 1~2mm 的刻度线/虚线小段，被 0.35mm 的起伏扭成
+    20% 的弯钩（细碎线段「过度扭曲」）。
+    """
+    p = PerturbParams.natural(6.0, seed=77)
+    short = Stroke([(0.0, 0.0), (2.0, 0.0)], False)
+
+    def _rel(s):
+        out = perturb_strokes([s], p)[0]
+        return _bend(out) / s.length()
+
+    # 2mm 短线：弯折 ≤ 4%（0.08mm），肉眼基本是直的
+    for seed in range(12):
+        p.seed = 1000 + seed
+        assert _rel(short) <= 0.041, seed
+    # 60mm 长线：幅度封顶（60×4% = 2.4mm）远高于预设 0.35mm，起伏不被削弱
+    long_line = Stroke([(0.0, 0.0), (60.0, 0.0)], False)
+    devs = []
+    for seed in range(12):
+        p.seed = 1000 + seed
+        devs.append(_bend(perturb_strokes([long_line], p)[0]))
+    assert max(devs) >= p.line_wobble * 0.4
+
+
+def test_short_stroke_trim_capped_by_length():
+    """末端修剪按线长封顶：短笔画不再被固定毫米值的修剪剪掉一大截。
+
+    回归：0.3mm 的修剪在 15mm 笔画上是 2%，在 1.5mm 的短笔画上却是 20%。
+    """
+    p = PerturbParams(enabled=True, seed=11, stroke_trim_mm=0.5,
+                      line_wobble=0.0, stroke_stretch_sigma=0.0)
+    short = Stroke([(0.0, 0.0), (2.0, 0.0)], False)
+    for seed in range(12):
+        p.seed = 100 + seed
+        out = perturb_strokes([short], p, seed=p.seed)[0]
+        # 两端各 ≤5%：整条最多短 10%
+        assert out.length() >= 2.0 * (1.0 - 0.101), seed
+    # 长笔画不受封顶影响：修剪仍可按参数取到上限附近
+    p.seed = 5
+    long_line = Stroke([(0.0, 0.0), (40.0, 0.0)], False)
+    assert perturb_strokes([long_line], p, seed=5)[0].length() < 40.0 - 0.1
+
+
 # ===================================================== 任意对象的扰动
 def test_apply_perturb_works_on_equation(manager_fixture=None):
     from writerstudio.content.builder import make_equation_object
