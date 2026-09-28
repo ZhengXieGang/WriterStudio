@@ -36,7 +36,7 @@ PT_TO_MM = 25.4 / 72.0
 # 的字符才退回 mathtext 轮廓（空心）。
 # ---------------------------------------------------------------------------
 _SYMBOL_FALLBACK: dict[str, tuple[str, str]] = {
-    "√": ("mathupp", "b"), "∞": ("mathupp", "^"),
+    "∞": ("mathupp", "^"),
     "°": ("mathupp", "`"), "≠": ("mathupp", "?"),
     "≡": ("mathupp", "@"), "∈": ("mathupp", "h"),
     "→": ("mathupp", "i"), "←": ("mathupp", "j"),
@@ -46,6 +46,10 @@ _SYMBOL_FALLBACK: dict[str, tuple[str, str]] = {
     "·": ("mathupp", "$"),
     "⋅": ("mathupp", "$"),
 }
+# √ 也不在这张表里：内置字体的根号是**三段分开**的笔画（小横 / 斜下 / 长斜线），
+# 描出来在转折处会断开，而且不随 mathtext 把根号拉高（大根号会缩成一个小 V，
+# 与顶线脱开）。根号改由 _radical_stroke 按骨架画**一笔**，并把顶线接在同一笔上。
+#
 # ∑ ∏ ∫ ∂ ∇ ∠ 没有挂在这张表里：mathupp 的字形（';' ':' 'p' 'm' 'n' '{'）
 # 是**细楔形闭合轮廓**——描出来是双线空心，∠ 的 '{' 更是画成一个方括号。
 # 它们改由 _draw_procedural_symbol 按几何单线画（见该函数的「大型运算符」段）。
@@ -505,8 +509,92 @@ def _collapse_flat_rect(pts: list) -> Optional[list]:
     return [(xm, min(ys)), (xm, max(ys))]
 
 
+def _glyph_ink_box(font, fontsize: float, glyph_index: int,
+                   ox: float, oy: float, scale: float) -> Optional[BBox]:
+    """字形墨迹在页面坐标（mm）里的包围盒；取不到返回 None。
+
+    与轮廓兜底同一条取路径（``font.get_path()``）；字号由调用方随后按需
+    重设，这里直接改字体对象的状态即可（mathtext 的解析器每次都重设）。
+    """
+    from matplotlib.path import Path as MplPath
+
+    font.clear()
+    font.set_size(fontsize, 72)
+    font.load_glyph(glyph_index, flags=_load_flags.NO_HINTING)
+    verts, codes = font.get_path()
+    box = BBox()
+    for poly in MplPath(verts, codes).to_polygons(closed_only=False):
+        for px, py in poly:
+            box.expand((float(px) * scale + ox * scale,
+                        float(py) * scale + oy * scale))
+    return None if box.is_empty else box
+
+
+#: 根号骨架（归一化到墨迹包围盒）：左上小横 → 折到最低点 → 拉长斜线到右上角。
+#: 取自内置 Hershey 数学字体的根号字形，与 mathtext 根号的骨架一致。
+_RADICAL_SPINE = ((0.0, 0.56), (0.211, 0.56), (0.526, 0.0), (1.0, 1.0))
+
+
+def _radical_stroke(box: BBox, bar: Optional[tuple[float, float, float]]
+                    ) -> Stroke:
+    """单笔根号：一笔画完「小横 → 最低点 → 右上角」，顶线接在同一笔上。
+
+    ``bar`` 为顶线中线 ``(x0, x1, y)``；给了就顺着斜线一笔写到顶线末端
+    ——写根号本就是一笔到底，分成「根号 + 顶线」两笔在衔接处总有断口。
+
+    mathtext 的根号是**有厚度的填充字形**，描轮廓出来是双线空心；内置字体
+    的根号又是三段分开的笔画。这里按骨架一次画成单线。
+    """
+    w, h = box.width, box.height
+    pts = [(box.x0 + fx * w, box.y0 + fy * h) for fx, fy in _RADICAL_SPINE]
+    if bar is not None:
+        pts.append((bar[0], bar[2]))
+        pts.append((bar[1], bar[2]))
+    return Stroke(pts, closed=False)
+
+
+def _take_vinculum(rects: list, box: BBox) -> Optional[tuple[float, float, float]]:
+    """找根号的顶线矩形并摘掉，返回其中线 ``(x0, x1, y)``；没有则 None。
+
+    顶线是 mathtext 给的结构矩形：横线、y 贴根号右上角、x 从根号右侧开始。
+    容差按根号高度取（字号不同的公式里偏移量同比例变化），嵌套根号按
+    最近的一条配对。
+    """
+    tol = max(0.5, 0.12 * box.height)
+    best = -1
+    best_d = tol
+    for i, (_ox, oy, rw, rh) in enumerate(rects):
+        if rw < rh:                      # 竖规则线：不是顶线
+            continue
+        y = (oy + rh / 2.0) * PT_TO_MM
+        x0 = _ox * PT_TO_MM
+        d = abs(y - box.y1)
+        if d <= best_d and box.x1 - tol <= x0 <= box.x1 + tol:
+            best, best_d = i, d
+    if best < 0:
+        return None
+    ox, oy, rw, rh = rects.pop(best)
+    return (ox * PT_TO_MM, (ox + rw) * PT_TO_MM,
+            (oy + rh / 2.0) * PT_TO_MM)
+
+
 def _render_native(latex: str, size_mm: float, tolerance: float) -> list[Stroke]:
-    """原生路径：整条公式用 mathtext 轮廓（与历史行为一致）。"""
+    """无字体链：与字体链路径同一套渲染，只是字形全部走轮廓。
+
+    这样符号（× ≤ ∑ √ …）仍是单线/几何画线、结构线取中线——与字体链路径
+    一致，不会退化成空心轮廓。``tolerance`` 仅为兼容旧签名保留。
+
+    失败时退回 :func:`_render_outlines`（纯 mathtext 轮廓）：宁可空心，
+    也不让公式消失。
+    """
+    try:
+        return _render_with_fonts(latex, size_mm, [], 1.0, None)
+    except Exception:
+        return _render_outlines(latex, size_mm)
+
+
+def _render_outlines(latex: str, size_mm: float) -> list[Stroke]:
+    """纯轮廓兜底：整条公式用 mathtext 轮廓（历史行为）。"""
     TextPath = _get_textpath()
     text = wrap_math(latex)
     if not text:
@@ -570,9 +658,14 @@ def _render_with_fonts(latex: str, size_mm: float, fonts, text_scale: float,
     pt_size = size_mm / PT_TO_MM
     _w, _h, _d, glyphs, rects = parser.parse(
         text, dpi=72, prop=FontProperties(size=pt_size))
+    # 解析结果由解析器**缓存**（同一公式下次直接返回同一份 list）：根号会
+    # 摘走自己的顶线矩形，必须改副本，否则第二次渲染同一条公式时顶线就
+    # 没了（联动缓存还会把别的公式一起带坏）。
+    rects = list(rects)
 
     scale = PT_TO_MM
     strokes: list[Stroke] = []
+    radicals: list[BBox] = []          # 根号墨迹盒：顶线要按它配对（见下）
     for font, fontsize, ccode, glyph_index, ox, oy in glyphs:
         ch = chr(int(ccode))
         # 链上没有 U+2212（数学减号）但有 ASCII '-' 时按 '-' 走字体链：
@@ -590,6 +683,14 @@ def _render_with_fonts(latex: str, size_mm: float, fonts, text_scale: float,
                               origin=(ox * scale, oy * scale))
             strokes.extend(lay.strokes())
             continue
+        # 根号：按骨架画单笔，并与顶线合成一笔（见 _radical_stroke）。
+        # 字号/位置仍取 mathtext 的排版结果——大根号会被拉高，字形墨迹盒
+        # 就是它该占的范围，顶线随后按位置配对。
+        if ch == "\u221a":
+            box = _glyph_ink_box(font, fontsize, glyph_index, ox, oy, scale)
+            if box is not None:
+                radicals.append(box)
+                continue
         # 单线兜底：内置 Hershey 数学/希腊字体（绝不出空心轮廓）。
         # 没有 manager（如 Markdown 里的行内公式）时按名字直接加载内置字体
         fb = _SYMBOL_FALLBACK.get(ch)
@@ -623,7 +724,11 @@ def _render_with_fonts(latex: str, size_mm: float, fonts, text_scale: float,
             strokes.append(Stroke(flat if flat is not None else pts,
                                   closed=False))
 
-    # 分式线/根号顶线等结构矩形：mathtext 给的是「有厚度的规则线」
+    # 根号：单笔骨架 + 配对的顶线合成一笔（根号顶线因此不再单独描一遍）
+    for rbox in radicals:
+        strokes.append(_radical_stroke(rbox, _take_vinculum(rects, rbox)))
+
+    # 分式线/上划线等结构矩形：mathtext 给的是「有厚度的规则线」
     # （实测 \frac 分数线 2.2×0.31mm），描轮廓会画出上下两道线加竖边，
     # 笔尖下墨水叠成一个「方框」。取中线发**一条**线——粗细由笔尖
     # 物理宽度体现，与手写一致。

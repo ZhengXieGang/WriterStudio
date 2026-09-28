@@ -1445,6 +1445,80 @@ def test_structural_junction_detection_matches_pairwise():
 
 
 # ============================================================ 公式字体链
+def _radical_strokes(strokes):
+    """根号笔画：一笔到底的「小横 → 最低点 → 右上角 → 顶线」折线。"""
+    return [s for s in strokes
+            if len(s.points) == 6
+            and s.points[-1][0] > s.points[-2][0]
+            and abs(s.points[-1][1] - s.points[-2][1]) < 1e-9]
+
+
+@pytest.mark.skipif(not mathtext_available(), reason="matplotlib 不可用")
+@pytest.mark.parametrize("chain", [None, ["futural"]])
+def test_equation_radical_is_one_stroke(manager, chain):
+    """根号是一根连续的线：一笔画完小横、最低点、长斜线，再接顶线。
+
+    历史问题：mathtext 的根号是填充字形，描轮廓出来是**双线空心**；字体链
+    路径下又改用内置字体的根号，那是三段分开的笔画，而且不随 mathtext 把
+    根号拉高——大根号缩成一个小 V，与顶线脱开（用户看到的「不是一根连续
+    的线」）。现在两种情况都按骨架画单笔，顶线接在同一笔的末端。
+    """
+    from writerstudio.content.equation import render_equation
+
+    strokes = render_equation(r"\sqrt{2}", 8.0,
+                              font_names=chain, manager=manager)
+    rad = _radical_strokes(strokes)
+    assert len(rad) == 1, [ (len(s.points), s.points) for s in strokes ]
+    pts = rad[0].points
+    # 骨架：左上小横 → 最低点（比两端都低）→ 右上角 → 顶线同高的末端
+    assert pts[1][1] == pytest.approx(pts[0][1])          # 小横水平
+    assert pts[2][1] < pts[1][1]                          # 折到最低点
+    assert pts[3][1] > pts[2][1] and pts[3][0] > pts[2][0]  # 斜线拉向右上
+    assert pts[5][0] > pts[4][0]                          # 顶线向右延伸
+    # 顶线盖住被开方数（"2" 的墨迹在顶线左端右侧）
+    body = [s for s in strokes if s not in rad]
+    assert body
+    body_x1 = max(p[0] for s in body for p in s.points)
+    assert pts[5][0] >= body_x1 * 0.95
+
+
+@pytest.mark.skipif(not mathtext_available(), reason="matplotlib 不可用")
+def test_equation_radical_nested_and_tall(manager):
+    """大根号/嵌套根号：每个根号各一笔，各自配上自己的顶线。"""
+    from writerstudio.content.equation import render_equation
+
+    tall = render_equation(r"\sqrt{\frac{a}{b}}", 8.0,
+                           font_names=["futural"], manager=manager)
+    rad = _radical_strokes(tall)
+    assert len(rad) == 1
+    # 大根号被拉高：竖直跨度明显大于 1 个字高（8mm 字号 → 8.8mm 上下）
+    assert rad[0].bbox().height > 9.0
+
+    nested = render_equation(r"\sqrt{\sqrt{x}}", 8.0,
+                             font_names=["futural"], manager=manager)
+    rad = _radical_strokes(nested)
+    assert len(rad) == 2                                  # 内外两个根号
+    bars = sorted(s.points[5][1] for s in rad)
+    assert bars[0] < bars[1]                              # 内层顶线更低
+
+
+@pytest.mark.skipif(not mathtext_available(), reason="matplotlib 不可用")
+def test_equation_render_is_repeatable(manager):
+    """同一公式渲染两次结果必须一致（解析器缓存不得被改坏）。
+
+    回归：摘走顶线矩形时改到了 mathtext 解析器的**缓存** list——第一次
+    渲染正常，之后再渲染同一条公式（预览刷新、重生成对象都会）顶线就没了。
+    """
+    from writerstudio.content.equation import render_equation
+
+    for tex in (r"\sqrt{2}", r"\frac{a}{b}", r"\sqrt{\frac{a}{b}}"):
+        first = render_equation(tex, 8.0, font_names=["futural"],
+                                manager=manager)
+        again = render_equation(tex, 8.0, font_names=["futural"],
+                                manager=manager)
+        assert [s.points for s in first] == [s.points for s in again], tex
+
+
 def test_equation_font_chain_replaces_letters(manager):
     """公式带字体链时，链上画得出的字符改用字体链笔画（role=glyph）。"""
     from writerstudio.content.equation import render_equation
@@ -1577,12 +1651,17 @@ def test_equation_math_symbols_render_single_line():
     # 单线笔画：任何一笔的点数都远小于 mathtext 轮廓（Σ 轮廓单笔 40+ 点）
     assert max(len(s.points) for s in st) <= 30
 
-    # 常见数学符号必须被「兜底表 / 几何画线」覆盖，一个都不许落回
-    # mathtext 填充轮廓（空心字）——≈ ⊂ ∪ ∅ ⊕ 等此前正是这样漏掉的
+    # 常见数学符号必须被「兜底表 / 几何画线 / 根号单笔」覆盖，一个都不许
+    # 落回 mathtext 填充轮廓（空心字）——≈ ⊂ ∪ ∅ ⊕ 等此前正是这样漏掉的
     common = ("×≤≥≈≃≅≌∼∝≪≫≮≯⊂⊃⊆⊇⊊∪∩∅⊕⊖⊗⊘⊚⊙○∈∉∋∀∄∴∵⇒⇐⇔↔↦∓∗∘△□◇∮′″‰≐≑"
-              "∑∏√∞°≠≡→←↓∂∇∫∃÷∥⊥∠±·⋅")
+              "∑∏∞°≠≡→←↓∂∇∫∃÷∥⊥∠±·⋅")
     for ch in common:
         assert ch in _SYMBOL_FALLBACK or ch in _PROCEDURAL_SYMBOLS, ch
+    # 根号有自己的单笔实现（_radical_stroke，并把顶线接在同一笔上），
+    # 既不在兜底表也不走几何符号表——单独渲染核对
+    root = render_equation(r"$\sqrt{2}$", size_mm=10,
+                           font_names=["futural"], manager=m)
+    assert any(len(s.points) == 6 for s in root), root
     for ch, (fname, key) in _SYMBOL_FALLBACK.items():
         fam = m.get(fname)
         assert fam is not None, (ch, fname)
