@@ -57,6 +57,18 @@ def test_worker_run_keeps_switch_interval(qapp):
     assert __import__("sys").getswitchinterval() == pytest.approx(before)
 
 
+def test_canvas_scene_disables_bsp_index(view):
+    """画布场景关掉 BSP 空间索引。
+
+    画布上每个文档对象只有一个 item，索引收益可忽略；而 0.2.0 的四次
+    段错误（core 显示 Qt 绘制链路在一段索引链上走进了数据缓冲区）都落在
+    这一带，NoIndex 直接绕开该结构（见 canvas.CanvasView 注释）。
+    """
+    from PySide6.QtWidgets import QGraphicsScene
+
+    assert view._scene.itemIndexMethod() == QGraphicsScene.ItemIndexMethod.NoIndex
+
+
 def test_worker_wait_if_paused_exits_on_stop(qapp):
     """暂停中再收到停止请求时，等待循环必须立即退出（线程可终结）。"""
     fm = FontManager()

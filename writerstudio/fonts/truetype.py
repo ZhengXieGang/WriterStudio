@@ -155,6 +155,26 @@ def parse_truetype(path: str | Path, name: str | None = None,
         tt.close()
 
 
+def count_truetype_glyphs(path: str | Path) -> int:
+    """字形数（cmap 里可用的码点数）；只读表，不解码轮廓；读不了返回 -1。
+
+    与 :func:`parse_truetype` 的口径一致：只数码点 ≥ 32 的字符。
+    """
+    if not _HAVE_FONTTOOLS:
+        return -1
+    try:
+        tt = TTFont(str(path), fontNumber=0, lazy=True)
+    except Exception:
+        return -1
+    try:
+        cmap = tt.getBestCmap() or {}
+        return sum(1 for cp in cmap if cp >= 32)
+    except Exception:
+        return -1
+    finally:
+        tt.close()
+
+
 def _family_name(tt) -> Optional[str]:
     try:
         for rec in tt["name"].names:

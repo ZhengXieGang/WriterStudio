@@ -1,13 +1,14 @@
 """字体面板：直观展示字体列表（缩略图 + 名称 + 类型 + 字数）、支持导入外部字体。
 
-全量解析字体是重活（.gfont 中文库一款几百毫秒、大型 TrueType 数秒），
-因此面板分**两阶段**在后台线程加载：
+字体**不在启动时全量解析**（一款 8 MB 的中文 gfont 库要 1 秒、上百兆内存，
+逐款预热会把常驻内存吃到一个 GB 量级）。面板分**两阶段**在后台线程干活：
 
     1. **轻量缩略图**：只解析示例文字（``中Aa123``）对应的字形
        （:mod:`~writerstudio.fonts.preview`），毫秒级一款，并落盘缓存
        （按 路径+mtime+示例文字 键控，重启零解析直接回填）；
-    2. **全量解析**：逐款 ``entry.load()`` 回填字形数并预热字体缓存，
-       较慢但不阻塞界面，且随时可停。
+    2. **字形数**：只读元数据（gfont 查 ZIP 目录、stroke-json 扫键、
+       TrueType 读 cmap），不建字形对象；字形本体在该字体真正被排版
+       使用时才解析。
 
 缩略图渲染：白底，示例文字按各自 advance 排成一行，整体等比缩放居中
 （Y 轴翻转，因为字体坐标 Y 向上、位图 Y 向下）。
@@ -40,6 +41,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..core.memory import trim_memory
 from ..fonts.manager import FontManager
 from ..fonts.preview import SAMPLE_CHARS, load_preview
 from . import filedialog
@@ -57,6 +59,9 @@ _THUMB_W = 118
 _THUMB_H = 34
 _THUMB_BG = QColor(255, 255, 255)     # 缩略图白底
 _THUMB_INK = QColor(40, 42, 55)
+#: 缩略图内存缓存上限（118×34 的 QImage ≈ 16 KB/张；磁盘缓存另有一份，
+#: 被挤掉的重新读盘即可）
+_THUMBS_MAX = 512
 
 
 def _sample_chars(font) -> list[str]:
@@ -166,10 +171,10 @@ def _thumb_cache_save(key: str, img: QImage) -> None:
 
 
 class _FontInfoWorker(QThread):
-    """后台两阶段加载：先逐款出轻量缩略图，再全量解析填字形数。"""
+    """后台两阶段加载：先逐款出轻量缩略图，再取字形数（只读元数据）。"""
 
     previewReady = Signal(str, object)   # name, QImage|None（轻量，先出图）
-    loaded = Signal(str, object)         # name, FontFamily | None（None = 加载失败）
+    countReady = Signal(str, int)        # name, 字形数（-1 = 读不了）
 
     def __init__(self, names: list[str], manager: FontManager) -> None:
         super().__init__()
@@ -204,6 +209,8 @@ class _FontInfoWorker(QThread):
             pass
         finally:
             self._paused = False
+            # 一批解析结束：把临时内存还给系统（否则 RSS 只升不降）
+            trim_memory()
 
     def _run_locked(self) -> None:
         # 字体解析是纯 Python，全程握着 GIL；默认 5ms 的线程切换间隔意味着
@@ -242,8 +249,12 @@ class _FontInfoWorker(QThread):
             # 每款之间让出一点时间，启动阶段操作不掉帧
             if i % 8 == 7:
                 self.msleep(15)
-        # ---- 阶段 2：全量解析（字形数 + 预热字体缓存；大库较慢但在后台）----
-        for name in self._names:
+        # ---- 阶段 2：字形数（只读元数据，不建字形对象）----
+        # 以前这里逐款 entry.load()「预热字体缓存」——195 款 546 MB 的
+        # 字库会把常驻内存推到 8~9 GB（gfont 坐标建成 Python 对象图后
+        # 放大 16~42 倍）。字形改为排版真正用到时才解析（紧凑存放），
+        # 列表只要字数，读元数据即可。
+        for i, name in enumerate(self._names):
             if self._stop:
                 return
             self._wait_if_paused()
@@ -251,13 +262,14 @@ class _FontInfoWorker(QThread):
             if entry is None:
                 continue
             try:
-                fam = entry.load()
+                count = entry.hint_glyph_count()
             except Exception:
-                fam = None
+                count = -1
             if self._stop:
                 return
-            self.loaded.emit(name, fam)
-            self.msleep(5)               # 大库（如 800ms 级）之后喘口气
+            self.countReady.emit(name, count)
+            if i % 8 == 7:
+                self.msleep(10)
 
     def _preview_image(self, entry) -> Optional[QImage]:
         key = _thumb_cache_key(entry)
@@ -456,12 +468,13 @@ class FontPanel(QDockWidget):
     def _ensure_worker(self) -> None:
         if self._worker is not None and self._worker.isRunning():
             return
-        names = [e.name for e in self.manager.entries()]
+        # 只处理列表里真的会显示的字体：隐藏的字体不生成缩略图、不读字数
+        names = [e.name for e in self.manager.visible_entries()]
         if not names:
             return
         worker = _FontInfoWorker(names, self.manager)
         worker.previewReady.connect(self._on_preview_ready)
-        worker.loaded.connect(self._on_font_loaded)
+        worker.countReady.connect(self._on_count_ready)
         worker.finished.connect(self._on_worker_finished)
         _LIVE_WORKERS.add(worker)
         self._worker = worker
@@ -538,8 +551,18 @@ class FontPanel(QDockWidget):
         item = QListWidgetItem()
         item.setData(Qt.UserRole, entry.name)
         item.setToolTip(str(entry.path))
-        self._fill_item(item, entry, count, entry._loaded)
+        self._fill_item(item, entry, count, entry.family)
         return item
+
+    def _remember_thumb(self, name: str, img: QImage) -> None:
+        """缩略图放进内存缓存（有上限，超了丢最早一张）。
+
+        磁盘缓存另有一份（按 路径+mtime 键控），所以被挤掉的缩略图
+        重建代价很低；上限只为兜住「近千款字体各一张 QImage」的情形。
+        """
+        if len(self._thumbs) >= _THUMBS_MAX and name not in self._thumbs:
+            self._thumbs.pop(next(iter(self._thumbs)))
+        self._thumbs[name] = img
 
     def _fill_item(self, item: QListWidgetItem, entry, count, font) -> None:
         kind = _KIND_LABEL.get(entry.kind, entry.kind)
@@ -560,7 +583,7 @@ class FontPanel(QDockWidget):
             thumb = font_thumbnail(font)
             if thumb is not None:
                 item.setIcon(thumb)
-                self._thumbs[entry.name] = thumb.toImage()
+                self._remember_thumb(entry.name, thumb.toImage())
         if count is not None and count < 0:
             item.setForeground(QColor(170, 60, 60))
 
@@ -568,23 +591,23 @@ class FontPanel(QDockWidget):
         """阶段 1：轻量缩略图就绪 → 立即回填该行（不必等全量解析）。"""
         if img is None or img.isNull():
             return
-        self._thumbs[name] = img
+        self._remember_thumb(name, img)
         for i in range(self.list.count()):
             item = self.list.item(i)
             if item.data(Qt.UserRole) == name:
                 item.setIcon(QPixmap.fromImage(img))
                 break
 
-    def _on_font_loaded(self, name: str, font) -> None:
-        """后台加载完成一款 → 回填该行（缩略图在 GUI 线程绘制）。"""
+    def _on_count_ready(self, name: str, count: int) -> None:
+        """后台取到字形数 → 回填该行。"""
         entry = self.manager.get_entry(name)
         if entry is None:
             return
-        self._counts[name] = font.coverage() if font is not None else -1
+        self._counts[name] = count
         for i in range(self.list.count()):
             item = self.list.item(i)
             if item.data(Qt.UserRole) == name:
-                self._fill_item(item, entry, self._counts[name], font)
+                self._fill_item(item, entry, count, entry.family)
                 break
         cur = self.list.currentItem()
         if cur is not None and cur.data(Qt.UserRole) == name:
@@ -607,7 +630,7 @@ class FontPanel(QDockWidget):
             glyph_line = "字形：无法加载"
         else:
             glyph_line = f"字形：{count} 个"
-        loaded = entry._loaded
+        loaded = entry.family
         em = f"\nem：{loaded.units_per_em:g}" if loaded is not None else ""
         self.info.setText(f"{entry.display_name}  [{kind}]\n{glyph_line}{em}")
 

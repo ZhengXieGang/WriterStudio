@@ -113,3 +113,95 @@ def test_offer_recovery_can_decline(win, monkeypatch):
 
 def test_offer_recovery_noop_without_snapshot(win):
     assert win.maybe_offer_recovery() is False
+
+
+# ----------------------------------------------- 多实例：快照各写各的
+def test_snapshot_is_per_instance(win, tmp_path):
+    """两个实例各写一份快照，互不覆盖；恢复取最新那份。"""
+    import os
+    import time
+    from writerstudio.project import ProjectData
+
+    # 假装另一个进程（PID 与本次不同）先写了一版
+    other = tmp_path / "recovery-999999.wsproj"
+    doc_a = win.controller.doc
+    from writerstudio.project import save_project
+    save_project(str(other), ProjectData(document=doc_a))
+    old = other.stat().st_mtime_ns
+
+    # 本实例写自己的那份（不碰别人的）
+    AiTools(win).call("add_text", {"text": "AB", "size": 8.0,
+                                   "font_names": ["futural"]})
+    win._autosave_recovery()
+    mine = recovery.instance_path()
+    assert mine.exists() and mine.name == f"recovery-{os.getpid()}.wsproj"
+    assert other.exists()
+    assert other.stat().st_mtime_ns == old          # 一个字节都没动
+
+    # 两份都在时取最新的：本实例这份刚写，内容带 1 个对象
+    if other.stat().st_mtime_ns > mine.stat().st_mtime_ns:
+        time.sleep(0.01)
+        win._autosave_recovery()
+    assert recovery.newest() == mine
+    assert len(recovery.load().document.objects) == 1
+
+    # clear() 只清自己 + 属主已退出的遗留，活实例那份留着……这里
+    # 999999 明显不存在 → 两份都该被清掉
+    recovery.clear()
+    assert not mine.exists() and not other.exists()
+
+
+def test_snapshot_keeps_other_live_instance(tmp_path, monkeypatch):
+    """属主还活着的快照不能被别的实例清掉（两实例共用 HOME 时的保护）。"""
+    import subprocess
+    import sys
+
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)", "writerstudio"])
+    try:
+        path = tmp_path / f"recovery-{child.pid}.wsproj"
+        path.write_text("{}", encoding="utf-8")
+        assert recovery._owner_alive(path)
+        recovery.clear()
+        assert path.exists()                    # 活实例的快照保留
+    finally:
+        child.terminate()
+        child.wait(timeout=10)
+    assert not recovery._owner_alive(path)      # 退出后即可清
+    recovery.clear()
+    assert not path.exists()
+
+
+def test_filelock_detects_other_instance(tmp_path, monkeypatch):
+    """同一文件被另一活实例打开时能查到；陈旧登记（进程已退出）不误报。"""
+    import json
+    import subprocess
+    import sys
+
+    from writerstudio import filelock
+
+    target = tmp_path / "shared.wsproj"
+    target.write_text("{}", encoding="utf-8")
+    filelock.claim(target)
+    assert filelock.others(target) == []        # 只有自己不算
+
+    d = filelock._dir()
+    d.mkdir(parents=True, exist_ok=True)
+    reg = d / f"{filelock._key(target)}.json"
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)", "writerstudio"])
+    try:
+        reg.write_text(json.dumps({"pid": child.pid, "start": None,
+                                   "path": str(target)}), encoding="utf-8")
+        who = filelock.others(target)
+        assert [w["pid"] for w in who] == [child.pid]
+    finally:
+        child.terminate()
+        child.wait(timeout=10)
+    assert filelock.others(target) == []        # 进程没了 → 不再提醒
+
+    # 别人留下的登记不会被 release 动（只删自己那份）；claim 覆盖后可删
+    assert reg.exists()
+    filelock.claim(target)
+    filelock.release(target)
+    assert not reg.exists()

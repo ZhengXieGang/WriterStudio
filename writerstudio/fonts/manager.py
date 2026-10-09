@@ -1,7 +1,8 @@
 """字体管理器：扫描内置/用户字库、按需解析、缓存、导入。
 
-重字体（如 8MB 的中文单线 JSON）采用**懒加载**：启动时只登记元信息，
-真正排版用到时才解析并缓存，避免拖慢启动。
+重字体（如 8MB 的中文单线 JSON / gfont 库）采用**懒加载**：启动时只登记
+元信息，界面要的字形数走轻量元数据接口（``FontEntry.hint_glyph_count``），
+真正排版用到某款时才解析（紧凑存放）并缓存，避免启动即吃掉几 GB 内存。
 """
 
 from __future__ import annotations
@@ -12,7 +13,12 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .gcode_lib import parse_gcode_char_dir
-from .gfont import KIND_GFONT, font_names_from_gfont, parse_gfont
+from .gfont import (
+    KIND_GFONT,
+    count_gfont_glyphs,
+    font_names_from_gfont,
+    parse_gfont,
+)
 from .hershey import parse_hershey_jhf
 from .model import (
     KIND_GCODE,
@@ -21,8 +27,8 @@ from .model import (
     KIND_TRUETYPE,
     FontFamily,
 )
-from .stroke_json import parse_stroke_json
-from .truetype import parse_truetype
+from .stroke_json import count_stroke_json_glyphs, parse_stroke_json
+from .truetype import count_truetype_glyphs, parse_truetype
 
 BUILTIN_DIR = Path(__file__).resolve().parent / "builtin"
 
@@ -62,8 +68,30 @@ class FontEntry:
         return self._loaded is not None
 
     @property
+    def family(self) -> Optional[FontFamily]:
+        """已解析的字体；尚未解析时为 None（解析后才常驻内存）。"""
+        return self._loaded
+
+    @property
     def error(self) -> Optional[str]:
         return self._error
+
+    def hint_glyph_count(self) -> int:
+        """字形数的**轻量**获取（不建字形对象）；拿不到时返回 -1。
+
+        字体列表只需要「多少个字」：gfont 读 ZIP 目录、stroke-json 扫键、
+        TrueType 读 cmap，都只碰元数据。全量解析一款 8 MB 的中文库要 1 秒
+        和上百兆内存，靠它就能免掉——启动时不再逐款预热整个字库。
+        Hershey/gcode 库本身很小（几十 KB），直接解析。
+        """
+        if self.kind == KIND_GFONT:
+            return count_gfont_glyphs(self.path)
+        if self.kind == KIND_STROKE_JSON:
+            return count_stroke_json_glyphs(self.path)
+        if self.kind == KIND_TRUETYPE:
+            return count_truetype_glyphs(self.path)
+        fam = self.try_load()
+        return -1 if fam is None else fam.coverage()
 
     def load(self) -> FontFamily:
         """解析并缓存字体；失败时抛出异常并记录。"""

@@ -57,7 +57,7 @@ from ..fonts.builder import (
     make_text_object,
     update_text_object,
 )
-from .. import recovery
+from .. import filelock, recovery
 from ..fonts.manager import FontManager
 from ..machine.config import machine_to_page, page_to_machine
 from ..machine.gcode_gen import generate_from_document
@@ -83,6 +83,8 @@ from ..perturb.apply import (
 from ..perturb.params import PerturbParams
 from ..project import (
     FILE_SUFFIX,
+    ExternalChangeError,
+    FileStamp,
     ProjectData,
     load_project,
     regenerate_all,
@@ -143,6 +145,9 @@ class MainWindow(QMainWindow):
         self._origin_job_pending = None  # 「以机械原点为起点」待发送的作业
         # 未保存内容的定期快照（意外终止后可恢复；_mark_clean 会清掉）
         self._recovery_armed = False      # 本次会话是否已建立过快照
+        # 当前项目文件在打开/上次保存时的磁盘指纹：保存前比对，被别的
+        # 程序或实例改过就提醒（整份覆盖是静默丢数据的头号来源）
+        self._file_stamp: FileStamp | None = None
         self._recovery_timer = QTimer(self)
         self._recovery_timer.setInterval(60_000)
         self._recovery_timer.setSingleShot(False)
@@ -2057,10 +2062,13 @@ class MainWindow(QMainWindow):
         if not recovery.exists():
             return False
         from PySide6.QtWidgets import QMessageBox
+        snap = recovery.newest()
+        where = f"\n\n快照文件：{snap}" if snap is not None else ""
         ans = QMessageBox.question(
             self, "恢复未保存的文档",
-            "检测到上次异常退出时未保存的内容，是否恢复？\n（选「否」将丢弃"
-            "该快照，不影响已保存的项目文件）",
+            "检测到上次异常退出时未保存的内容，是否恢复？"
+            + where
+            + "\n（选「否」将丢弃该快照，不影响已保存的项目文件）",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes)
         if ans != QMessageBox.StandardButton.Yes:
@@ -2073,7 +2081,7 @@ class MainWindow(QMainWindow):
             recovery.clear()
             return False
         self._apply_project(project)
-        self.project_path = None          # 恢复到未命名文档，另存为准
+        self._set_current_path(None)      # 恢复到未命名文档，另存为准
         self._mark_dirty()                # 仍是未保存状态
         self.statusBar().showMessage("已恢复上次未保存的内容，请另存为项目文件",
                                      8000)
@@ -2148,7 +2156,7 @@ class MainWindow(QMainWindow):
                                      margin=self.settings.page_margin(10.0),
                                      preset_name=self.settings.page_preset_name("")))
         self.controller.set_document(doc)
-        self.project_path = None
+        self._set_current_path(None)
         self._mark_clean()
         self.canvas.fit_page()
         self.statusBar().showMessage("已新建项目", 3000)
@@ -2171,7 +2179,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "打开失败", f"{path}\n\n{exc}")
             return False
         n = self._apply_project(project)
-        self.project_path = path
+        self._set_current_path(path)
         self._mark_clean()
         self.settings.add_recent_file(path)
         self.settings.set_last_dir(str(Path(path).parent))
@@ -2180,16 +2188,60 @@ class MainWindow(QMainWindow):
         if n:
             msg += f"（重新生成 {n} 个对象）"
         self.statusBar().showMessage(msg, 4000)
+        self._warn_if_shared(path)
         return True
+
+    def _set_current_path(self, path: str | None) -> None:
+        """切换当前项目文件：更新多实例登记与磁盘指纹（供保存前比对）。"""
+        old = self.project_path
+        if old and old != path:
+            filelock.release(old)
+        self.project_path = path
+        if path:
+            filelock.claim(path)
+            self._file_stamp = FileStamp.of(path)
+        else:
+            self._file_stamp = None
+
+    def _warn_if_shared(self, path: str) -> None:
+        """同一文件已被别的活实例打开时提醒一句（后保存的会整份覆盖）。"""
+        who = filelock.others(path)
+        if not who:
+            return
+        pids = "、".join(str(w.get("pid")) for w in who[:3])
+        QMessageBox.warning(
+            self, "该文件已在另一个实例中打开",
+            f"「{Path(path).name}」已被另一个 WriterStudio 实例"
+            f"（PID {pids}）打开。\n\n"
+            "两个实例各编各的，后保存的那份会整份覆盖先保存的——"
+            "建议只留一个实例编辑这个文件。\n\n"
+            "万一被覆盖：未保存的改动会定期快照到\n"
+            f"{recovery.home_dir()}（recovery-<PID>.wsproj），"
+            "可从最新一份快照里找回。")
 
     def _save_project(self) -> bool:
         if not self.project_path:
             return self._save_project_as()
-        try:
-            save_project(self.project_path, self._collect_project())
-        except Exception as exc:
-            QMessageBox.critical(self, "保存失败", str(exc))
-            return False
+        path = self.project_path
+        while True:
+            try:
+                save_project(path, self._collect_project(),
+                             expect=self._file_stamp)
+            except ExternalChangeError as exc:
+                choice = self._ask_external_change(exc)
+                if choice == "overwrite":
+                    self._file_stamp = None    # 用户明确要覆盖：跳过守卫重试
+                    continue
+                if choice == "save_as":
+                    return self._save_project_as()
+                if choice == "reload":
+                    return self._load_project_path(str(exc.path))
+                return False
+            except Exception as exc:
+                QMessageBox.critical(self, "保存失败", str(exc))
+                return False
+            break
+        self._set_current_path(path)
         self._mark_clean()
         try:
             self.controller.undo_stack.setClean()   # 保存后撤销栈基准点=当前，
@@ -2202,6 +2254,37 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"已保存 {Path(self.project_path).name}", 3000)
         return True
 
+    def _ask_external_change(self, exc: ExternalChangeError) -> str:
+        """文件被外部改过：问是覆盖、另存还是改用磁盘上那份。
+
+        返回 ``"overwrite"`` / ``"save_as"`` / ``"reload"`` / ``"cancel"``。
+        """
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("文件已被外部修改")
+        box.setText(
+            f"「{exc.path.name}」在打开之后被别的程序或实例改过，"
+            "直接保存会把对方写进去的内容整份覆盖。\n\n"
+            f"磁盘上的版本：{exc.actual.mtime_text()}"
+            f"（{exc.actual.size / 1e6:.2f} MB）\n"
+            f"内存里的版本：{exc.expected.size / 1e6:.2f} MB")
+        overwrite = box.addButton("覆盖保存", QMessageBox.ButtonRole.DestructiveRole)
+        save_as = box.addButton("另存为…", QMessageBox.ButtonRole.ActionRole)
+        reload_btn = box.addButton("重新载入磁盘版本", QMessageBox.ButtonRole.ActionRole)
+        box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.setInformativeText(
+            "「重新载入磁盘版本」会丢弃内存中的内容"
+            + ("（包括当前未保存的改动）" if self._dirty else "") + "。")
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is overwrite:
+            return "overwrite"
+        if clicked is save_as:
+            return "save_as"
+        if clicked is reload_btn:
+            return "reload"
+        return "cancel"
+
     def _save_project_as(self) -> bool:
         default = self.project_path or f"未命名{FILE_SUFFIX}"
         path, _ = QFileDialog.getSaveFileName(
@@ -2211,7 +2294,9 @@ class MainWindow(QMainWindow):
             return False
         if not path.lower().endswith(FILE_SUFFIX):
             path += FILE_SUFFIX
-        self.project_path = path
+        # 路径变了：以新文件当前的指纹为基准（同名文件已存在时另存对话框
+        # 已经问过覆盖），否则会拿旧文件的指纹去比对，误报「外部修改」
+        self._set_current_path(path)
         return self._save_project()
 
     def _page_setup(self) -> None:
@@ -2819,6 +2904,12 @@ class MainWindow(QMainWindow):
         self._recovery_timer.stop()
         recovery.clear()
         self._recovery_armed = False
+        # 撤销多实例登记（本实例确实在编辑该文件时才有）
+        if self.project_path:
+            try:
+                filelock.release(self.project_path)
+            except Exception:
+                pass
         super().closeEvent(event)
 
     # ------------------------------------------------------------ 机器命令

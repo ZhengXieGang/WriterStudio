@@ -51,6 +51,9 @@ from __future__ import annotations
 import statistics
 import struct
 import zipfile
+from array import array
+from collections.abc import Mapping
+from itertools import islice
 from pathlib import Path
 from typing import Optional
 
@@ -271,25 +274,27 @@ def _glyph_class(cp: int) -> str:
     return "other"
 
 
-def _cap_height(records: dict) -> float:
-    """大写字母墨迹高中位数（作为西文度量的锚）；样本不足返回 0。"""
-    hs = [b[3] - b[1] for cp, (_s, b) in records.items()
-          if 0x41 <= cp <= 0x5A and b[3] > b[1]]
+def _cap_height(items) -> float:
+    """大写字母墨迹高中位数（作为西文度量的锚）；样本不足返回 0。
+
+    ``items`` 为 ``(码点, 原始包围盒)`` 的可迭代对象。
+    """
+    hs = [b[3] - b[1] for cp, b in items if 0x41 <= cp <= 0x5A and b[3] > b[1]]
     if len(hs) < 4:
         return 0.0
     return statistics.median(hs)
 
 
-def _median_cjk_height(records: dict) -> float:
-    hs = [b[3] - b[1] for cp, (_s, b) in records.items()
+def _median_cjk_height(items) -> float:
+    hs = [b[3] - b[1] for cp, b in items
           if _glyph_class(cp) == "cjk" and b[3] > b[1]]
     if len(hs) < 2:
         return 0.0
     return statistics.median(hs)
 
 
-def _median_cjk_width(records: dict) -> float:
-    ws = [b[2] - b[0] for cp, (_s, b) in records.items()
+def _median_cjk_width(items) -> float:
+    ws = [b[2] - b[0] for cp, b in items
           if _glyph_class(cp) == "cjk" and b[2] > b[0]]
     if len(ws) < 2:
         return 0.0
@@ -420,8 +425,16 @@ def _size_norm_scale(cp: int, ink_w: float, ink_h: float, cap: float,
     return 1.0
 
 
-def _parse_glyph(data: bytes):
-    """解析单条字形记录 → (码点, 笔画列表[原始坐标], 墨迹包围盒) 或 None。"""
+def _glyph_parts(data: bytes):
+    """解析单条字形记录的**原始分量**。
+
+    返回 ``(码点, 坐标元组, 抬落笔标志, 包围盒)``；坐标元组为
+    ``(x0, y0, x1, y1, ...)``（原始坐标，Y 向下），标志为每点的字节
+    （0=抬笔/起笔，1=落笔）。数据非法时返回 None。
+
+    与 :func:`_parse_glyph` 分开是为了紧凑加载：字形索引只用到坐标与
+    标志（不建点元组），坐标由调用方直接倒进 ``array('f')``。
+    """
     if len(data) < 10:
         return None
     cp, n = struct.unpack_from(">HI", data, 0)
@@ -437,18 +450,38 @@ def _parse_glyph(data: bytes):
     if len(flags) != pc:
         return None
     vals = struct.unpack_from(">%df" % n, data, 6)
+    xs = vals[0::2]
+    ys = vals[1::2]
+    return cp, vals, flags, (min(xs), min(ys), max(xs), max(ys))
+
+
+def _stroke_cuts(flags: bytes) -> list[int]:
+    """抬落笔标志 → 笔画起点（点下标）。
+
+    规则与 :func:`_parse_glyph` 的切分完全一致：首点起一笔，此后每个
+    标志为 0 的点起新一笔（连续两个 0 会产生一个单点笔画）。
+    """
+    cuts = [0]
+    pos = flags.find(0, 1)
+    while pos != -1:
+        cuts.append(pos)
+        pos = flags.find(0, pos + 1)
+    return cuts
+
+
+def _parse_glyph(data: bytes):
+    """解析单条字形记录 → (码点, 笔画列表[原始坐标], 墨迹包围盒) 或 None。"""
+    parts = _glyph_parts(data)
+    if parts is None:
+        return None
+    cp, vals, flags, bbox = parts
 
     strokes: list[list[tuple[float, float]]] = []
     cur: list[tuple[float, float]] = []
-    x0 = y0 = float("inf")
-    x1 = y1 = float("-inf")
+    pc = len(flags)
     for i in range(pc):
         x = vals[i * 2]
         y = vals[i * 2 + 1]
-        if x < x0: x0 = x
-        if x > x1: x1 = x
-        if y < y0: y0 = y
-        if y > y1: y1 = y
         if flags[i] == 0:                 # 抬笔 → 起新笔画
             if cur:
                 strokes.append(cur)
@@ -462,7 +495,7 @@ def _parse_glyph(data: bytes):
         strokes.append(cur)
     if not strokes:
         return None
-    return cp, strokes, (x0, y0, x1, y1)
+    return cp, strokes, bbox
 
 
 def _entry_codepoint(entry: str) -> Optional[int]:
@@ -526,15 +559,170 @@ def read_gfont_records(path: str | Path) -> dict[int, tuple[list[list[tuple[floa
     return records
 
 
+def _glyph_strokes(pts: array, stroke_start: array, i0: int, i1: int
+                   ) -> list[list[tuple[float, float]]]:
+    """物化一个字形的一笔一笔点表（临时；几何启发式与字形转换用）。"""
+    out: list[list[tuple[float, float]]] = []
+    for j in range(i0, i1):
+        a = stroke_start[j] * 2
+        b = stroke_start[j + 1] * 2
+        out.append([(pts[k], pts[k + 1]) for k in range(a, b, 2)])
+    return out
+
+
+class _PackedGfontGlyphs(Mapping):
+    """字符 → 字形（**懒转换**），坐标以紧凑数组存放。
+
+    8.5 MB 的 gfont 中文库直接建对象图常驻约 150 MB（每个点 ≈ 210 字节的
+    元组）；本结构把原始 f32 坐标倒进 ``array('f')``（≈ 文件大小），字形
+    本体首次访问时才按下式转换并缓存：
+
+        x' = x · s · xs + dx           （墨迹左缘对齐到类别左边距）
+        y' = (baseline − y) · s · ys   （Y 向下 → Y 向上、基线归零）
+
+    ``s/xs/ys/dx`` 与步距在解析时逐字形算好（只算标量，不建点元组），
+    因此转换是纯查表 + 一遍向量式遍历；表达式与旧实现逐比特一致。
+
+    对外语义与普通 ``dict[str, Glyph]`` 相同（len/iter/contains/get/
+    keys/values/items），只有 ``values()/items()`` 会整体物化——正常流程
+    用不到它们（排版只取用到的字）。
+    """
+
+    #: 转换后的字形缓存上限。字形转出来是点元组（每点 ≈ 200 字节，整套
+    #: 两万字库 ≈ 100 MB），全量缓存等于把紧凑存储又还原回去；一次排版只
+    #: 用几十到几百字，故设上限，超了整体清空（转换一个字形微秒级）。
+    CACHE_LIMIT = 2048
+
+    __slots__ = ("_chars", "_glyph_start", "_stroke_start", "_pts", "_s",
+                 "_xs", "_ys", "_dx", "_adv", "_baseline", "_upem", "_cache")
+
+    def __init__(self, chars: dict[str, int], glyph_start: array,
+                 stroke_start: array, pts: array,
+                 s: array, xs: array, ys: array, dx: array, adv: array,
+                 baseline: float, upem: float) -> None:
+        self._chars = chars
+        self._glyph_start = glyph_start
+        self._stroke_start = stroke_start
+        self._pts = pts
+        self._s = s
+        self._xs = xs
+        self._ys = ys
+        self._dx = dx
+        self._adv = adv
+        self._baseline = baseline
+        self._upem = upem
+        self._cache: dict[str, Glyph] = {}
+
+    def __len__(self) -> int:
+        return len(self._chars)
+
+    def __iter__(self):
+        return iter(self._chars)
+
+    def __contains__(self, ch: object) -> bool:
+        return ch in self._chars
+
+    def __getitem__(self, ch: str) -> Glyph:
+        cache = self._cache
+        g = cache.get(ch)
+        if g is None:
+            g = self._convert(self._chars[ch], ch)
+            if len(cache) >= self.CACHE_LIMIT:
+                cache.clear()
+            cache[ch] = g
+        return g
+
+    def get(self, ch: str, default=None):
+        if ch in self._chars:
+            return self[ch]
+        return default
+
+    def keys(self):
+        return self._chars.keys()
+
+    def values(self):
+        return [self[ch] for ch in self._chars]
+
+    def items(self):
+        return [(ch, self[ch]) for ch in self._chars]
+
+    def _convert(self, i: int, ch: str) -> Glyph:
+        if i < 0:               # 合成的空格：无字形数据，只有半角步距
+            return Glyph(char=ch, strokes=[], advance=self._upem * 0.48)
+        pts = self._pts
+        s = self._s[i]
+        xs = self._xs[i]
+        ys = self._ys[i]
+        dx = self._dx[i]
+        base = self._baseline
+        strokes: list[list[tuple[float, float]]] = []
+        for j in range(self._glyph_start[i], self._glyph_start[i + 1]):
+            a = self._stroke_start[j] * 2
+            b = self._stroke_start[j + 1] * 2
+            strokes.append([(pts[k] * s * xs + dx, (base - pts[k + 1]) * s * ys)
+                            for k in range(a, b, 2)])
+        return Glyph(char=ch, strokes=strokes, advance=self._adv[i])
+
+
+def _index_gfont(path: Path):
+    """读取 ``.gfont``，建立紧凑索引（不建字形对象）。
+
+    返回 ``(pts, stroke_start, glyph_start, chars, bbox)``：
+
+        ``pts[2k], pts[2k+1]``                   第 k 个点的原始 x/y（Y 向下）
+        ``stroke_start[j] : stroke_start[j+1]``  笔画 j 的点区间
+        ``glyph_start[i] : glyph_start[i+1]``    字形 i 的笔画区间
+        ``chars``                                字符 → 字形下标（首次出现顺序）
+        ``bbox[i]``                              字形 i 的原始包围盒
+
+    码点重复的条目只取首条（真实字库不会出现；出现时也让「先入者」胜出，
+    免得两条数据共用同一字形下标）。
+    """
+    pts = array("f")
+    stroke_start = array("i", [0])
+    glyph_start = array("i", [0])
+    chars: dict[str, int] = {}
+    bbox: list[tuple[float, float, float, float]] = []
+    with zipfile.ZipFile(path) as zf:
+        for entry in zf.namelist():
+            cp = _entry_codepoint(entry)
+            if cp is None:
+                continue
+            ch = chr(cp)
+            if ch in chars:
+                continue
+            try:
+                data = zf.read(entry)
+            except Exception:
+                continue
+            parts = _glyph_parts(data)
+            if parts is None:
+                continue
+            _cp, vals, flags, box = parts
+            chars[ch] = len(glyph_start) - 1
+            bbox.append(box)
+            base_pt = len(pts) // 2
+            pts.extend(vals)
+            for cut in _stroke_cuts(flags)[1:]:
+                stroke_start.append(base_pt + cut)
+            stroke_start.append(base_pt + len(flags))
+            glyph_start.append(len(stroke_start) - 1)
+    return pts, stroke_start, glyph_start, chars, bbox
+
+
 def parse_gfont(path: str | Path, name: Optional[str] = None,
                 sample_limit: int = 3000) -> FontFamily:
     """解析 ``.gfont`` 为 :class:`FontFamily`。
 
     ``sample_limit`` 为统计度量（pitch/基线）时最多采样的字形数。
+
+    坐标不建对象图：原始 f32 坐标压进 ``array('f')``（≈ 文件大小），字形
+    在首次使用时才转换（见 :class:`_PackedGfontGlyphs`）。8.5 MB 的中文
+    字库常驻内存从约 150 MB 降到约 20 MB。
     """
     path = Path(path)
-    records = read_gfont_records(path)
-    if not records:
+    pts, stroke_start, glyph_start, chars, bbox = _index_gfont(path)
+    if not chars:
         raise ValueError(f"{path} 中未解析出任何字形")
 
     # 显示名优先级：显式参数 > 加密头里的真实名称 > 文件名
@@ -544,53 +732,71 @@ def parse_gfont(path: str | Path, name: Optional[str] = None,
         except Exception:
             name = path.stem
 
-    # -- 统计中文字身，确定 pitch 与基线 --
-    full_w: list[float] = []
-    full_top: list[float] = []      # 原始 miny（Y 向下 = 上边缘）
-    full_bottom: list[float] = []   # 原始 maxy（Y 向下 = 下边缘/基线）
-    for cp, (strokes, bbox) in list(records.items())[:sample_limit]:
-        if not _is_fullwidth(cp):
-            continue
-        x0, y0, x1, y1 = bbox
-        full_w.append(x1 - x0)
-        full_top.append(y0)
-        full_bottom.append(y1)
-
     def _pct(vals: list[float], q: float) -> float:
         if not vals:
             return 0.0
         s = sorted(vals)
         return s[min(len(s) - 1, int(len(s) * q))]
 
+    # -- 统计中文字身，确定 pitch 与基线 --
+    full_w: list[float] = []
+    full_top: list[float] = []      # 原始 miny（Y 向下 = 上边缘）
+    full_bottom: list[float] = []   # 原始 maxy（Y 向下 = 下边缘/基线）
+    for ch, gi in islice(chars.items(), sample_limit):
+        if not _is_fullwidth(ord(ch)):
+            continue
+        x0, y0, x1, y1 = bbox[gi]
+        full_w.append(x1 - x0)
+        full_top.append(y0)
+        full_bottom.append(y1)
+
+    # 全库样本（纯西文分支用，与旧实现一样不过采样上限）
+    all_w: list[float] = []
+    all_top: list[float] = []
+    all_bottom: list[float] = []
+    for ch, gi in chars.items():
+        x0, y0, x1, y1 = bbox[gi]
+        all_w.append(x1 - x0)
+        all_top.append(y0)
+        all_bottom.append(y1)
+
     if full_w:
         pitch = _pct(full_w, 0.97)
         baseline_raw = _pct(full_bottom, 0.90)
         cell_h = baseline_raw - _pct(full_top, 0.05)
     else:  # 纯西文/符号字体
-        allw = [b[2] - b[0] for _, b in records.values()]
-        allb = [b[3] for _, b in records.values()]
-        pitch = _pct(allw, 0.95)
-        baseline_raw = _pct(allb, 0.90)
-        cell_h = baseline_raw - _pct([b[1] for _s, b in records.values()], 0.05)
+        pitch = _pct(all_w, 0.95)
+        baseline_raw = _pct(all_bottom, 0.90)
+        cell_h = baseline_raw - _pct(all_top, 0.05)
     if pitch <= 0:
         pitch = cell_h or 100.0
     units_per_em = float(pitch)
 
+    cap_h = _cap_height((ord(ch), bbox[gi]) for ch, gi in chars.items())
+    med_w = _median_cjk_width((ord(ch), bbox[gi]) for ch, gi in chars.items())
+    med_h = _median_cjk_height((ord(ch), bbox[gi]) for ch, gi in chars.items())
+
     # 纯西文/符号字库（无表意文字）的「格子」往往只有少数几个全角字形可
     # 统计，估出的 pitch 不可靠且各字体间差到一个量级；混排时同一字号下
     # 符号会比汉字大出数倍。改用大写字高锚定：cap ≈ 0.70 em（印刷惯例）。
-    cap_h = _cap_height(records)
-    if _median_cjk_height(records) <= 0 and cap_h > 0:
+    if med_h <= 0 and cap_h > 0:
         units_per_em = cap_h / 0.70
 
-    # -- 生成字形 --
-    med_w = _median_cjk_width(records)
-    med_h = _median_cjk_height(records)
-    glyphs: dict[str, Glyph] = {}
-    for cp, (strokes, bbox) in records.items():
-        x0, _y0, x1, _y1 = bbox
+    # -- 逐字形定型（只算标量：收缩系数/对齐偏移/步距）--
+    n_glyphs = len(glyph_start) - 1
+    s_arr = array("d", [1.0]) * n_glyphs
+    xs_arr = array("d", [1.0]) * n_glyphs
+    ys_arr = array("d", [1.0]) * n_glyphs
+    dx_arr = array("d", [0.0]) * n_glyphs
+    adv_arr = array("d", [0.0]) * n_glyphs
+    tops: list[float] = []
+    bottoms: list[float] = []
+    total_adv = 0.0
+    for ch, gi in chars.items():
+        cp = ord(ch)
+        x0, y0, x1, y1 = bbox[gi]
         ink_w = x1 - x0
-        ink_h = _y1 - _y0
+        ink_h = y1 - y0
         cls = _glyph_class(cp)
         lb, rb = _CLASS_BEARINGS[cls]
         # 盒形字分级（按印刷字号层级，只缩不放）：
@@ -599,9 +805,14 @@ def parse_gfont(path: str | Path, name: Optional[str] = None,
         #     0.86/0.92 × 中位宽/高。
         # 检测全走几何特征：外框（四边各有一条笔画贴边走过半）+ 全部
         # 墨迹贴边（口分三笔写也命中；「叫」等偏旁口因其他笔画离边
-        # 而不命中）+ 框心有无墨迹（区分口与回/田/国）。
-        is_frame = (cls == "cjk" and ink_h >= 0.30 * units_per_em
-                    and _has_box_frame(strokes, ink_w, ink_h))
+        # 而不命中）+ 框心有无墨迹（区分口与回/田/国）。这一步要物化
+        # 该字形的笔画（临时，逐字形即弃）。
+        is_frame = False
+        strokes = None
+        if cls == "cjk" and ink_h >= 0.30 * units_per_em:
+            strokes = _glyph_strokes(pts, stroke_start, glyph_start[gi],
+                                     glyph_start[gi + 1])
+            is_frame = _has_box_frame(strokes, ink_w, ink_h)
         xs = ys = 1.0
         if is_frame:
             if (_all_points_near_perimeter(strokes, ink_w, ink_h)
@@ -615,12 +826,10 @@ def parse_gfont(path: str | Path, name: Optional[str] = None,
                 xs = min(1.0, tw / ink_w)
             if th > 0:
                 ys = min(1.0, th / ink_h)
-        # Y 向下 → Y 向上，基线归零；随后按类别归一尺寸（绕基线缩放）。
-        # 盒形字走专项通道（上面的 xs/ys），不再叠加统一缩放
+        # 按类别归一尺寸（绕基线缩放）；盒形字走专项通道（上面的 xs/ys），
+        # 不再叠加统一缩放
         s = 1.0 if is_frame else _size_norm_scale(cp, ink_w, ink_h, cap_h,
                                                   units_per_em, med_h)
-        conv = [[(x * s * xs, (baseline_raw - y) * s * ys) for x, y in st]
-                for st in strokes]
         # 步距 = 墨迹宽 + 类别边距（.gfont 数据只有墨迹，无步距信息）
         if cp == 0x20:
             advance = units_per_em * 0.48
@@ -633,22 +842,60 @@ def parse_gfont(path: str | Path, name: Optional[str] = None,
                 advance = max(advance, units_per_em * 0.30)
         # 墨迹左缘对齐到左边距（原始坐标以各自为基准，必须重定位）
         dx = lb * units_per_em - x0 * s * xs
-        if dx != 0.0:
-            conv = [[(x + dx, y) for x, y in st] for st in conv]
-        glyphs[chr(cp)] = Glyph(char=chr(cp), strokes=conv,
-                                advance=float(advance))
+        s_arr[gi] = s
+        xs_arr[gi] = xs
+        ys_arr[gi] = ys
+        dx_arr[gi] = dx
+        adv_arr[gi] = advance
+        # 转换后的墨迹上下缘（与 Glyph.bbox() 同值）→ 度量统计
+        tops.append((baseline_raw - y0) * s * ys)
+        bottoms.append((baseline_raw - y1) * s * ys)
+        total_adv += advance
 
-    # 缺空格时合成（半角宽）
-    if " " not in glyphs:
-        glyphs[" "] = Glyph(" ", [], advance=units_per_em * 0.48)
+    # 缺空格时合成（半角宽）；与旧实现一样参与 coverage 与 default_advance
+    if " " not in chars:
+        chars[" "] = -1
+        total_adv += units_per_em * 0.48
+    asc = _pct(tops, 0.95) if tops else 0.0
+    desc = _pct(bottoms, 0.05) if bottoms else 0.0
+    default_advance = (total_adv / len(chars)) if chars else units_per_em * 0.5
+    if default_advance <= 0:
+        default_advance = units_per_em * 0.5
 
     return FontFamily(
         name=name or path.stem,
         kind=KIND_GFONT,
         units_per_em=units_per_em,
-        glyphs=glyphs,
+        glyphs=_PackedGfontGlyphs(chars, glyph_start, stroke_start, pts,
+                                  s_arr, xs_arr, ys_arr, dx_arr, adv_arr,
+                                  baseline_raw, units_per_em),
         source=str(path),
+        # 度量按 recompute_metrics 的口径直接算好：否则 __post_init__ 会
+        # 遍历 glyphs.values()（把懒转换映射整体物化，紧凑加载白做）
+        ascent=asc if asc > 0 else units_per_em * 0.8,
+        descent=desc if desc < 0 else -units_per_em * 0.2,
+        default_advance=default_advance,
     )
+
+
+def count_gfont_glyphs(path: str | Path) -> int:
+    """字形数（唯一码点条目数，含补的合成空格）；读不了时返回 -1。
+
+    界面（字体列表）只要字数，不需要字形本体：全量解析一款 8 MB 的中文
+    库要 1 秒、上百兆内存，这里只读 ZIP 目录（不解压任何条目）。
+    """
+    seen: set[int] = set()
+    try:
+        with zipfile.ZipFile(path) as zf:
+            for entry in zf.namelist():
+                cp = _entry_codepoint(entry)
+                if cp is not None:
+                    seen.add(cp)
+    except Exception:
+        return -1
+    if seen and 0x20 not in seen:
+        seen.add(0x20)          # parse_gfont 会补一个合成空格
+    return len(seen)
 
 
 def gfont_metadata(path: str | Path) -> dict:

@@ -56,6 +56,12 @@ class CanvasView(QGraphicsView):
         self.controller = controller
 
         self._scene = QGraphicsScene(self)
+        # 关掉场景的空间索引（BSP 树）：画布上每个文档对象只有一个 item，
+        # 索引带来的收益可以忽略，而它每次增删/移动 item 都要维护树结构，
+        # 绘制时还要走 Qt 内部那套索引链遍历——0.2.0 的四次段错误（core
+        # 里 Qt 绘制链路走指针链走进了一块字体数据缓冲区）都落在这一带。
+        # NoIndex 下 Qt 直接用按 z 值排序的 item 表，项数少时更快也更稳。
+        self._scene.setItemIndexMethod(QGraphicsScene.ItemIndexMethod.NoIndex)
         self.setScene(self._scene)
         self.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
         self.setDragMode(QGraphicsView.RubberBandDrag)

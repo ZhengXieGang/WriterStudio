@@ -18,11 +18,16 @@ JSON 结构::
 from __future__ import annotations
 
 import json
+import re
 from array import array
 from collections.abc import Mapping
 from pathlib import Path
 
 from .model import KIND_STROKE_JSON, FontFamily, Glyph, _pct
+
+#: 顶层键（``"U+4E00":`` / ``"一":``）。值全是数字数组，不含引号，故
+#: 匹配到的 ``"…"`` + 冒号就是键；字形数用它数，不必建对象图。
+_GLYPH_KEY_RE = re.compile(r'"[^"\\]*"\s*:')
 
 
 def _parse_codepoint(key: str) -> str | None:
@@ -211,6 +216,20 @@ def parse_stroke_json(path: str | Path, name: str | None = None) -> FontFamily:
         descent=descent,
         default_advance=1.0,
     )
+
+
+def count_stroke_json_glyphs(path: str | Path) -> int:
+    """字形数（顶层键数）；只扫键，不解码坐标、不建对象图；读不了返回 -1。
+
+    本格式顶层键是 ``"U+XXXX"``（或单字符）字符串、值是纯数字数组，
+    因此正则数 ``"…":`` 即字形数（9 MB 的大库约几十毫秒）。若是嵌套了
+    其它对象的手改文件，这个数会偏大——仅供界面显示字数用。
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except Exception:
+        return -1
+    return len(_GLYPH_KEY_RE.findall(text))
 
 
 def load_stroke_json_dir(directory: str | Path) -> dict[str, FontFamily]:

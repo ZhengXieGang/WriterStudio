@@ -99,6 +99,76 @@ def test_save_load_file(tmp_path):
     assert back.document.objects[0].name == "星"
 
 
+# ------------------------------------------------- 外部修改检测（保存保护）
+def test_save_project_guard_blocks_external_overwrite(tmp_path):
+    """打开后文件被别的实例改过：带指纹保存必须报错，而不是静默覆盖。"""
+    from writerstudio.project import ExternalChangeError, FileStamp
+
+    p = tmp_path / f"a{FILE_SUFFIX}"
+    doc = Document()
+    doc.add(make_static_object([make_star(0, 0, 10)], name="我"))
+    save_project(p, ProjectData(document=doc))
+    stamp = FileStamp.of(p)
+    assert stamp is not None
+
+    # 另一个实例写了不同的内容
+    other = Document()
+    other.add(make_static_object([make_rect(0, 0, 4, 4)], name="别人"))
+    save_project(p, ProjectData(document=other))
+
+    with pytest.raises(ExternalChangeError) as err:
+        save_project(p, ProjectData(document=doc), expect=stamp)
+    assert err.value.path == p
+    # 磁盘上那份没被我们的保存动过
+    assert load_project(p).document.objects[0].name == "别人"
+
+    # 明确覆盖（expect=None）才写进去
+    save_project(p, ProjectData(document=doc))
+    assert load_project(p).document.objects[0].name == "我"
+
+
+def test_save_project_guard_allows_own_resave(tmp_path):
+    """自己连续保存不算外部修改（指纹每次保存后刷新）。"""
+    from writerstudio.project import FileStamp
+
+    p = tmp_path / f"b{FILE_SUFFIX}"
+    doc = Document()
+    doc.add(make_static_object([make_star(0, 0, 10)], name="星"))
+    save_project(p, ProjectData(document=doc))
+    stamp = FileStamp.of(p)
+    doc.add(make_static_object([make_rect(0, 0, 3, 3)], name="方"))
+    save_project(p, ProjectData(document=doc), expect=stamp)   # 不该抛
+    assert len(load_project(p).document.objects) == 2
+
+
+def test_save_project_guard_tolerates_deleted_file(tmp_path):
+    """文件被外部删除不算冲突：重新写出来即可。"""
+    from writerstudio.project import FileStamp
+
+    p = tmp_path / f"c{FILE_SUFFIX}"
+    save_project(p, ProjectData(document=Document()))
+    stamp = FileStamp.of(p)
+    p.unlink()
+    save_project(p, ProjectData(document=Document()), expect=stamp)
+    assert p.exists()
+
+
+def test_save_project_leaves_no_partial_file_on_failure(tmp_path):
+    """写失败（这里用不可序列化的对象制造）不留半份 .part 文件。"""
+    p = tmp_path / f"d{FILE_SUFFIX}"
+    proj = ProjectData(document=Document())
+
+    class _Boom:
+        def __repr__(self) -> str:
+            raise RuntimeError("boom")
+
+    proj.metadata["bad"] = _Boom()
+    with pytest.raises(Exception):
+        save_project(p, proj)
+    assert not p.exists()
+    assert not (tmp_path / f"d{FILE_SUFFIX}.part").exists()
+
+
 def test_corrupt_object_is_skipped_not_fatal():
     """单个对象损坏（坏点/transform 长度不对）只跳过它，项目仍能打开。"""
     good = object_to_data(make_static_object([make_rect(0, 0, 5, 5)], name="好"))

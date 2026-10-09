@@ -15,6 +15,7 @@ from writerstudio.fonts.builder import (
     update_text_object,
 )
 from writerstudio.fonts.gcode_lib import parse_gcode_char
+from writerstudio.fonts.gfont import KIND_GFONT, count_gfont_glyphs, parse_gfont
 from writerstudio.fonts.hershey import parse_hershey_jhf
 from writerstudio.fonts.layout import (
     ALIGN_CENTER,
@@ -26,7 +27,10 @@ from writerstudio.fonts.layout import (
 )
 from writerstudio.fonts.manager import FontManager
 from writerstudio.fonts.model import FontFamily, Glyph
-from writerstudio.fonts.stroke_json import parse_stroke_json
+from writerstudio.fonts.stroke_json import (
+    count_stroke_json_glyphs,
+    parse_stroke_json,
+)
 
 # 本机参考字库目录（不随仓库分发；克隆机上不存在时相关测试自动跳过）
 REF = Path(__file__).resolve().parents[2] / "references"
@@ -264,6 +268,177 @@ def test_bracket_size_norm_uses_char_height_when_cjk_present():
     # 没有汉字时退回大写高
     s2 = _size_norm_scale(ord("（"), 6.0, 1.30 * cjk_h, cap, em, 0.0)
     assert 1.30 * cjk_h * s2 == pytest.approx(1.15 * cap, rel=1e-6)
+
+
+# ------------------------------------------------- 单线 gfont：紧凑存储
+def _build_gfont(records: dict[int, list[list[tuple[float, float]]]]) -> bytes:
+    """按 .gfont 的条目布局合成一个最小字库（ZIP，条目名 = 码点十进制）。"""
+    import io
+    import struct
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for cp, strokes in records.items():
+            pts: list[tuple[float, float]] = []
+            flags: list[int] = []
+            for s in strokes:
+                for i, (x, y) in enumerate(s):
+                    pts.append((x, y))
+                    flags.append(0 if i == 0 else 1)
+            body = struct.pack(">HI", cp, len(pts) * 2)
+            body += b"".join(struct.pack(">ff", x, y) for x, y in pts)
+            body += struct.pack(">I", len(pts)) + bytes(flags)
+            zf.writestr(str(cp), body)
+    return buf.getvalue()
+
+
+def _write_gfont(tmp_path, records, name="m.gfont") -> Path:
+    p = tmp_path / name
+    p.write_bytes(_build_gfont(records))
+    return p
+
+
+def test_gfont_parses_synthetic_font(tmp_path):
+    """合成字库：笔画切分（抬笔标志）、Y 翻转、类别度量与查询接口。"""
+    p = _write_gfont(tmp_path, {
+        0x4E00: [[(0.0, 50.0), (100.0, 50.0)]],               # 一：字身中部
+        0x4E8C: [[(0.0, 20.0), (100.0, 20.0)],
+                 [(0.0, 100.0), (100.0, 100.0)]],              # 二：两笔
+    })
+    f = parse_gfont(p, name="合成")
+    assert f.name == "合成" and f.kind == KIND_GFONT
+    assert f.coverage() == 3                    # 两款 + 补的合成空格
+    assert f.has("一") and f.has("二") and f.has(" ") and not f.has("三")
+    assert len(f.glyph("二").strokes) == 2
+    ys = [y for s in f.glyph("一").strokes for _x, y in s]
+    assert max(ys) > 0                          # 原始 Y 向下 → 输出 Y 向上
+    assert f.glyph("一").advance > 0
+    assert f.glyph(" ").strokes == []           # 合成空格：只有步距
+    assert f.glyph(" ").advance == pytest.approx(f.units_per_em * 0.48)
+
+
+def test_gfont_glyphs_are_packed_not_object_graph(tmp_path):
+    """坐标压成数组表（≈ 文件大小），而不是每个点一个 Python 元组。"""
+    import tracemalloc
+
+    npts = 8000
+    strokes = [[(float(i), float(i % 50)) for i in range(8)] for _ in range(25)]
+    glyphs = {0x4E00 + k: strokes for k in range(npts // (8 * 25))}
+    p = _write_gfont(tmp_path, glyphs)
+
+    tracemalloc.start()
+    try:
+        base = tracemalloc.take_snapshot()
+        f = parse_gfont(p)
+        got = sum(st.size_diff
+                  for st in tracemalloc.take_snapshot().compare_to(base, "lineno"))
+    finally:
+        tracemalloc.stop()
+    assert not isinstance(f.glyphs, dict)       # 懒转换映射，非全量对象图
+    assert f.coverage() == len(glyphs) + 1
+    per_point = got / npts
+    assert per_point < 40, f"每点 {per_point:.0f} 字节，紧凑存储没生效"
+
+
+def test_gfont_glyph_cache_is_bounded(tmp_path):
+    """转换后的字形缓存有上限：整套大字库用一遍也不会把内存顶上 100MB。"""
+    glyphs = {0x4E00 + k: [[(0.0, 0.0), (100.0, 100.0)]] for k in range(3000)}
+    p = _write_gfont(tmp_path, glyphs)
+    f = parse_gfont(p)
+    limit = type(f.glyphs).CACHE_LIMIT
+    assert f.coverage() == 3001
+    for cp in glyphs:
+        assert max(y for _x, y in f.glyph(chr(cp)).strokes[0]) > 0   # Y 已翻转
+    assert len(f.glyphs._cache) <= limit
+
+
+def test_gfont_metrics_match_generic_recompute(tmp_path):
+    """预计算的度量必须与 model 的通用 recompute_metrics 口径一致。"""
+    recs = {
+        0x41: [[(0.0, 20.0), (50.0, 100.0)]],     # A~D：cap 高 80
+        0x42: [[(0.0, 20.0), (50.0, 100.0)]],
+        0x43: [[(0.0, 20.0), (50.0, 100.0)]],
+        0x44: [[(0.0, 20.0), (50.0, 100.0)]],
+        0x61: [[(0.0, 60.0), (30.0, 100.0)]],     # a
+        0x4E00: [[(0.0, 50.0), (60.0, 50.0)]],    # 一：扁平横画（汉字分支）
+        0x4E8C: [[(0.0, 10.0), (60.0, 10.0)],
+                 [(0.0, 90.0), (60.0, 90.0)]],
+    }
+    f = parse_gfont(_write_gfont(tmp_path, recs))
+    ref = FontFamily(name="ref", kind=f.kind, units_per_em=f.units_per_em,
+                     glyphs=dict(f.glyphs))       # __post_init__ → recompute
+    assert f.ascent == pytest.approx(ref.ascent, rel=1e-12)
+    assert f.descent == pytest.approx(ref.descent, rel=1e-12)
+    assert f.default_advance == pytest.approx(ref.default_advance, rel=1e-12)
+
+
+def test_gfont_inks_align_to_class_bearing(tmp_path):
+    """墨迹左缘对齐到类别左边距；汉字扁平横画另按 0.60 em 收窄。"""
+    p = _write_gfont(tmp_path, {
+        0x4E00: [[(0.0, 50.0), (200.0, 50.0)]],    # 一：孤立扁平横画
+        0x4E8C: [[(0.0, 20.0), (200.0, 20.0)],
+                 [(0.0, 100.0), (200.0, 100.0)]],  # 二：不是扁平横画
+    })
+    f = parse_gfont(p)
+    em = f.units_per_em
+    assert f.glyph("一").bbox().x0 == pytest.approx(0.07 * em, rel=1e-3)
+    assert f.glyph("一").bbox().width == pytest.approx(0.60 * em, rel=1e-3)
+    assert f.glyph("二").bbox().width == pytest.approx(0.90 * em, rel=1e-3)
+    assert f.glyph("二").bbox().x0 == pytest.approx(0.07 * em, rel=1e-3)
+
+
+def test_count_gfont_glyphs_is_metadata_only(tmp_path):
+    """字数统计只读 ZIP 目录：与实际覆盖数一致，且不解析字形。"""
+    recs = {0x4E00 + k: [[(0.0, 0.0), (10.0, 10.0)]] for k in range(20)}
+    p = _write_gfont(tmp_path, recs)
+    f = parse_gfont(p)
+    assert count_gfont_glyphs(p) == f.coverage() == 20 + 1
+    bad = tmp_path / "bad.gfont"
+    bad.write_bytes(b"not a zip")
+    assert count_gfont_glyphs(bad) == -1
+
+
+def test_count_stroke_json_glyphs_matches_parser(tmp_path):
+    p = _write_stroke_json(tmp_path / "c.json",
+                           {chr(0x4E00 + k): [[[0.1, 0.1], [0.9, 0.9]]]
+                            for k in range(5)})
+    pretty = _write_stroke_json(tmp_path / "p.json", {"一": [[[0.1, 0.1]]]},
+                                indent=2)
+    assert count_stroke_json_glyphs(p) == parse_stroke_json(p).coverage() == 5
+    assert count_stroke_json_glyphs(pretty) == 1
+    assert count_stroke_json_glyphs(tmp_path / "missing.json") == -1
+
+
+def test_entry_hint_count_does_not_load_family(tmp_path):
+    """FontEntry 的轻量字数接口：拿到字数但字体本体仍未解析。"""
+    recs = {0x4E00 + k: [[(0.0, 0.0), (10.0, 10.0)]] for k in range(6)}
+    _write_gfont(tmp_path, recs, "probe.gfont")
+    m = FontManager(user_font_dir=tmp_path / "nouser",
+                    builtin_dir=tmp_path / "nobuiltin",
+                    extra_dirs=[tmp_path])
+    entry = m.get_entry("probe")
+    assert entry is not None and entry.family is None
+    assert entry.hint_glyph_count() == 6 + 1     # 含合成空格
+    assert entry.family is None                  # 只读元数据，未建对象图
+    assert entry.hint_glyph_count() == 7
+
+
+def test_hint_glyph_count_skips_parsers(tmp_path, monkeypatch):
+    """字数走元数据接口：gfont/stroke-json/TrueType 都不触发全量解析。"""
+    from writerstudio.fonts.manager import FontEntry
+
+    calls: list[str] = []
+    monkeypatch.setattr(FontEntry, "load",
+                        lambda self: calls.append(self.name))
+    _write_gfont(tmp_path, {0x4E00 + k: [[(0.0, 0.0), (1.0, 1.0)]]
+                            for k in range(3)}, "meta.gfont")
+    m = FontManager(user_font_dir=tmp_path / "u", builtin_dir=tmp_path / "b",
+                    extra_dirs=[tmp_path])
+    entry = m.get_entry("meta")
+    assert entry is not None
+    assert entry.hint_glyph_count() == 4           # 3 字 + 合成空格
+    assert calls == []                             # 没有被全量解析
 
 
 # ---------------------------------------------------------------- 管理器

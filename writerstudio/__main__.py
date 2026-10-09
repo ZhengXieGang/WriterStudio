@@ -3,8 +3,35 @@
 from __future__ import annotations
 
 
+def _install_crash_log() -> None:
+    """把致命信号（段错误/abort）时的 Python 栈写进 ``~/.writerstudio/crash.log``。
+
+    Qt 内部崩溃的 core 里只有 C++ 帧（0.2.0 的四次 SIGSEGV 就是这样，栈上
+    全是 libQt6Widgets 的地址，连不上 Python 侧发生了什么）；faulthandler
+    在信号发生时 dump 所有线程的 Python 栈，是唯一能留下「当时在跑什么」
+    的手段。写失败（只读 HOME 等）时静默跳过，不影响启动。
+    """
+    try:
+        import faulthandler
+        import os
+        import time
+
+        from .recovery import home_dir
+
+        path = home_dir() / "crash.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(path, "a", buffering=1, encoding="utf-8")  # noqa: SIM115
+        faulthandler.enable(file=handle, all_threads=True)
+        handle.write(f"\n=== 会话开始 {time.strftime('%Y-%m-%d %H:%M:%S')} "
+                     f"pid={os.getpid()} ===\n")
+    except Exception:
+        pass
+
+
 def main() -> int:
     import sys
+
+    _install_crash_log()
 
     from PySide6.QtWidgets import QApplication
 

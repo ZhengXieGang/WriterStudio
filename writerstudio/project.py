@@ -47,7 +47,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Sequence
@@ -458,18 +460,95 @@ def project_from_data(data: dict) -> ProjectData:
 # ---------------------------------------------------------------------------
 # 文件读写
 # ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class FileStamp:
+    """文件指纹（大小 + mtime + 内容摘要），用于识别外部改动。
+
+    摘要取 blake2b 前 16 字节：8 MB 的文件约 10 ms，只在打开/保存时算一次。
+    mtime 单独不可靠（有些文件系统/同步工具会保留时间戳），所以内容对不上
+    就算改过。
+    """
+
+    size: int
+    mtime_ns: int
+    digest: str
+
+    @classmethod
+    def of(cls, path: str | Path) -> Optional["FileStamp"]:
+        """读取文件指纹；文件不存在或读不了返回 None。"""
+        p = Path(path)
+        try:
+            st = p.stat()
+        except OSError:
+            return None
+        h = hashlib.blake2b(digest_size=16)
+        try:
+            with open(p, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(chunk)
+        except OSError:
+            return None
+        return cls(st.st_size, st.st_mtime_ns, h.hexdigest())
+
+    def same_file_as(self, other: Optional["FileStamp"]) -> bool:
+        return other is not None and self.digest == other.digest
+
+    def mtime_text(self) -> str:
+        """本地时间的 mtime（报给用户看的「磁盘上那份是什么时候的」）。"""
+        import time
+
+        try:
+            return time.strftime("%Y-%m-%d %H:%M:%S",
+                                 time.localtime(self.mtime_ns / 1e9))
+        except (OSError, OverflowError, ValueError):
+            return "未知时间"
+
+
+class ExternalChangeError(RuntimeError):
+    """保存前发现目标文件已被外部修改（内容与打开时记下的指纹不符）。"""
+
+    def __init__(self, path: str | Path, expected: "FileStamp",
+                 actual: "FileStamp") -> None:
+        super().__init__(f"{path} 已被外部修改")
+        self.path = Path(path)
+        self.expected = expected
+        self.actual = actual
+
+
 def save_project(path: str | Path, project: ProjectData,
-                 *, indent: Optional[int] = None) -> None:
+                 *, indent: Optional[int] = None,
+                 expect: Optional[FileStamp] = None) -> None:
     """写项目文件。默认紧凑 JSON：坐标数组缩进后每行一个数字，缩进空白能占
     文件的三分之二（实测 9.86 MB 的项目紧凑写只有 3.21 MB），白白拖慢读写、
-    抬高打开时的文本/解析峰值。``indent`` 仅调试用。"""
+    抬高打开时的文本/解析峰值。``indent`` 仅调试用。
+
+    ``expect`` 为打开/上次保存时记下的磁盘指纹：文件在别处被改过（另一
+    实例或外部编辑器）就抛 :class:`ExternalChangeError`，由调用方决定
+    覆盖/另存/重载——整份覆盖别人的成果是静默丢数据的头号来源。
+    """
     path = Path(path)
     if path.suffix.lower() != FILE_SUFFIX:
         path = path.with_suffix(FILE_SUFFIX)
+    if expect is not None:
+        actual = FileStamp.of(path)
+        # 文件被外部删除不算冲突（重新写出来即可）；内容对不上才是冲突
+        if actual is not None and not actual.same_file_as(expect):
+            raise ExternalChangeError(path, expect, actual)
     data = project_to_data(project)
     text = json.dumps(data, ensure_ascii=False, indent=indent,
                       separators=(",", ":") if indent is None else None)
-    path.write_text(text, encoding="utf-8")
+    # 先写同目录临时文件再替换：写到一半被杀（断电/崩溃）也不会留下
+    # 半份 JSON 把原文件毁掉
+    tmp = path.with_name(path.name + ".part")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def load_project(path: str | Path) -> ProjectData:

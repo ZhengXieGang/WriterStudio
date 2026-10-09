@@ -33,7 +33,7 @@ from ..core.geometry import AffineTransform, BBox
 from ..fonts.builder import TextSpec, update_text_object
 from ..fonts.layout import ALIGN_CENTER, ALIGN_LEFT, ALIGN_RIGHT
 from ..perturb.params import PerturbParams
-from ..project import save_project
+from ..project import ExternalChangeError, save_project
 
 #: 越界判定容差 (mm)：包围盒超出页面该距离才报 out_of_page
 _EPS = 0.5
@@ -785,9 +785,18 @@ class AiTools:
         if p.suffix.lower() != ".wsproj":
             p = p.with_suffix(".wsproj")
         p.parent.mkdir(parents=True, exist_ok=True)
-        data = self.win._collect_project()
-        save_project(str(p), data)
-        self.win.project_path = str(p)
+        # 与手动保存同一套保护：文件在别处被改过就拒绝——AI 不能替用户
+        # 决定要不要覆盖别人写进去的内容，让用户在界面里选
+        expect = None
+        if self.win.project_path and Path(self.win.project_path) == p:
+            expect = self.win._file_stamp
+        try:
+            save_project(str(p), self.win._collect_project(), expect=expect)
+        except ExternalChangeError as exc:
+            raise ToolError(
+                f"文件已被外部修改：{p}（磁盘上那份 {exc.actual.mtime_text()}）。"
+                "请在 WriterStudio 里保存并选择「覆盖保存 / 另存为 / 重新载入」。") from None
+        self.win._set_current_path(str(p))    # 登记 + 刷新磁盘指纹
         self.win._mark_clean()
         return {"ok": True, "path": str(p),
                 "object_count": len(self._doc.objects)}
