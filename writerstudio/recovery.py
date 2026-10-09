@@ -73,9 +73,13 @@ def _owner_alive(path: Path) -> bool:
     if sys.platform.startswith("linux"):
         cmdline = Path(f"/proc/{pid}/cmdline")
         try:
-            return b"writerstudio" in cmdline.read_bytes().lower()
+            raw = cmdline.read_bytes()
         except OSError:
             return False            # 没有该进程（或已换成别的程序）
+        if not raw:
+            # 进程刚 fork 出来、cmdline 还没写好：宁可信其活着，别删人家快照
+            return True
+        return b"writerstudio" in raw.lower()
     try:
         os.kill(pid, 0)
     except OSError:

@@ -10,7 +10,10 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "GPL-3.0-or-later" }
 dependencies = [
-    "PySide6>=6.6",
+    # Qt 6.12 解释器退出时会踩坏堆（PySide 清理阶段回头调用已拆一半的
+    # Python 对象，实测 SIGSEGV 与 malloc(): unaligned fastbin chunk
+    # detected，0.2.0 的代码同样复现）；先在验证过的 6.11.x 上发布
+    "PySide6>=6.6,<6.12",
     "qtawesome>=1.3",
     "pyqtdarktheme-fork>=2.3",
     "fontTools>=4.40",

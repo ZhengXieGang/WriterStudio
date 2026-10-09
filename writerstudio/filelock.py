@@ -56,6 +56,8 @@ def _alive(info: dict) -> bool:
             cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
         except OSError:
             return False
+        if not cmdline:
+            return True             # 刚启动、cmdline 未就绪：别误判成已退出
         if b"writerstudio" not in cmdline.lower():
             return False
         start = _proc_start(pid)

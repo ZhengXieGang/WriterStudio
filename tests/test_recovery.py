@@ -218,12 +218,17 @@ def test_snapshot_keeps_other_live_instance(tmp_path, monkeypatch):
     """属主还活着的快照不能被别的实例清掉（两实例共用 HOME 时的保护）。"""
     import subprocess
     import sys
+    import time
 
     child = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(30)", "writerstudio"])
     try:
         path = tmp_path / f"recovery-{child.pid}.wsproj"
         path.write_text("{}", encoding="utf-8")
+        # 刚 Popen 出来的进程，/proc/<pid>/cmdline 可能还没写好：等它就绪
+        deadline = time.time() + 5.0
+        while not recovery._owner_alive(path) and time.time() < deadline:
+            time.sleep(0.02)
         assert recovery._owner_alive(path)
         recovery.clear()
         assert path.exists()                    # 活实例的快照保留
