@@ -115,6 +115,69 @@ def test_offer_recovery_noop_without_snapshot(win):
     assert win.maybe_offer_recovery() is False
 
 
+# ------------------------------------------------- 保存保护（外部修改冲突）
+def _save_other_content(path, text="别人"):
+    """模拟另一个实例：把不同内容整份写进同一个项目文件。"""
+    from writerstudio.core.document import Document, make_static_object
+    from writerstudio.core.sample import make_rect
+    from writerstudio.project import ProjectData, save_project
+
+    doc = Document()
+    doc.add(make_static_object([make_rect(0, 0, 5, 5)], name=text))
+    save_project(str(path), ProjectData(document=doc))
+
+
+def test_save_conflict_cancel_overwrite_reload(win, tmp_path, monkeypatch):
+    """保存时发现文件被外部改过：取消/覆盖/重新载入三条路各走一遍。"""
+    from writerstudio.project import FILE_SUFFIX, load_project, save_project
+
+    p = tmp_path / f"lab{FILE_SUFFIX}"
+    save_project(str(p), win._collect_project())
+    assert win._load_project_path(str(p))
+    AiTools(win).call("add_text", {"text": "AB", "size": 8.0,
+                                   "font_names": ["futural"]})
+    assert win._dirty and len(win.controller.doc.objects) == 1
+
+    _save_other_content(p)                       # 另一实例抢先保存
+    assert load_project(p).document.objects[0].name == "别人"
+
+    monkeypatch.setattr(win, "_ask_external_change", lambda exc: "cancel")
+    assert win._save_project() is False          # 取消：什么都不写
+    assert load_project(p).document.objects[0].name == "别人"
+    assert win._dirty                            # 仍是未保存状态
+
+    monkeypatch.setattr(win, "_ask_external_change", lambda exc: "overwrite")
+    assert win._save_project() is True           # 覆盖：我方内容落盘
+    assert load_project(p).document.objects[0].name != "别人"
+    assert not win._dirty
+
+    # 再来一次：这次选「重新载入磁盘版本」，界面应换成磁盘上那份
+    AiTools(win).call("add_text", {"text": "CD", "size": 8.0,
+                                   "font_names": ["futural"]})
+    _save_other_content(p, "又一份")
+    monkeypatch.setattr(win, "_ask_external_change", lambda exc: "reload")
+    assert win._save_project() is True
+    assert win.controller.doc.objects[0].name == "又一份"
+
+
+def test_save_without_conflict_does_not_prompt(win, tmp_path, monkeypatch):
+    """没人动过文件时照常静默保存。"""
+    from writerstudio.project import FILE_SUFFIX, save_project
+
+    p = tmp_path / f"quiet{FILE_SUFFIX}"
+    save_project(str(p), win._collect_project())
+    assert win._load_project_path(str(p))
+    AiTools(win).call("add_text", {"text": "AB", "size": 8.0,
+                                   "font_names": ["futural"]})
+
+    def _boom(exc):
+        raise AssertionError("不该弹冲突对话框")
+
+    monkeypatch.setattr(win, "_ask_external_change", _boom)
+    assert win._save_project() is True
+    assert win._file_stamp is not None           # 指纹已刷新
+
+
 # ----------------------------------------------- 多实例：快照各写各的
 def test_snapshot_is_per_instance(win, tmp_path):
     """两个实例各写一份快照，互不覆盖；恢复取最新那份。"""
