@@ -209,6 +209,7 @@ class MachinePanel(QWidget):
         # ---- 抬落笔设置 ----
         pen = QGroupBox("抬落笔")
         pf = QFormLayout(pen)
+        self._pen_form = pf
         self.pen_mode = QComboBox()
         for key, label in PEN_MODES.items():
             self.pen_mode.addItem(label, key)
@@ -349,7 +350,7 @@ class MachinePanel(QWidget):
 
         self.start_summary = QLabel("当前起点：未设置")
         self.start_summary.setWordWrap(True)
-        self.start_summary.setStyleSheet("color:#0a6;")
+        self.start_summary.setStyleSheet("color:#fff;")
         spv.addWidget(self.start_summary)
         root.addWidget(sp)
 
@@ -404,8 +405,7 @@ class MachinePanel(QWidget):
         self.simplify_spin.setToolTip(
             "按此容差合并笔画上的密集采样点（0=关闭）。\n"
             "书写速度快时线条发抖可试 0.1~0.3；0.5 以上会明显失真。")
-        srow.addWidget(self.simplify_spin)
-        srow.addStretch(1)
+        srow.addWidget(self.simplify_spin, 1)
         jf.addLayout(srow)
         gen = QPushButton("生成预览")
         gen.clicked.connect(self.generateRequested.emit)
@@ -502,10 +502,13 @@ class MachinePanel(QWidget):
         self.pause_btn.setText("继续" if st is State.PAUSED else "暂停")
         if st is State.DISCONNECTED:
             # 断开后旧坐标不再代表笔头位置，留着会让「读取当前笔位」
-            # 拿到上一次连接的过期值
+            # 拿到上一次连接的过期值；固件参数同理，未连接时不显示。
             self._machine_pos = None
             self.pos_label.setText("—")
             self.feed_label.setText("—")
+            self.fw_label.setText("—")
+        elif st is State.CONNECTING:
+            self.fw_label.setText("读取中…")
 
     # ------------------------------------------------- 进度与笔寿命
     def _tick_progress(self) -> None:
@@ -619,7 +622,12 @@ class MachinePanel(QWidget):
             self.progress_label.setText(f"命令失败：{exc}")
 
     def _on_profile(self, prof) -> None:
-        """能力探测完成：显示固件参数摘要（只读快照，不给建议）。"""
+        """能力探测完成：显示固件参数摘要（只读快照，不给建议）。
+
+        profile 事件只在真正连上机器并完成 $$ 探测后产生，因此这里直接
+        显示；启动时回填的旧档案不写标签（见 MainWindow._restore_machine_profile），
+        断开时由 _on_state 清掉——未连接就看不到固件参数。
+        """
         self.fw_label.setText(prof.summary())
         self.profileDetected.emit(prof)
 
@@ -633,13 +641,23 @@ class MachinePanel(QWidget):
     def _on_pen_mode(self) -> None:
         mode = self.pen_mode.currentData()
         is_z = mode == PEN_Z
-        self.pen_up_z.setEnabled(is_z)
-        self.pen_down_z.setEnabled(is_z)
-        self.pen_z_feed.setEnabled(is_z)
-        self.pen_s.setEnabled(mode in (PEN_M3M5, PEN_SERVO_ANGLE))
-        self.pen_up_s.setEnabled(mode == PEN_SERVO_ANGLE)
-        self.laser_power.setEnabled(mode == PEN_LASER)
-        self.laser_preview.setEnabled(mode == PEN_LASER)
+        # 只显示当前方式真正可调的项（隐藏而不是标灰）：表单里看不到的
+        # 控件不会占位，面板也不会被挤出一排无意义的灰框。
+        for w in (self.pen_down_z, self.pen_up_z, self.pen_z_feed,
+                  self.stroke_taper, self.entry_taper):
+            self._set_pen_row_visible(w, is_z)
+        self._set_pen_row_visible(
+            self.pen_s, mode in (PEN_M3M5, PEN_SERVO_ANGLE))
+        self._set_pen_row_visible(self.pen_up_s, mode == PEN_SERVO_ANGLE)
+        self._set_pen_row_visible(self.laser_power, mode == PEN_LASER)
+        self._set_pen_row_visible(self.laser_preview, mode == PEN_LASER)
+
+    def _set_pen_row_visible(self, widget, visible: bool) -> None:
+        """同时隐藏/显示表单行里的控件与它的标签。"""
+        widget.setVisible(visible)
+        label = self._pen_form.labelForField(widget)
+        if label is not None:
+            label.setVisible(visible)
 
     def _on_single_step(self, on: bool) -> None:
         self.link.single_step = on
@@ -699,16 +717,14 @@ class MachinePanel(QWidget):
         """用一句人话说明当前起点设置。"""
         marker = self.start_point.pen_marker
         if marker is None:
-            self.start_summary.setText(
-                "当前起点：未设置——发送时会询问是否以机械原点为起点")
+            self.start_summary.setText("当前起点：未设置")
         elif self.start_point.mode == MODE_REGISTERED:
             x, y = self.start_point.point
             self.start_summary.setText(
                 f"当前起点：标记处 = 机器坐标 ({x:.1f}, {y:.1f}) mm（笔位校准）")
         else:
             self.start_summary.setText(
-                f"当前起点：机器坐标 ({marker[0]:.1f}, {marker[1]:.1f}) mm"
-                "（可拖动画布标记微调）")
+                f"当前起点：机器坐标 ({marker[0]:.1f}, {marker[1]:.1f}) mm")
 
     def _toggle_pause(self) -> None:
         try:

@@ -529,6 +529,25 @@ class DocumentController(QObject):
         """对任意带 transform 的模型（对象或参考图）设置变换。"""
         self.undo_stack.push(TransformCommand(self, model, transform, text))
 
+    def set_model_transforms(self,
+                             entries: list[tuple[object, AffineTransform]],
+                             text: str = "变换对象") -> None:
+        """一次设置多个模型的变换（批量拖动/缩放）：整批只占一步撤销。
+
+        单个模型直接走 :meth:`set_model_transform`；多个模型用撤销宏包住，
+        撤销时整批一起退回，不会出现「拖动十个对象要按十次 Ctrl+Z」。
+        """
+        entries = [(m, t) for m, t in entries if t != m.transform]
+        if not entries:
+            return
+        if len(entries) == 1:
+            self.set_model_transform(entries[0][0], entries[0][1], text)
+            return
+        self.undo_stack.beginMacro(text)
+        for model, transform in entries:
+            self.set_model_transform(model, transform, text)
+        self.undo_stack.endMacro()
+
     def move_z(self, obj: DocumentObject, delta: int) -> None:
         self.undo_stack.push(MoveZCommand(self, obj, delta))
 

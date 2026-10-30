@@ -149,10 +149,14 @@ class TransformGraphicsItem(QGraphicsObject):
         self._mode: Handle | None = None
         self._drag_kind: str | None = None
         self._pending: Optional[AffineTransform] = None
+        self._pending_delta: Optional[AffineTransform] = None
         self._start_transform = model.transform
         self._start_scene = QPointF()
         self._start_local = QPointF()
         self._hover_handle = Handle.NONE
+        # 批量拖动：按下时记录其余选中项及其起始变换，移动时一起平移，
+        # 松手时整批一条撤销命令（见 _begin_drag / _commit_move）。
+        self._group: list[tuple[TransformGraphicsItem, AffineTransform]] = []
 
         self.setFlags(
             QGraphicsItem.ItemIsSelectable
@@ -379,6 +383,22 @@ class TransformGraphicsItem(QGraphicsObject):
         self._start_scene = event.scenePos()
         self._start_local = self._start_frame_local(event.scenePos())
         self._pending = None
+        self._pending_delta = None
+        self._group = []
+        if mode == 'move':
+            # 批量移动：同场景中其余被选中的对象跟着走（锁定的除外）。
+            # 不要求它们与本单位同类——书写对象和参考图可以一起选、一起拖。
+            sc = self.scene()
+            if sc is not None:
+                for it in sc.selectedItems():
+                    if (it is not self
+                            and isinstance(it, TransformGraphicsItem)
+                            and not it.locked):
+                        it._drag_kind = 'move'
+                        it._pending = None
+                        it._pending_delta = None
+                        it._drag_paint_hint_changed()
+                        self._group.append((it, it.model.transform))
         self._drag_paint_hint_changed()
 
     def _drag_paint_hint_changed(self) -> None:
@@ -395,17 +415,31 @@ class TransformGraphicsItem(QGraphicsObject):
     def mouseMoveEvent(self, event: QGraphicsSceneMouseEvent) -> None:
         if self._drag_kind == 'move':
             delta = event.scenePos() - self._start_scene
-            new_t = AffineTransform.translate(delta.x(), delta.y()) @ self._start_transform
-            self._preview(new_t)
+            shift = AffineTransform.translate(delta.x(), delta.y())
+            self._pending_delta = shift
+            self._ensure_fast_preview()
+            self._preview(shift @ self._start_transform)
+            # 批量移动：其余选中项套用同一个位移（各自以自身起始变换为基）
+            for it, start in self._group:
+                ensure = getattr(it, "_ensure_fast_preview", None)
+                if callable(ensure):
+                    ensure()
+                it._pending = shift @ start
+                it.setTransform(qtransform_from(it._pending))
+                it.update()
             event.accept()
             return
         if self._drag_kind == 'handle':
+            self._ensure_fast_preview()
             new_t = self._compute_handle_transform(event)
             if new_t is not None:
                 self._preview(new_t)
             event.accept()
             return
         super().mouseMoveEvent(event)
+
+    def _ensure_fast_preview(self) -> None:
+        """拖动预览位图按需构建（基类无缓存，留空）。"""
 
     def _start_frame_local(self, scene_pos: QPointF) -> QPointF:
         """把 scene(页面)坐标换算到「拖拽开始时的本地坐标系」。
@@ -493,7 +527,7 @@ class TransformGraphicsItem(QGraphicsObject):
     def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent) -> None:
         kind = getattr(self, '_drag_kind', None)
         if kind == 'move':
-            self._commit_transform(self._pending, "移动")
+            self._commit_move()
         elif kind == 'handle' and self._pending is not None:
             text = "旋转" if self._mode == Handle.ROTATE else "缩放"
             self._commit_transform(self._pending, text)
@@ -502,9 +536,38 @@ class TransformGraphicsItem(QGraphicsObject):
         self._mode = None
         self._drag_kind = None
         self._pending = None
+        self._pending_delta = None
         if kind is not None:
             self._drag_paint_hint_changed()
         event.accept()
+
+    def _commit_move(self) -> None:
+        """提交移动：自己 + 批量拖动的其余选中项，整批只占一步撤销。"""
+        delta = self._pending_delta if not self.locked else None
+        entries: list[tuple[object, AffineTransform]] = []
+        if delta is not None:
+            if self._pending is not None and self._pending != self.model.transform:
+                entries.append((self.model, self._pending))
+            for it, start in self._group:
+                new_t = delta @ start
+                if new_t != it.model.transform:
+                    entries.append((it.model, new_t))
+        elif not self.locked and self._pending is not None \
+                and self._pending != self.model.transform:
+            # 兼容程序化预览（没有经过 mouseMoveEvent，拿不到位移量）
+            entries.append((self.model, self._pending))
+        if entries:
+            text = (f"移动 {len(entries)} 个对象"
+                    if len(entries) > 1 else f"移动{self.ACTION_NOUN}")
+            self.controller.set_model_transforms(entries, text)
+        # 同伴没有自己的鼠标事件，预览状态由发起者统一收尾
+        for it, _start in self._group:
+            it._pending = None
+            it._pending_delta = None
+            it._drag_kind = None
+            it._drag_paint_hint_changed()
+            it.update()
+        self._group = []
 
     def _commit_transform(self, transform: Optional[AffineTransform], verb: str) -> None:
         # 锁定对象不接受任何变换；无实际变化（原地点击/拖回原位）也不产生撤销项
@@ -530,11 +593,18 @@ class ObjectGraphicsItem(TransformGraphicsItem):
 
     ACTION_NOUN = "对象"
 
+    #: 拖动/缩放预览位图的像素预算。拖动手感优先：位图只用于拖拽期间的
+    #: 快速预览，松手立即回到矢量全质量绘制，因此分辨率不够糊一点也不影响
+    #: 最终画面。
+    _FAST_PREVIEW_PIXELS = 2_000_000
+
     def __init__(self, obj: DocumentObject, controller: DocumentController) -> None:
         self._path = QPainterPath()
         self._hit_path = QPainterPath()
         self._path_rev = -1          # 上次重建路径时的笔画版本号
         self._hit_deferred = False   # 拖宽中跳过了命中区描边，待松手补建
+        self._fast_pix: Optional[QPixmap] = None
+        self._fast_rect = QRectF()
         super().__init__(obj, controller)
 
     @property
@@ -611,6 +681,17 @@ class ObjectGraphicsItem(TransformGraphicsItem):
         return self.boundingRect().contains(local_pos)
 
     def _paint_content(self, painter: QPainter) -> None:
+        # 拖动/缩放期间用起始时刻的位图快速预览：把整条笔画路径（文本对象
+        # 可能有上万个点）每帧重新光栅化是拖拽卡顿的主因。位图按当前视图
+        # 分辨率渲染一次，之后每帧只做一次图像变换；松手后恢复矢量绘制。
+        if self._fast_pix is not None and not self._fast_pix.isNull():
+            r = self._fast_rect
+            painter.drawPixmap(QRectF(r.left(), r.top(), r.width(), r.height()),
+                               self._fast_pix, QRectF(self._fast_pix.rect()))
+            return
+        self._paint_strokes(painter)
+
+    def _paint_strokes(self, painter: QPainter) -> None:
         pen = QPen(COLOR_INK)
         pen.setCosmetic(True)
         pen.setWidthF(1.6)
@@ -619,6 +700,48 @@ class ObjectGraphicsItem(TransformGraphicsItem):
         painter.setPen(pen)
         painter.setBrush(Qt.NoBrush)
         painter.drawPath(self._path)
+
+    def _drag_paint_hint_changed(self) -> None:
+        # 开始拖动不预建位图：单击对象也会走 _begin_drag，没必要为一次点击
+        # 光栅化整条笔迹；真正发生移动时再按需构建（见 _ensure_fast_preview）。
+        if self._drag_kind not in ('move', 'handle'):
+            self._fast_pix = None
+            self._fast_rect = QRectF()
+        self.update()
+
+    def _ensure_fast_preview(self) -> None:
+        if self._fast_pix is None:
+            self._build_fast_preview()
+
+    def _build_fast_preview(self) -> None:
+        """按当前视图分辨率把笔迹光栅化，供拖动/缩放期间快速绘制。"""
+        self._fast_pix = None
+        self._fast_rect = QRectF()
+        if self._path.isEmpty():
+            return
+        rect = self._path.boundingRect()
+        if rect.width() <= 1e-6 or rect.height() <= 1e-6:
+            return
+        # 每毫米多少像素 = 视图缩放 × 对象当前变换的线性缩放
+        det = abs(self.transform().determinant())
+        scale = math.sqrt(det) if det > 1e-12 else 1.0
+        ppm = max(0.2, (1.0 / self._scene_per_px()) * scale)
+        w = max(1, int(math.ceil(rect.width() * ppm)))
+        h = max(1, int(math.ceil(rect.height() * ppm)))
+        # 像素预算：超大对象/高倍缩放时降采样，避免一次拖拽吃掉几十 MB
+        k = min(1.0, (self._FAST_PREVIEW_PIXELS / float(w * h)) ** 0.5)
+        w = max(1, int(w * k))
+        h = max(1, int(h * k))
+        img = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
+        img.fill(Qt.transparent)
+        p = QPainter(img)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.scale(w / rect.width(), h / rect.height())
+        p.translate(-rect.left(), -rect.top())
+        self._paint_strokes(p)
+        p.end()
+        self._fast_pix = QPixmap.fromImage(img)
+        self._fast_rect = rect
 
     def boundingRect(self) -> QRectF:
         # 文本框手柄钉在框缘/框角上，可能落在墨迹包围盒之外

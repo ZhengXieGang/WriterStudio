@@ -2412,7 +2412,11 @@ class MainWindow(QMainWindow):
             pass
 
     def _restore_machine_profile(self) -> None:
-        """把上次会话的机器档案回填到 link 与面板标签（未重连前可用）。"""
+        """把上次会话的机器档案回填到 link（仅用于耗时估算）。
+
+        面板上的「固件参数」只在真正连上机器并探测完成后显示——回填的
+        旧档案属于估算用的缓存，不代表当前连的是同一台机器。
+        """
         from ..machine.profile import MachineProfile
         data = self.settings.machine_profile_data()
         if not data:
@@ -2422,7 +2426,6 @@ class MainWindow(QMainWindow):
         except Exception:
             return
         self.machine_panel.link.profile = prof
-        self.machine_panel.fw_label.setText(prof.summary())
 
     def _refresh_pen_marker_canvas(self) -> None:
         """按固定映射，把起点标记（机器坐标）重绘到正确页面位置。"""

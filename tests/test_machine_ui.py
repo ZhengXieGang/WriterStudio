@@ -412,10 +412,10 @@ def test_panel_z_speed_and_laser_preview_wired(qapp):
     cfg = p.current_config()
     assert cfg.pen_z_feed == 12000.0
     assert cfg.pen_up_lines() == ["G1 Z0 F12000"]
-    # 非 Z 模式下 Z 速度控件应禁用
+    # 非 Z 模式下 Z 速度控件应隐藏（只显示当前方式可调的项，而不是标灰）
     p.pen_mode.setCurrentIndex(p.pen_mode.findData("laser"))
-    assert not p.pen_z_feed.isEnabled()
-    assert p.laser_preview.isEnabled()
+    assert p.pen_z_feed.isHidden()
+    assert not p.laser_preview.isHidden()
     # laserPreviewS 往返
     p.laser_preview.setValue(100)
     assert p.current_config().laser_preview_power == 100
@@ -833,4 +833,67 @@ def test_restore_aligns_axis_baseline_before_refresh(qapp):
     assert win._machine_to_page(sp.pen_marker) == pytest.approx(marker_q)
     assert sp.point == pytest.approx((sp.pen_marker[0] + 8.0,
                                       sp.pen_marker[1] + 12.0))
+    win.close()
+
+
+def test_pen_mode_hides_unavailable_rows(qapp):
+    """抬落笔只显示当前方式可调的项（隐藏而不是标灰）。"""
+    win = MainWindow()
+    p = win.machine_panel
+
+    def shown(w):
+        return not w.isHidden()
+
+    p.pen_mode.setCurrentIndex(p.pen_mode.findData("z"))
+    assert shown(p.pen_down_z) and shown(p.pen_up_z) and shown(p.pen_z_feed)
+    assert shown(p.stroke_taper) and shown(p.entry_taper)
+    assert not shown(p.pen_s) and not shown(p.pen_up_s)
+    assert not shown(p.laser_power) and not shown(p.laser_preview)
+
+    p.pen_mode.setCurrentIndex(p.pen_mode.findData("servo-angle"))
+    assert not shown(p.pen_down_z) and not shown(p.pen_z_feed)
+    assert not shown(p.stroke_taper) and not shown(p.entry_taper)
+    assert shown(p.pen_s) and shown(p.pen_up_s)
+    assert not shown(p.laser_power)
+
+    p.pen_mode.setCurrentIndex(p.pen_mode.findData("laser"))
+    assert not shown(p.pen_s) and not shown(p.pen_up_s)
+    assert shown(p.laser_power) and shown(p.laser_preview)
+    win.close()
+
+
+def test_firmware_label_only_shows_when_connected(qapp):
+    """固件参数：未连接不显示；连接探测后显示；断开再清掉。"""
+    from writerstudio.machine.profile import MachineProfile
+    from writerstudio.machine.serial_link import LinkEvent, State
+
+    win = MainWindow()
+    p = win.machine_panel
+    assert p.fw_label.text() == "—"
+
+    prof = MachineProfile(version="GRBL 1.1f", max_rate=[3000.0, 3000.0, 500.0],
+                          accel=[1000.0, 1000.0, 100.0], steps_per_mm=[80.0] * 3)
+    p.linkEventReceived.emit(
+        LinkEvent(kind="profile", text=prof.summary(), profile=prof))
+    assert "3000" in p.fw_label.text()
+    assert "\n" in p.fw_label.text()        # 分组换行，而不是挤成一大行
+
+    p._on_state(State.DISCONNECTED)
+    assert p.fw_label.text() == "—"
+    win.close()
+
+
+def test_start_summary_copy_and_color(qapp):
+    """起点摘要：白字；不再提示拖动微调/机械原点询问。"""
+    from writerstudio.machine.start_point import MODE_CANVAS
+    win = MainWindow()
+    p = win.machine_panel
+    p.start_point.mode = MODE_CANVAS
+    p.start_point.pen_marker = (12.0, 34.0)
+    p._update_start_summary()
+    text = p.start_summary.text()
+    assert "12.0" in text and "34.0" in text
+    assert "可拖动" not in text
+    assert "机械原点" not in text
+    assert p.start_summary.styleSheet() == "color:#fff;"
     win.close()

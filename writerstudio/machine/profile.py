@@ -127,19 +127,27 @@ class MachineProfile:
         return suggested_feed(stroke_lengths, self.accel_xy, current_feed)
 
     def summary(self) -> str:
-        """一行人话描述（面板固件信息标签用）。"""
+        """多行人话描述（面板固件信息标签用）。
+
+        分成「型号/轴数」「XY 运动参数」「Z 上限」三组：标签宽度只有
+        面板一列，拼成一大行会被反复折断在数字中间，分组后每行都能
+        自然换行、读起来清楚。
+        """
         name = self.version.strip().strip(":") or (
             f"GRBL {self.grbl_version:g}" if self.grbl_version else "未知固件")
         if self.n_axes == 0:
             return f"固件：{name}（未读到轴参数）"
-        parts = [f"固件：{name}", f"{self.n_axes} 轴"]
+        lines = [f"固件：{name} · {self.n_axes} 轴"]
+        xy = []
         if self.accel_xy > 0:
-            parts.append(f"XY 加速度 {self.accel_xy:g} mm/s²")
+            xy.append(f"XY 加速度 {self.accel_xy:g} mm/s²")
         if self.max_rate_xy > 0:
-            parts.append(f"XY 速率上限 {self.max_rate_xy:g} mm/min")
+            xy.append(f"XY 速率上限 {self.max_rate_xy:g} mm/min")
+        if xy:
+            lines.append(" · ".join(xy))
         if self.has_z and self.z_max_rate > 0:
-            parts.append(f"Z 上限 {self.z_max_rate:g} mm/min")
-        return " · ".join(parts)
+            lines.append(f"Z 上限 {self.z_max_rate:g} mm/min")
+        return "\n".join(lines)
 
     # ------------------------------------------------------------ 序列化
     def to_data(self) -> dict:

@@ -225,3 +225,49 @@ def test_handle_hit_testing(qapp):
     # 未选中时不响应手柄
     item.setSelected(False)
     assert item._hit_handle(positions[Handle.TL]) == Handle.NONE
+
+
+def test_batch_drag_moves_all_selected_as_one_undo(qapp):
+    """批量选中后拖动：所有选中对象一起平移，整批只占一步撤销。"""
+    ctrl, obj1, item1 = _make_item(qapp)
+    view = item1.scene().views()[0]
+    obj2 = make_static_object([make_rect(0.0, 0.0, 50.0, 20.0)], name="矩形2",
+                              transform=AffineTransform.translate(200.0, 0.0))
+    ctrl.add_object(obj2)
+    item2 = view._items[obj2.id]
+    item1.setSelected(True)
+    item2.setSelected(True)
+
+    # 在选中框内空白处按下并拖动 (20, 10)
+    item1.mousePressEvent(FakeEvent((50.0, 25.0)))
+    move = FakeEvent((70.0, 35.0))
+    item1.mouseMoveEvent(move)
+    # 拖动中两者都已跟手移动（预览变换）
+    assert item1._pending is not None and item2._pending is not None
+    item1.mouseReleaseEvent(move)
+
+    assert obj1.transform.e == pytest.approx(20.0)
+    assert obj1.transform.f == pytest.approx(10.0)
+    assert obj2.transform.e == pytest.approx(220.0)
+    assert obj2.transform.f == pytest.approx(10.0)
+
+    # 一步撤销：两个对象一起退回原位
+    ctrl.undo()
+    assert obj1.transform.e == pytest.approx(0.0)
+    assert obj2.transform.e == pytest.approx(200.0)
+    assert obj2.transform.f == pytest.approx(0.0)
+    ctrl.redo()
+    assert obj1.transform.e == pytest.approx(20.0)
+    assert obj2.transform.e == pytest.approx(220.0)
+
+
+def test_drag_uses_fast_preview_bitmap_and_clears(qapp):
+    """拖动期间用位图预览（避免每帧重光栅化整条路径），松手清掉。"""
+    ctrl, obj, item = _make_item(qapp)
+    item.setSelected(True)
+    item.mousePressEvent(FakeEvent((50.0, 25.0)))
+    assert item._fast_pix is None          # 单击不预建
+    item.mouseMoveEvent(FakeEvent((60.0, 30.0)))
+    assert item._fast_pix is not None      # 真正移动时构建
+    item.mouseReleaseEvent(FakeEvent((60.0, 30.0)))
+    assert item._fast_pix is None          # 松手回到矢量全质量
