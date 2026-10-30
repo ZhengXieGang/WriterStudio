@@ -41,11 +41,13 @@ _SYMBOL_FALLBACK: dict[str, tuple[str, str]] = {
     "≡": ("mathupp", "@"), "∈": ("mathupp", "h"),
     "→": ("mathupp", "i"), "←": ("mathupp", "j"),
     "↓": ("mathupp", "k"),
-    "∃": ("mathupp", "v"), "÷": ("mathupp", "x"),
+    "÷": ("mathupp", "x"),
     "∥": ("mathupp", "y"), "⊥": ("mathupp", "z"),
     "·": ("mathupp", "$"),
     "⋅": ("mathupp", "$"),
 }
+# ∃ 曾挂在 mathupp 的 'v' 上，但那是**细楔形闭合轮廓**——描出来是双线
+# 空心字。现改由 _draw_box_symbol 按墨迹框画单线（见 _BOX_SYMBOLS）。
 # √ 也不在这张表里：内置字体的根号是**三段分开**的笔画（小横 / 斜下 / 长斜线），
 # 描出来在转折处会断开，而且不随 mathtext 把根号拉高（大根号会缩成一个小 V，
 # 与顶线脱开）。根号改由 _radical_stroke 按骨架画**一笔**，并把顶线接在同一笔上。
@@ -70,7 +72,30 @@ for _g, _k in _GREEK_TRANSLIT.items():
 _PROCEDURAL_SYMBOLS = frozenset(
     "× ≤ ≥ ≈ ≃ ≅ ≌ ∼ ∝ ≪ ≫ ≮ ≯ ⊂ ⊃ ⊆ ⊇ ⊊ ∪ ∩ ∅ ⊕ ⊖ ⊗ ⊘ ⊚ ⊙ ○ "
     "∈ ∉ ∋ ∀ ∄ ∴ ∵ ⇒ ⇐ ⇔ ↔ ↦ ∓ ± ∗ ∘ △ □ ◇ ∮ ′ ″ ‰ ≐ ≑ "
-    "∑ ∏ ∫ ∂ ∇ ∠".split())
+    "∑ ∏ ∫ ∂ ∇ ∠ "
+    # 逻辑联结词：手写字体链里没有，Hershey 也没挂键——曾走 mathtext
+    # 填充轮廓，写出来是空心字
+    "¬ ∧ ∨ ∃ ⊢ ⊣ ⊧ ⊨ ⊪ "
+    # 长双箭头：比 ⇒ 宽一倍，几何画法按墨迹框定宽
+    "⟹ ⟸ ⟺".split())
+
+#: 按 mathtext 的**字形墨迹框**画单线的符号：字形本身在哪、多大，就画多大
+#: （∃ 明显高于数学轴线，用 em 硬算会偏下一截）。
+_BOX_SYMBOLS = frozenset("¬∧∨∃⊢⊣⊧⊨⊪")
+_LONG_ARROWS = frozenset("⟹⟸⟺")
+
+#: 本进程里退到 mathtext 填充轮廓（空心字）的字符。正常公式应为空——
+#: AI 工具与测试用它确认「纸面上不会出现空心符号」。
+_HOLLOW_CHARS: set[str] = set()
+
+
+def hollow_chars() -> set[str]:
+    """最近一次渲染中退到「填充轮廓」兜底的字符集合（诊断用）。"""
+    return set(_HOLLOW_CHARS)
+
+
+def reset_hollow_chars() -> None:
+    _HOLLOW_CHARS.clear()
 
 
 def _arc_pts(cx: float, cy: float, r: float, a0: float, a1: float,
@@ -108,16 +133,75 @@ def _wave_pts(x0: float, y: float, w: float, amp: float,
             for i in range(n + 1)]
 
 
-def _draw_procedural_symbol(ch: str, ox: float, oy: float, em: float
-                            ) -> list[Stroke]:
+def _box_from_em(ch: str, ox: float, oy: float, em: float) -> BBox:
+    """没有 mathtext 墨迹框时（正文行内兜底）按字号估一个字形框。
+
+    比例取自 mathtext 实测墨迹盒：∃ 从基线一直到 0.70em；¬ 贴着数学轴线、
+    只有 0.3em 高；∧ ∨ 落在轴线上下；推出号是竖杠 + 底横。
+    """
+    if ch == "∃":
+        return BBox(ox, oy, ox + em * 0.48, oy + em * 0.70)
+    if ch == "¬":
+        return BBox(ox, oy + em * 0.12, ox + em * 0.56, oy + em * 0.42)
+    if ch in ("∧", "∨"):
+        return BBox(ox, oy + em * 0.02, ox + em * 0.50, oy + em * 0.56)
+    return BBox(ox, oy, ox + em * 0.58, oy + em * 0.62)   # ⊢ ⊧ ⊨ ⊣ ⊪
+
+
+def _draw_box_symbol(ch: str, box: BBox) -> list[Stroke]:
+    """按字形墨迹框画单线逻辑联结词（¬ ∧ ∨ ∃ 与推出号 ⊢ ⊧ ⊨ ⊣ ⊪）。
+
+    字形在 mathtext 里的位置和大小直接拿来用：∃ 比数学轴线高一截，
+    ∧ ∨ 的尖角也不在基线上，按 em 硬算会整体偏下、偏小。
+    """
+    x0, y0, x1, y1 = box.x0, box.y0, box.x1, box.y1
+    cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+    if ch == "¬":
+        # 顶上一横 + 右端向下的短竖
+        return [Stroke([(x0, y1), (x1, y1), (x1, y0)], closed=False)]
+    if ch == "∧":
+        # 合取：尖朝上（Λ）
+        return [Stroke([(x0, y0), (cx, y1), (x1, y0)], closed=False)]
+    if ch == "∨":
+        # 析取：尖朝下（V）
+        return [Stroke([(x0, y1), (cx, y0), (x1, y1)], closed=False)]
+    # 推出/满足类：竖杠 + 右侧一或两道横线（⊢ ⊧ ⊨ ⊣ ⊪）
+    h = y1 - y0
+    if ch in ("⊢", "⊧", "⊨", "⊣", "⊪"):
+        bar_x = x1 if ch == "⊣" else x0
+        far_x = x0 if ch == "⊣" else x1
+        out = [Stroke([(bar_x, y0), (bar_x, y1)], closed=False)]
+        lines = 3 if ch == "⊪" else (2 if ch == "⊨" else 1)
+        for i in range(lines):
+            y = y0 + h * 0.105 * i
+            out.append(Stroke([(bar_x, y), (far_x, y)], closed=False))
+        return out
+    # ∃：右侧竖脊 + 上、下两横，中间再加一横（反向的 E）
+    return [Stroke([(x0, y1), (x1, y1), (x1, y0), (x0, y0)], closed=False),
+            Stroke([(x1, cy), (x0 + (x1 - x0) * 0.12, cy)], closed=False)]
+
+
+def _draw_procedural_symbol(ch: str, ox: float, oy: float, em: float,
+                            box: Optional[BBox] = None) -> list[Stroke]:
     """按几何画单线数学符号（粗细交给笔尖，绝无空心轮廓）。
 
     记号约定：``oy`` 为基线，``em`` 为字号。关系符/运算符围绕数学轴线
     ``cy = oy + 0.27em`` 上下分布，与字体里既有符号保持同一视觉高度。
+    ``box`` 给定时（长双箭头）改用字形墨迹框定宽定位。
     """
     w = em * 0.62                  # 符号宽度
     x0 = ox
     cy = oy + em * 0.27            # 数学轴线
+    if box is not None:
+        x0, w = box.x0, box.width
+        cy = (box.y0 + box.y1) / 2.0
+    elif ch in _BOX_SYMBOLS:
+        # 正文行内兜底没有 mathtext 的墨迹框，按字号估一个
+        box = _box_from_em(ch, ox, oy, em)
+        x0, w = box.x0, box.width
+        cy = (box.y0 + box.y1) / 2.0
+    if ch in _BOX_SYMBOLS:
+        return _draw_box_symbol(ch, box)
     g = em * 0.13                  # 双线间距
     a = em * 0.05                  # 波浪振幅
     r_ring = em * 0.26             # 圆圈类半径
@@ -269,29 +353,33 @@ def _draw_procedural_symbol(ch: str, ox: float, oy: float, em: float
                 dot((x0 + em * 0.08, y2)),
                 dot((x0 + w - em * 0.08, y2))]
     # -- 箭头 -----------------------------------------------------------
-    if ch in ("⇒", "⇐", "⇔", "→", "←", "↔", "↦"):
-        go_left = ch in ("⇐", "⇔", "←")
-        go_right = ch in ("⇒", "⇔", "→", "↦")
-        dbl = ch in ("⇒", "⇐", "⇔")
+    if ch in ("⇒", "⇐", "⇔", "→", "←", "↔", "↦", "⟹", "⟸", "⟺"):
+        go_left = ch in ("⇐", "⇔", "←", "⟸", "⟺")
+        go_right = ch in ("⇒", "⇔", "→", "↦", "⟹", "⟺")
+        dbl = ch in ("⇒", "⇐", "⇔", "⟹", "⟸", "⟺")
+        # 长双箭头杆长一倍，箭头也得按比例长大，否则只剩一根细杆
+        lng = ch in _LONG_ARROWS
+        hh = em * (0.20 if lng else 0.15)      # 箭尖张开高度（半幅）
+        d1 = em * (0.30 if lng else 0.17)      # 主箭尖在杆上的落点
+        d2 = em * (0.52 if lng else 0.29)      # 第二道箭尖
         out = [line((x0, cy), (x0 + w, cy))]
         if go_right:
-            out.append(Stroke([(x0 + w - em * 0.17, cy + em * 0.15),
-                               (x0 + w, cy),
-                               (x0 + w - em * 0.17, cy - em * 0.15)],
+            out.append(Stroke([(x0 + w - d1, cy + hh), (x0 + w, cy),
+                               (x0 + w - d1, cy - hh)],
                               closed=False))
             if dbl:
-                out.append(Stroke([(x0 + w - em * 0.29, cy + em * 0.15),
-                                   (x0 + w - em * 0.12, cy),
-                                   (x0 + w - em * 0.29, cy - em * 0.15)],
+                out.append(Stroke([(x0 + w - d2, cy + hh),
+                                   (x0 + w - d1 * 0.7, cy),
+                                   (x0 + w - d2, cy - hh)],
                                   closed=False))
         if go_left:
-            out.append(Stroke([(x0 + em * 0.17, cy + em * 0.15), (x0, cy),
-                               (x0 + em * 0.17, cy - em * 0.15)],
+            out.append(Stroke([(x0 + d1, cy + hh), (x0, cy),
+                               (x0 + d1, cy - hh)],
                               closed=False))
             if dbl:
-                out.append(Stroke([(x0 + em * 0.29, cy + em * 0.15),
-                                   (x0 + em * 0.12, cy),
-                                   (x0 + em * 0.29, cy - em * 0.15)],
+                out.append(Stroke([(x0 + d2, cy + hh),
+                                   (x0 + d1 * 0.7, cy),
+                                   (x0 + d2, cy - hh)],
                                   closed=False))
         if ch == "↦":
             out.append(line((x0 + w - em * 0.02, cy - em * 0.16),
@@ -691,6 +779,21 @@ def _render_with_fonts(latex: str, size_mm: float, fonts, text_scale: float,
             if box is not None:
                 radicals.append(box)
                 continue
+        # 逻辑联结词 ¬ ∧ ∨ ∃：Hershey 没键位（∃ 的键位是细楔形轮廓），
+        # mathtext 只剩填充轮廓——按字形墨迹框画单线。
+        if ch in _BOX_SYMBOLS:
+            box = _glyph_ink_box(font, fontsize, glyph_index, ox, oy, scale)
+            if box is not None:
+                strokes.extend(_draw_box_symbol(ch, box))
+                continue
+        # 长双箭头 ⟹ ⟸ ⟺：⇒ 的加长版，宽度取字形墨迹框（固定 0.62em
+        # 会短一截，与 mathtext 留出的空档对不上）。
+        if ch in _LONG_ARROWS:
+            box = _glyph_ink_box(font, fontsize, glyph_index, ox, oy, scale)
+            if box is not None:
+                strokes.extend(_draw_procedural_symbol(
+                    ch, ox * scale, oy * scale, fontsize * scale, box))
+                continue
         # 单线兜底：内置 Hershey 数学/希腊字体（绝不出空心轮廓）。
         # 没有 manager（如 Markdown 里的行内公式）时按名字直接加载内置字体
         fb = _SYMBOL_FALLBACK.get(ch)
@@ -708,6 +811,10 @@ def _render_with_fonts(latex: str, size_mm: float, fonts, text_scale: float,
             strokes.extend(_draw_procedural_symbol(
                 ch, ox * scale, oy * scale, fontsize * scale))
             continue
+        # 走到这里就是「链上没有 / 内置单线字体没有 / 也没挂几何画法」的字，
+        # 下面只能用 mathtext 的填充轮廓描边（空心字）。记下来：正常文档
+        # 这个集合应当为空，测试与 AI 工具用 hollow_chars() 检查。
+        _HOLLOW_CHARS.add(ch)
         # 保留 mathtext 轮廓：按字形索引取出路径，散化为折线。
         # 数学字体的减号/正负号横杠等是**扁平矩形**（约 2.2×0.29mm），
         # 描轮廓在笔尖下会叠成一个方框——折叠成中线单笔
