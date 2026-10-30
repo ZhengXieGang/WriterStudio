@@ -1192,7 +1192,10 @@ def test_tikz_text_not_distorted_by_wobble(manager):
     # 文字笔画逐点不变；图形长线在起伏后应被画弯（点数变多）
     text_out, graphic_out = out[:len(text)], out[len(text):]
     for a, b in zip(text, text_out):
-        assert b.points == pytest.approx(a.points)
+        # 逐点比较：pytest.approx 在老版本不支持嵌套序列（CI 上是 8.x）
+        assert len(b.points) == len(a.points)
+        for pa, pb in zip(a.points, b.points):
+            assert pb == pytest.approx(pa)
     assert len(graphic_out[0].points) > len(graphic[0].points)
 
 
