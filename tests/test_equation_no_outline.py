@@ -72,3 +72,20 @@ def test_text_inline_symbol_fallback_draws():
                           origin=(0.0, 0.0))
         assert lay.missing == [], text
         assert lay.strokes(), text
+
+
+def test_forall_apex_at_bottom():
+    """∀ 是倒过来的 A：尖角在下、上边两臂张开（画成 A 就不是 ∀ 了）。"""
+    strokes = E._draw_procedural_symbol("∀", 0.0, 0.0, 5.0)
+    poly = max(strokes, key=lambda s: len(s.points))
+    assert len(poly.points) == 3
+    left, mid, right = poly.points
+    assert mid[1] < left[1] and mid[1] < right[1]
+
+
+def test_iff_has_heads_on_both_sides():
+    """↔ 两头都要有箭头尖：只画一根横线读不成等值联结词。"""
+    strokes = E._draw_procedural_symbol("↔", 0.0, 0.0, 5.0)
+    assert len(strokes) == 3          # 杆 + 左尖 + 右尖
+    ys = [p[1] for s in strokes for p in s.points]
+    assert max(ys) - min(ys) > 1.0    # 有张角，不是一条线

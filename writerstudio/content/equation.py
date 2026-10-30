@@ -333,9 +333,10 @@ def _draw_procedural_symbol(ch: str, ox: float, oy: float, em: float,
         half, top = w * 0.5, cy + em * 0.26
         bot = cy - em * 0.26
         if ch == "∀":
-            out = [Stroke([(x0, bot), (x0 + half, top), (x0 + w, bot)],
+            # ∀ 是倒过来的 A：尖角在**下**（上边两臂张开），中间一横
+            out = [Stroke([(x0, top), (x0 + half, bot), (x0 + w, top)],
                           closed=False)]
-            ty = cy - em * 0.06
+            ty = cy + em * 0.04
             f = (ty - bot) / (top - bot)
             out.append(line((x0 + half * (1.0 - f), ty),
                             (x0 + half * (1.0 + f), ty)))
@@ -354,8 +355,8 @@ def _draw_procedural_symbol(ch: str, ox: float, oy: float, em: float,
                 dot((x0 + w - em * 0.08, y2))]
     # -- 箭头 -----------------------------------------------------------
     if ch in ("⇒", "⇐", "⇔", "→", "←", "↔", "↦", "⟹", "⟸", "⟺"):
-        go_left = ch in ("⇐", "⇔", "←", "⟸", "⟺")
-        go_right = ch in ("⇒", "⇔", "→", "↦", "⟹", "⟺")
+        go_left = ch in ("⇐", "⇔", "←", "⟸", "⟺", "↔")
+        go_right = ch in ("⇒", "⇔", "→", "↦", "⟹", "⟺", "↔")
         dbl = ch in ("⇒", "⇐", "⇔", "⟹", "⟸", "⟺")
         # 长双箭头杆长一倍，箭头也得按比例长大，否则只剩一根细杆
         lng = ch in _LONG_ARROWS
