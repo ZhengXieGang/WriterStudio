@@ -783,7 +783,6 @@ class ObjectGraphicsItem(TransformGraphicsItem):
                 self._begin_frame_drag(event, handle)
                 event.accept()
                 return
-        self._press_was_selected = self.isSelected()
         super().mousePressEvent(event)
 
     def _begin_frame_drag(self, event, handle: Handle) -> None:
@@ -868,18 +867,6 @@ class ObjectGraphicsItem(TransformGraphicsItem):
             self._frame_snap = None
             event.accept()
             return
-        # 单击已选中的文本对象且没有拖动 → 进入就地编辑（Photoshop 文本工具式）
-        if (self._drag_kind == 'move' and self._pending is None
-                and getattr(self, "_press_was_selected", False)
-                and self._is_text and not self.locked
-                and (event.scenePos() - self._start_scene).manhattanLength() < 1.5):
-            cb = getattr(self.controller, "on_text_click_edit", None)
-            if callable(cb):
-                self._drag_kind = None
-                self._pending = None
-                cb(self.model)
-                event.accept()
-                return
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event: QGraphicsSceneMouseEvent) -> None:

@@ -6,7 +6,7 @@ import logging
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, Qt, QPointF, QTimer
+from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QPalette
 from PySide6.QtWidgets import (
     QApplication,
@@ -109,7 +109,6 @@ from .gcode_preview import GCodePreviewDialog
 from .machine_panel import MachinePanel
 from ..machine.serial_link import State as LinkState
 from .page_dialog import PageSetupDialog
-from .text_edit_session import TextEditSession
 from .perturb_panel import PerturbPanel
 from .reference_panel import ReferencePanel, make_reference_from_file
 from .text_dialog import TextEditDialog
@@ -152,17 +151,12 @@ class MainWindow(QMainWindow):
         self._recovery_timer.setInterval(60_000)
         self._recovery_timer.setSingleShot(False)
         self._recovery_timer.timeout.connect(self._autosave_recovery)
-        # 文字就地编辑会话（Photoshop 文本工具式：光标/框选/直接输入）
-        self._text_session: TextEditSession | None = None
-        self._session_sel: tuple[int, int] | None = None
-
         # 启动即为空白文档（不再预置演示图形），纸张尺寸/边距由设置恢复
         self.controller = DocumentController(self._initial_document())
         self.font_manager = FontManager()
         self.page_presets = PagePresetStore(self.settings)
         self.controller.on_object_activated = self._on_object_activated
         self.controller.on_reference_activated = self._on_reference_activated
-        self.controller.on_text_click_edit = self._on_text_click_edit
         self.controller.text_frame_resizing = self._on_text_frame_resizing
         self.controller.table_frame_resizing = self._on_table_frame_resizing
         self.controller.frame_resize_finish = self._flush_frame_resize
@@ -175,14 +169,12 @@ class MainWindow(QMainWindow):
         self.canvas = CanvasView(self.controller)
         self.setCentralWidget(self.canvas)
 
-        # 回车/F2（画布聚焦时）→ 进入选中文字的就地编辑
+        # 回车/F2（画布聚焦时）→ 打开选中文字的编辑对话框
         from PySide6.QtGui import QShortcut
-        self._text_edit_shortcuts = []
         for key in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_F2):
             sc = QShortcut(QKeySequence(int(key)), self.canvas)
             sc.setContext(Qt.WidgetWithChildrenShortcut)
-            sc.activated.connect(self._edit_selected_text_inline)
-            self._text_edit_shortcuts.append(sc)
+            sc.activated.connect(self._edit_selected_text_dialog)
 
         self._build_actions()
         self._build_menus()
@@ -978,10 +970,6 @@ class MainWindow(QMainWindow):
 
     def _on_zoom_changed(self, z: float) -> None:
         self._status_zoom.setText(f"{z * 100:.0f}%")
-        # 画布原生文字编辑：光标几何是场景坐标换算的，缩放后刷新一次
-        if getattr(self, "_text_session", None) is not None:
-            self._text_session._last_view_rect = None
-            self.canvas.viewport().update()
 
     def _refresh_object_panel(self) -> None:
         self.obj_list.blockSignals(True)
@@ -1046,10 +1034,6 @@ class MainWindow(QMainWindow):
         if se is not None and se.active:
             if not se.delete_selected():
                 self.statusBar().showMessage("请先点选笔画再删除。", 3000)
-            return
-        # 文字编辑会话里 Delete 属于编辑按键（画布已拦截快捷键），此分支
-        # 只是兜底，防止别处触发误删正在编辑的对象
-        if getattr(self, "_text_session", None) is not None:
             return
         objs = self._selected()
         if objs:
@@ -1383,90 +1367,14 @@ class MainWindow(QMainWindow):
 
     def _on_object_activated(self, obj) -> None:
         """双击对象 → 打开属性/内容编辑器（文本=文本编辑对话框）。"""
-        if getattr(self, "_text_session", None) is not None:
-            self._text_session.finish()      # 编辑中双击：先收尾再开对话框
         self.canvas.select_object(obj)
         self._edit_object(obj)
 
-    def _on_text_click_edit(self, obj) -> None:
-        """单击已选中的文本对象（未拖动）→ 进入画布就地编辑。"""
-        self._start_text_edit(obj)
-
-    def _edit_selected_text_inline(self) -> None:
-        """回车/F2：把恰好选中的一个文本对象进入就地编辑。"""
-        if getattr(self, "_text_session", None) is not None:
-            return          # 已在编辑中
+    def _edit_selected_text_dialog(self) -> None:
+        """回车/F2：把唯一选中的文本对象交给文本编辑对话框。"""
         objs = [o for o in self._selected() if o.source.kind == "text"]
         if len(objs) == 1:
-            self._start_text_edit(objs[0])
-
-    # ------------------------------------------------------- 画布文字编辑
-    def _start_text_edit(self, obj, scene_pos=None) -> None:
-        """在画布上就地编辑文本对象：真实光标/框选/直接输入（含输入法）。"""
-        if obj.source.kind != "text":
-            return
-        if self._text_session is not None:
-            if self._text_session.obj is obj:
-                self.canvas.setFocus()
-                return
-            self._text_session.finish()
-        if getattr(self, "stroke_editor", None) is not None \
-                and self.stroke_editor.active:
-            self._exit_stroke_edit()
-        session = TextEditSession(self.canvas, obj, self)
-        session.undo_snapshot = snapshot_object(obj)
-        session.textChanged.connect(self._on_session_text_changed)
-        session.charSelectionChanged.connect(self._on_session_selection_changed)
-        session.finished.connect(self._on_session_finished)
-        self._text_session = session
-        self._session_sel = None
-        self.canvas.text_session = session
-        for sc in getattr(self, "_text_edit_shortcuts", []):
-            sc.setEnabled(False)      # 回车在编辑中用于换行
-        self.canvas.setAttribute(Qt.WA_InputMethodEnabled, True)
-        self.canvas.setFocus()
-        session.start(QPointF(*scene_pos) if scene_pos else None)
-        self.statusBar().showMessage(
-            "文字编辑：直接输入（支持输入法）；拖动框选；回车换行；"
-            "Esc 或点击空白处结束", 8000)
-        self._sync_text_props()
-
-    def _on_session_text_changed(self, text: str) -> None:
-        """会话文本变化 → 写回对象（连续输入合并为一步撤销）。"""
-        session = self._text_session
-        if session is None:
-            return
-        obj = session.obj
-        spec = TextSpec.from_data(obj.source.data)
-        if spec.text == text:
-            return
-        spec.text = text
-        update_text_object(obj, spec, self.font_manager)
-        self.controller.replace_objects(
-            [(obj, session.undo_snapshot, snapshot_object(obj))], "编辑文字",
-            merge_key=f"inline-text:{obj.id}")
-        self.canvas.sync_scene()
-        session.sync_after_commit()
-        self._sync_text_props()
-
-    def _on_session_selection_changed(self, start: int, end: int) -> None:
-        self._session_sel = (start, end) if end > start else None
-
-    def _on_session_finished(self) -> None:
-        for sc in getattr(self, "_text_edit_shortcuts", []):
-            sc.setEnabled(True)
-        self.canvas.text_session = None
-        self._text_session = None
-        self._session_sel = None
-        self.canvas.viewport().update()      # 清除光标/选区覆盖
-        self._sync_text_props()
-
-    def _session_selected_chars(self) -> str:
-        """画布编辑会话当前选中的字符（不在编辑状态则返回空）。"""
-        session = self._text_session
-        if session is None or not session.has_selection():
-            return ""
-        return session.selected_chars()
+            self._edit_object(objs[0])
 
     #: 宽度手柄拖动中重排的最小间隔(ms)。大表格一次重排可达数十毫秒，
     #: 每个鼠标移动事件都重排会明显卡顿；限流后最多 ~25 次/秒，且松手时
@@ -1630,7 +1538,6 @@ class MainWindow(QMainWindow):
                 return
             if not hasattr(self, "stroke_editor"):
                 self._build_stroke_editor()
-            self._finish_text_edit_if_any()
             se = self.stroke_editor
             se.attach(objs[0])
             self.canvas.setDragMode(QGraphicsView.NoDrag)
@@ -1656,10 +1563,6 @@ class MainWindow(QMainWindow):
             self.act_stroke_edit.blockSignals(True)
             self.act_stroke_edit.setChecked(False)
             self.act_stroke_edit.blockSignals(False)
-
-    def _finish_text_edit_if_any(self) -> None:
-        if getattr(self, "_text_session", None) is not None:
-            self._text_session.finish()
 
     # 这些来源的笔画由源内容重新生成（调扰动/换种子/打开项目都会重渲染），
     # 手工编辑必须记进编辑层，否则会被重生成冲刷掉
@@ -1777,26 +1680,16 @@ class MainWindow(QMainWindow):
         spec = TextSpec.from_data(obj.source.data)
         vals = self.text_props.values()
         field = self.text_props.last_field
-        sel_chars = self._session_selected_chars()
-        if field == "font" and sel_chars:
-            # 行内编辑中有字符选区：字体只作用于选中字符（字符级覆盖）
-            for ch in set(sel_chars):
-                if ch.strip():
-                    prev = spec.char_overrides.get(ch, {})
-                    spec.char_overrides[ch] = {"font": vals["font"],
-                                               "scale": prev.get("scale", 1.0)}
-            label, key = "指定字符字体", "font-sel"
-        else:
-            # 覆盖语义：新值直接覆盖旧值（字体=重写回退链首位，其余顺延）
-            if vals["font"]:
-                spec.font_names = ([vals["font"]]
-                                   + [n for n in spec.font_names
-                                      if n != vals["font"]])
-            spec.size = vals["size"]
-            spec.char_spacing = vals["char_spacing"]
-            spec.line_spacing = vals["line_spacing"]
-            spec.frame_width = vals["frame_width"]
-            label, key = "修改文字属性", field or "props"
+        # 覆盖语义：新值直接覆盖旧值（字体=重写回退链首位，其余顺延）
+        if vals["font"]:
+            spec.font_names = ([vals["font"]]
+                               + [n for n in spec.font_names
+                                  if n != vals["font"]])
+        spec.size = vals["size"]
+        spec.char_spacing = vals["char_spacing"]
+        spec.line_spacing = vals["line_spacing"]
+        spec.frame_width = vals["frame_width"]
+        label, key = "修改文字属性", field or "props"
         old = snapshot_object(obj)
         update_text_object(obj, spec, self.font_manager)
         self.controller.replace_objects(
@@ -2874,11 +2767,7 @@ class MainWindow(QMainWindow):
                          Qt.Horizontal)
 
     def closeEvent(self, event) -> None:
-        # 先结束进行中的就地编辑（文字编辑逐键即时提交、笔画编辑丢弃
-        # 未松手的预览），再判断是否未保存——否则弹确认框时用户刚才
-        # 输入的内容还没进文档，确认语义是错的
-        if getattr(self, "_text_session", None) is not None:
-            self._text_session.finish()
+        # 先结束笔画编辑（丢弃未松手的预览），再判断是否未保存
         if hasattr(self, "stroke_editor") and self.stroke_editor.active:
             self._exit_stroke_edit()
         if not self._confirm_discard():

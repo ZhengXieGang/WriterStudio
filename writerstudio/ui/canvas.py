@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPolygonF, QTransform
 from PySide6.QtWidgets import QGraphicsScene, QGraphicsView
 
@@ -94,8 +94,6 @@ class CanvasView(QGraphicsView):
         self._marker_dragging = False
         # 笔画编辑工具（由主窗口在进入模式时注入 StrokeEditor；None=未启用）
         self.stroke_editor = None
-        # 文字就地编辑会话（由主窗口在开始编辑时注入 TextEditSession）
-        self.text_session = None
         self.setFocusPolicy(Qt.StrongFocus)   # 接收 Esc 退出笔画编辑
         # 机械原点标注：(原点页面坐标, X 轴单位方向, Y 轴单位方向)，页面 mm
         self._origin: Optional[tuple[tuple[float, float],
@@ -361,12 +359,6 @@ class CanvasView(QGraphicsView):
         鼠标坐标不再画在画布上（状态栏右下角已有显示），也就不需要
         鼠标移动时全视口重绘——大参考图下拖动明显更流畅。
         """
-        # 文字编辑会话：光标/选区/文本框（场景坐标 mm 绘制）
-        ts = self.text_session
-        if ts is not None:
-            painter.save()
-            ts.paint(painter)
-            painter.restore()
         # 笔画编辑的高亮/手柄：场景坐标（mm）绘制，线宽用 cosmetic 保持像素宽
         se = self.stroke_editor
         if se is not None and (se.active or se.is_dragging()):
@@ -451,42 +443,8 @@ class CanvasView(QGraphicsView):
             se.update_hover(None)        # 鼠标移出画布 → 清除悬停高亮
         super().leaveEvent(event)
 
-    # ------------------------------------------------------------ 文字编辑
-    def _session_wants_key(self, event) -> bool:
-        """编辑会话是否要接管该键（用于覆盖窗口级快捷键）。"""
-        ts = self.text_session
-        if ts is None:
-            return False
-        key = event.key()
-        mods = event.modifiers()
-        if mods & (Qt.ControlModifier | Qt.MetaModifier):
-            return key in (Qt.Key_Z, Qt.Key_Y, Qt.Key_A,
-                           Qt.Key_C, Qt.Key_X, Qt.Key_V)
-        if key in (Qt.Key_Shift, Qt.Key_Control, Qt.Key_Meta, Qt.Key_Alt,
-                   Qt.Key_AltGr, Qt.Key_CapsLock, Qt.Key_NumLock):
-            return False
-        return True
-
-    def event(self, e) -> bool:
-        # 编辑会话活动期间，把 Delete/字符/导航键从窗口快捷键（如「删除
-        # 对象」）手里抢回来，否则 Delete 会直接删掉整个对象
-        if (e.type() == QEvent.ShortcutOverride
-                and self.text_session is not None
-                and self._session_wants_key(e)):
-            e.accept()
-            return True
-        return super().event(e)
-
+    # ------------------------------------------------------------ 键盘
     def keyPressEvent(self, event) -> None:
-        ts = self.text_session
-        if ts is not None:
-            if event.key() == Qt.Key_Escape:
-                ts.finish()
-                event.accept()
-                return
-            if ts.handle_key(event):
-                event.accept()
-                return
         se = self.stroke_editor
         if (se is not None and se.active
                 and event.key() == Qt.Key_Escape):
@@ -494,38 +452,6 @@ class CanvasView(QGraphicsView):
             event.accept()
             return
         super().keyPressEvent(event)
-
-    def inputMethodEvent(self, event) -> None:
-        ts = self.text_session
-        if ts is None:
-            super().inputMethodEvent(event)
-            return
-        commit = event.commitString()
-        if commit:
-            ts.insert_text(commit)
-        pre = event.preeditString()
-        ts.set_preedit(pre)
-        event.accept()
-
-    def inputMethodQuery(self, query):
-        ts = self.text_session
-        if ts is not None:
-            if query == Qt.ImEnabled:
-                return True
-            if query == Qt.ImCursorRectangle:
-                r = ts.caret_view_rect()
-                return r if r is not None else QRectF()
-            if query == Qt.ImCursorPosition:
-                return ts.caret
-            if query == Qt.ImAnchorPosition:
-                return ts.anchor
-            if query == Qt.ImSurroundingText:
-                return ts.text
-            if query == Qt.ImCurrentSelection:
-                return ts.selected_chars()
-            if query == Qt.ImHints:
-                return Qt.InputMethodHint.ImhNone
-        return super().inputMethodQuery(query)
 
     # ----------------------------------------------------------------- 缩放
     def current_zoom(self) -> float:
@@ -656,16 +582,6 @@ class CanvasView(QGraphicsView):
             self.setCursor(Qt.SizeAllCursor)
             event.accept()
             return
-        # 文字编辑会话：框内接管（定位光标/框选）；框外则提交并结束编辑
-        ts = self.text_session
-        if (ts is not None and event.button() == Qt.LeftButton
-                and not (event.modifiers() & Qt.AltModifier)):
-            if ts.on_press(scene_pos, event):
-                event.accept()
-                return
-            ts.finish()
-            event.accept()
-            return
         # 笔画编辑工具：模式内完全接管左键（不移动对象、不框选）
         se = self.stroke_editor
         if (se is not None and se.active and event.button() == Qt.LeftButton
@@ -690,12 +606,6 @@ class CanvasView(QGraphicsView):
             self.interactionStarted.emit()
         scene_pos = self.mapToScene(event.position().toPoint())
         self.mouseMoved.emit(scene_pos)
-        ts = self.text_session
-        if ts is not None:
-            if ts.is_dragging():
-                ts.on_move(scene_pos)
-                event.accept()
-                return
         se = self.stroke_editor
         if se is not None and se.active:
             if se.is_dragging():
@@ -724,10 +634,9 @@ class CanvasView(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:
-        # 笔画编辑/文字编辑会话期间，双击不许穿透到场景（否则会误开
-        # 对象的属性对话框）；按普通按下处理
+        # 笔画编辑会话期间，双击不许穿透到场景（否则会误开对象的属性
+        # 对话框）；按普通按下处理
         scene_pos = self.mapToScene(event.position().toPoint())
-        ts = self.text_session
         se = self.stroke_editor
         if (se is not None and se.active
                 and event.button() == Qt.LeftButton
@@ -735,19 +644,9 @@ class CanvasView(QGraphicsView):
             se.on_press(scene_pos, event.modifiers())
             event.accept()
             return
-        if ts is not None and event.button() == Qt.LeftButton:
-            ts.on_press(scene_pos, event)
-            event.accept()
-            return
         super().mouseDoubleClickEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
-        ts = self.text_session
-        if (ts is not None and ts.is_dragging()
-                and event.button() == Qt.LeftButton):
-            ts.on_release()
-            event.accept()
-            return
         se = self.stroke_editor
         if (se is not None and se.active and se.is_dragging()
                 and event.button() == Qt.LeftButton):

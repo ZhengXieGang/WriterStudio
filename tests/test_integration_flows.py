@@ -2,7 +2,7 @@
 
 覆盖完整用户链路：
     * 文本（字符覆盖 + 扰动 + 字距）与 Markdown（字距）对象；
-    * 行内编辑提交 → 撤销/重做；
+    * 修改文本内容 → 撤销/重做；
     * 项目存档 → 重新载入 → 按源再生成 → G-code 生成；
     * 静态对象笔画编辑与 base_strokes 同步（扰动后编辑不回退）；
     * 高级拾取起点与手动标记行为一致。
@@ -25,7 +25,11 @@ from writerstudio.content.markdown import MarkdownStyle  # noqa: E402
 from writerstudio.core.document import make_static_object  # noqa: E402
 from writerstudio.core.sample import make_rect  # noqa: E402
 from writerstudio.core.strokes import Stroke  # noqa: E402
-from writerstudio.fonts.builder import TextSpec, make_text_object  # noqa: E402
+from writerstudio.fonts.builder import (  # noqa: E402
+    TextSpec,
+    make_text_object,
+    update_text_object,
+)
 from writerstudio.perturb.apply import BASE_STROKES_KEY, apply_perturb  # noqa: E402
 from writerstudio.perturb.params import PerturbParams  # noqa: E402
 from writerstudio.project import (  # noqa: E402
@@ -35,6 +39,7 @@ from writerstudio.project import (  # noqa: E402
     save_project,
 )
 from writerstudio.ui.main_window import MainWindow  # noqa: E402
+from writerstudio.ui.controller import snapshot_object  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -62,15 +67,14 @@ def test_flow_edit_save_load_gcode(qapp, tmp_path):
     assert md.source.data["style"]["char_spacing"] == 0.5
     win.controller.add_object(md)
 
-    # 3) 画布文字会话提交（文字变化，覆盖保留）——逐键即时提交，
-    #    finish 只做收尾（幂等）
+    # 3) 改文本内容（覆盖保留）——与文本编辑对话框同一条写回路径
     win.canvas.sync_scene()
     win.canvas.select_object(obj)
-    win._start_text_edit(obj)
-    ts = win._text_session
-    ts.select_all()
-    ts.insert_text("AB-13")            # 全选替换（覆盖保留）
-    ts.finish()                        # 结束编辑（幂等）
+    before = snapshot_object(obj)
+    spec_now = TextSpec.from_data(obj.source.data)
+    spec_now.text = "AB-13"
+    update_text_object(obj, spec_now, win.font_manager)
+    win.controller.replace_object(obj, before, snapshot_object(obj), "编辑文本")
     spec_now = TextSpec.from_data(obj.source.data)
     assert spec_now.text == "AB-13"
     assert spec_now.char_overrides["1"]["font"] == "futuram"
