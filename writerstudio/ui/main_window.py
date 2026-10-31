@@ -2937,6 +2937,7 @@ class MainWindow(QMainWindow):
     def _export_image(self, fmt: str) -> None:
         """导出整页为 PNG（位图，分辨率可选）或 SVG（矢量）。
 
+        两种格式都先在选项对话框里确认（PNG 选分辨率，都可选透明背景）。
         与 G-code 导出的取源一致：先提交挂起的扰动编辑，确保导出内容
         与画布上所见相同。
         """
@@ -2946,21 +2947,25 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import QFileDialog, QMessageBox
 
         from ..export import save_page_png, save_page_svg
+        from .export_dialog import ExportOptionsDialog
 
         doc = self.controller.doc
-        dpi = None
         if fmt == "png":
-            from .export_dialog import PngExportDialog
-            dpi = PngExportDialog.ask(doc.page, self.settings.png_export_dpi(),
-                                      self)
-            if dpi is None:
-                return
-            self.settings.set_png_export_dpi(dpi)   # 记住本次选择
             title, filt, default = ("导出为 PNG", "PNG 图片 (*.png)",
                                     "output.png")
         else:
             title, filt, default = ("导出为 SVG", "SVG 矢量图 (*.svg)",
                                     "output.svg")
+        choice = ExportOptionsDialog.ask(
+            doc.page, self.settings.png_export_dpi(), fmt=fmt,
+            transparent=self.settings.export_transparent(), parent=self)
+        if choice is None:
+            return
+        dpi, transparent = choice
+        if fmt == "png":
+            self.settings.set_png_export_dpi(dpi)   # 记住本次选择
+        self.settings.set_export_transparent(transparent)
+
         path, _ = QFileDialog.getSaveFileName(
             self, title, filedialog.path_for(default), filt)
         if not path:
@@ -2971,11 +2976,14 @@ class MainWindow(QMainWindow):
         self.global_perturb.flush()
         try:
             if fmt == "png":
-                w, h = save_page_png(doc, path, float(dpi))
+                w, h = save_page_png(doc, path, float(dpi),
+                                     transparent=transparent)
                 detail = f"{w}×{h} 像素（{dpi} DPI）"
             else:
-                n = save_page_svg(doc, path)
+                n = save_page_svg(doc, path, transparent=transparent)
                 detail = f"{n} 个对象，1 单位 = 1 mm"
+            if transparent:
+                detail += "\n透明背景"
         except Exception as exc:
             QMessageBox.critical(self, "导出失败", str(exc))
             return

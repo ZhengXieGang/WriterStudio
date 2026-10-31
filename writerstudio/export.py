@@ -27,8 +27,9 @@ def _iter_strokes(doc: Document):
                 yield s
 
 
-def render_page_image(doc: Document, dpi: float = DEFAULT_DPI):
-    """把页面渲染为白底黑线的 ``QImage``。"""
+def render_page_image(doc: Document, dpi: float = DEFAULT_DPI,
+                      transparent: bool = False):
+    """把页面渲染为黑线的 ``QImage``（默认白底，可选透明底）。"""
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen
 
@@ -36,8 +37,14 @@ def render_page_image(doc: Document, dpi: float = DEFAULT_DPI):
     scale = dpi / _MM_PER_INCH                     # px / mm
     w = max(1, round(page.width * scale))
     h = max(1, round(page.height * scale))
-    img = QImage(w, h, QImage.Format_RGB32)
-    img.fill(QColor("#ffffff"))
+    # 透明底必须用带 alpha 的格式：RGB32 没有 alpha 通道，画成透明也存不出
+    # 半透明像素，落盘 PNG 会退回不透明黑底。
+    if transparent:
+        img = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
+        img.fill(Qt.transparent)
+    else:
+        img = QImage(w, h, QImage.Format_RGB32)
+        img.fill(QColor("#ffffff"))
 
     painter = QPainter(img)
     painter.setRenderHint(QPainter.Antialiasing)
@@ -62,17 +69,22 @@ def render_page_image(doc: Document, dpi: float = DEFAULT_DPI):
     return img
 
 
-def save_page_png(doc: Document, path: str, dpi: float = DEFAULT_DPI
-                  ) -> tuple[int, int]:
+def save_page_png(doc: Document, path: str, dpi: float = DEFAULT_DPI,
+                  transparent: bool = False) -> tuple[int, int]:
     """导出 PNG，返回 (宽, 高) 像素。"""
-    img = render_page_image(doc, dpi)
+    img = render_page_image(doc, dpi, transparent=transparent)
     if not img.save(str(path), "PNG"):
         raise OSError(f"PNG 写入失败：{path}")
     return img.width(), img.height()
 
 
-def page_to_svg(doc: Document, stroke_width_mm: float = STROKE_WIDTH_MM) -> str:
-    """页面 → SVG 文本（1 单位 = 1 mm，y 轴翻转为 SVG 的向下坐标）。"""
+def page_to_svg(doc: Document, stroke_width_mm: float = STROKE_WIDTH_MM,
+                transparent: bool = False) -> str:
+    """页面 → SVG 文本（1 单位 = 1 mm，y 轴翻转为 SVG 的向下坐标）。
+
+    ``transparent=True`` 时省略白底矩形——SVG 默认就是透明底，缺省不画
+    即可；默认仍输出白底，与旧文件保持视觉一致。
+    """
     page = doc.page
     w, h = page.width, page.height
 
@@ -100,8 +112,12 @@ def page_to_svg(doc: Document, stroke_width_mm: float = STROKE_WIDTH_MM) -> str:
         '<?xml version="1.0" encoding="UTF-8"?>',
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{_f(w)}mm"'
         f' height="{_f(h)}mm" viewBox="0 0 {_f(w)} {_f(h)}">',
-        f'  <rect x="0" y="0" width="{_f(w)}" height="{_f(h)}"'
-        ' fill="#ffffff"/>',
+    ]
+    if not transparent:
+        lines.append(
+            f'  <rect x="0" y="0" width="{_f(w)}" height="{_f(h)}"'
+            ' fill="#ffffff"/>')
+    lines += [
         f'  <g fill="none" stroke="#111111"'
         f' stroke-width="{_f(stroke_width_mm)}"'
         ' stroke-linecap="round" stroke-linejoin="round">',
@@ -113,9 +129,10 @@ def page_to_svg(doc: Document, stroke_width_mm: float = STROKE_WIDTH_MM) -> str:
 
 
 def save_page_svg(doc: Document, path: str,
-                  stroke_width_mm: float = STROKE_WIDTH_MM) -> int:
+                  stroke_width_mm: float = STROKE_WIDTH_MM,
+                  transparent: bool = False) -> int:
     """导出 SVG，返回写出的 ``<path>`` 元素数（= 有内容的可见对象数）。"""
-    text = page_to_svg(doc, stroke_width_mm)
+    text = page_to_svg(doc, stroke_width_mm, transparent=transparent)
     try:
         with open(path, "w", encoding="utf-8") as f:
             f.write(text)

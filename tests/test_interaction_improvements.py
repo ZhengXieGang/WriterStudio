@@ -737,6 +737,26 @@ def test_history_panel_is_compact_top_right_dock(qapp):
     w.close()
 
 
+def test_history_panel_done_steps_are_white(qapp):
+    """已完成步骤用白色文字：深色面板上原来的暗绿对比度太低。"""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor, QUndoCommand
+
+    w = _win(qapp)
+    stack = w.controller.undo_stack
+    stack.push(QUndoCommand("第一步"))
+    stack.push(QUndoCommand("第二步"))
+    # 第 0 项是「初始状态」，第 1/2 项是已完成步骤
+    for row in (1, 2):
+        assert w.undo_panel.list.item(row).foreground().color() \
+            == QColor(255, 255, 255)
+    stack.undo()
+    # 撤销后第二步变成未完成：仍用灰色，与已完成步骤区分
+    assert w.undo_panel.list.item(2).foreground().color() \
+        == QColor(Qt.GlobalColor.gray)
+    w.close()
+
+
 # ===================================================== 辅助
 class _FakeEv:
     def __init__(self, x: float = 0.0, y: float = 0.0):

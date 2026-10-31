@@ -59,7 +59,7 @@ class UndoPanel(QDockWidget):
             done = i < idx
             item = QListWidgetItem(f"{i + 1}. {text}")
             item.setData(Qt.UserRole, i + 1)
-            item.setForeground(Qt.darkGreen if done else Qt.gray)
+            item.setForeground(Qt.white if done else Qt.gray)
             self.list.addItem(item)
 
         self.list.setCurrentRow(idx)   # 0 = 初始状态，i+1 = 第 i 步之后

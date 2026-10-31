@@ -54,6 +54,7 @@ K_PAGE_PRESET = "page/preset_name"
 K_AI_ENABLED = "ai/mcp_enabled"    # AI 排版服务（MCP，仅本机回环）
 K_AI_PORT = "ai/mcp_port"          # AI 排版服务端口
 K_EXPORT_DPI = "export/png_dpi"    # PNG 导出分辨率（记住上次使用值）
+K_EXPORT_TRANSPARENT = "export/transparent"   # 导出透明背景（PNG/SVG 共用）
 K_GEOMETRY = "ui/geometry"
 K_UI_THEME = "ui/theme"
 K_MAX_RECENT = 10
@@ -449,3 +450,10 @@ class Settings:
     def set_png_export_dpi(self, dpi: int) -> None:
         dpi = max(self.PNG_DPI_MIN, min(self.PNG_DPI_MAX, int(dpi)))
         self.set(K_EXPORT_DPI, dpi)
+
+    def export_transparent(self) -> bool:
+        """导出是否使用透明背景（默认白底，保持历史行为）。"""
+        return self.get_bool(K_EXPORT_TRANSPARENT, False)
+
+    def set_export_transparent(self, on: bool) -> None:
+        self.set(K_EXPORT_TRANSPARENT, bool(on))

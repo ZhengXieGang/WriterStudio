@@ -84,6 +84,23 @@ def test_save_png_writes_file(qapp, tmp_path):
     assert (loaded.width(), loaded.height()) == (w, h)
 
 
+def test_png_transparent_background_is_optional(qapp):
+    """空白处半透明/全透明由参数控制；默认仍是白底。"""
+    doc = _doc_two_lines()
+    scale = DEFAULT_DPI / 25.4
+    blank = (round(150 * scale), round(100 * scale))      # 页面空白处
+
+    opaque = render_page_image(doc, DEFAULT_DPI)
+    assert opaque.pixelColor(*blank).alpha() == 255
+
+    clear = render_page_image(doc, DEFAULT_DPI, transparent=True)
+    assert clear.hasAlphaChannel()
+    assert clear.pixelColor(*blank).alpha() == 0
+    # 笔画本身仍然可见（不是整张图变透明）
+    ink = clear.pixelColor(round(35 * scale), round(200 * scale))
+    assert ink.alpha() > 200 and ink.lightness() < 128
+
+
 # --------------------------------------------------------------------- SVG
 def test_svg_is_valid_xml_with_physical_size(qapp):
     root = ET.fromstring(page_to_svg(_doc_two_lines()))
@@ -115,6 +132,17 @@ def test_save_svg_counts_objects(qapp, tmp_path):
     ET.parse(str(out))                            # 落盘内容是合法 XML
 
 
+def test_svg_background_rect_is_optional(qapp):
+    """默认白底一个 rect；透明模式不输出底色，描边内容不受影响。"""
+    opaque = ET.fromstring(page_to_svg(_doc_two_lines()))
+    rects = opaque.findall(f"{SVG_NS}rect")
+    assert len(rects) == 1 and rects[0].get("fill") == "#ffffff"
+
+    clear = ET.fromstring(page_to_svg(_doc_two_lines(), transparent=True))
+    assert clear.findall(f"{SVG_NS}rect") == []
+    assert len(clear.findall(f".//{SVG_NS}path")) == 1
+
+
 def test_number_formatting_is_compact():
     assert _f(10.0) == "10"
     assert _f(10.5) == "10.5"
@@ -123,11 +151,12 @@ def test_number_formatting_is_compact():
 
 
 # --------------------------------------------------------------- 菜单动作
-def _patch_export_ui(monkeypatch, path: str, dpi: int | None = None):
-    """打桩：DPI 弹窗（可返回值/取消）与保存对话框、完成提示。"""
+def _patch_export_ui(monkeypatch, path: str, dpi: int | None = 300,
+                     transparent: bool = False):
+    """打桩：导出选项弹窗（可返回值/取消）与保存对话框、完成提示。"""
     from PySide6.QtWidgets import QFileDialog, QMessageBox
 
-    from writerstudio.ui.export_dialog import PngExportDialog
+    from writerstudio.ui.export_dialog import ExportOptionsDialog
 
     shown: list[str] = []
     monkeypatch.setattr(QMessageBox, "information",
@@ -136,8 +165,10 @@ def _patch_export_ui(monkeypatch, path: str, dpi: int | None = None):
                         staticmethod(lambda *a, **k: shown.append(a[2])))
     monkeypatch.setattr(QFileDialog, "getSaveFileName",
                         staticmethod(lambda *a, **k: (path, "")))
-    monkeypatch.setattr(PngExportDialog, "ask",
-                        classmethod(lambda cls, *a, **k: dpi))
+    monkeypatch.setattr(
+        ExportOptionsDialog, "ask",
+        classmethod(lambda cls, *a, **k:
+                    None if dpi is None else (dpi, transparent)))
     return shown
 
 
@@ -251,7 +282,7 @@ def test_export_on_empty_document_is_harmless(qapp, monkeypatch):
     from PySide6.QtWidgets import QFileDialog
 
     from writerstudio.settings import K_AI_ENABLED, Settings
-    from writerstudio.ui.export_dialog import PngExportDialog
+    from writerstudio.ui.export_dialog import ExportOptionsDialog
     from writerstudio.ui.main_window import MainWindow
 
     st = Settings()
@@ -262,7 +293,7 @@ def test_export_on_empty_document_is_harmless(qapp, monkeypatch):
         called: list[str] = []
         monkeypatch.setattr(QFileDialog, "getSaveFileName",
                             staticmethod(lambda *a, **k: called.append("file")))
-        monkeypatch.setattr(PngExportDialog, "ask",
+        monkeypatch.setattr(ExportOptionsDialog, "ask",
                             classmethod(lambda cls, *a, **k: called.append("dpi")))
         win.act_export_png.trigger()
         win.act_export_svg.trigger()
@@ -273,15 +304,16 @@ def test_export_on_empty_document_is_harmless(qapp, monkeypatch):
         win.close()
 
 
-# ----------------------------------------------------------- DPI 选择弹窗
+# ----------------------------------------------------------- 导出选项弹窗
 def test_dpi_dialog_shows_pixel_size(qapp):
     from writerstudio.core.document import PageSpec
-    from writerstudio.ui.export_dialog import PngExportDialog, pixel_size
+    from writerstudio.ui.export_dialog import ExportOptionsDialog, pixel_size
 
     page = PageSpec(297.0, 210.0, 10.0, "A4 横向")
-    dlg = PngExportDialog(page, 300)
+    dlg = ExportOptionsDialog(page, 300)
     try:
         assert dlg.dpi() == 300
+        assert dlg.transparent() is False
         assert "3508 × 2480 像素" in dlg._size_label.text()
         dlg.dpi_spin.setValue(600)
         assert "7016 × 4961 像素" in dlg._size_label.text()
@@ -292,15 +324,76 @@ def test_dpi_dialog_shows_pixel_size(qapp):
 
 def test_dpi_dialog_warns_on_huge_output(qapp):
     from writerstudio.core.document import PageSpec
-    from writerstudio.ui.export_dialog import PngExportDialog
+    from writerstudio.ui.export_dialog import ExportOptionsDialog
 
-    dlg = PngExportDialog(PageSpec(297.0, 210.0, 10.0, "A4 横向"), 1200)
+    dlg = ExportOptionsDialog(PageSpec(297.0, 210.0, 10.0, "A4 横向"), 1200)
     try:
         assert "很大" in dlg._size_label.text()        # 1200 DPI 提示内存
         dlg.dpi_spin.setValue(300)
         assert "很大" not in dlg._size_label.text()
     finally:
         dlg.deleteLater()
+
+
+def test_export_dialog_transparent_option(qapp):
+    """两种格式都能选透明背景；SVG 不显示 DPI 控件。"""
+    from writerstudio.core.document import PageSpec
+    from writerstudio.ui.export_dialog import ExportOptionsDialog
+
+    page = PageSpec(297.0, 210.0, 10.0, "A4 横向")
+    dlg = ExportOptionsDialog(page, 300, fmt="png", transparent=True)
+    try:
+        assert dlg.transparent() is True
+        assert dlg.options() == (300, True)
+        dlg.transparent_check.setChecked(False)
+        assert dlg.options() == (300, False)
+    finally:
+        dlg.deleteLater()
+
+    svg = ExportOptionsDialog(page, 300, fmt="svg", transparent=True)
+    try:
+        assert svg.dpi_spin is None            # 矢量图不需要分辨率
+        assert svg.dpi() == 0
+        assert svg.options() == (0, True)
+        assert "mm" in svg._size_label.text()
+    finally:
+        svg.deleteLater()
+
+
+def test_export_transparent_png_and_svg(qapp, tmp_path, monkeypatch):
+    """透明 PNG 空白处 alpha=0；透明 SVG 不输出白底矩形，且选项被记住。"""
+    from PySide6.QtGui import QImage
+
+    from writerstudio.fonts.builder import TextSpec, make_text_object
+    from writerstudio.settings import K_AI_ENABLED, Settings
+    from writerstudio.ui.main_window import MainWindow
+
+    st = Settings()
+    st.set(K_AI_ENABLED, False)
+    win = MainWindow(st)
+    try:
+        win.confirm_on_close = False
+        win.controller.add_object(make_text_object(
+            TextSpec(text="A", font_names=["futural"]), win.font_manager))
+
+        png = tmp_path / "transparent.png"
+        _patch_export_ui(monkeypatch, str(png), dpi=150, transparent=True)
+        win.act_export_png.trigger()
+        assert png.exists()
+        img = QImage(str(png))
+        assert img.hasAlphaChannel()
+        assert img.pixelColor(img.width() - 1, img.height() - 1).alpha() == 0
+        assert st.export_transparent() is True
+
+        svg = tmp_path / "transparent.svg"
+        _patch_export_ui(monkeypatch, str(svg), transparent=True)
+        win.act_export_svg.trigger()
+        root = ET.parse(str(svg)).getroot()
+        assert root.findall(f"{SVG_NS}rect") == []      # 没有白底
+        assert root.findall(f".//{SVG_NS}path")         # 内容仍在
+    finally:
+        win.confirm_on_close = False
+        win.close()
 
 
 def test_dpi_setting_clamps_to_valid_range(qapp):
