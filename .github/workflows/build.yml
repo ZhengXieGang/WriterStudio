@@ -211,7 +211,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # 发布说明 = 标签注释：只列更新项，不写解释性文字。
+          # actions/checkout 默认不建本地标签引用，先显式取回再读注释；
           # 标签没写注释时退回 GitHub 自动生成，避免空正文。
+          git fetch --force origin \
+            "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
           git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > /tmp/relnotes.md
           if [ -s /tmp/relnotes.md ]; then
             gh release create "$GITHUB_REF_NAME" relpkg/* \
