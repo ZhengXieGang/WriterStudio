@@ -4,7 +4,7 @@
     * 外部字体搜索目录
     * 最近打开的项目文件
     * 机器默认参数（波特率、抬落笔、速度、写字起点）
-    * 界面偏好（窗口尺寸、面板可见性）
+    * 界面偏好（窗口尺寸、面板可见性、主题、语言）
 
 为便于测试（无需真实 Qt 配置后端），:class:`Settings` 支持注入一个
 ``backend``；默认使用 ``QSettings``。后端需实现 ``value(key, default)``
@@ -57,6 +57,7 @@ K_EXPORT_DPI = "export/png_dpi"    # PNG 导出分辨率（记住上次使用值
 K_EXPORT_TRANSPARENT = "export/transparent"   # 导出透明背景（PNG/SVG 共用）
 K_GEOMETRY = "ui/geometry"
 K_UI_THEME = "ui/theme"
+K_UI_LANGUAGE = "ui/language"     # auto / zh / en（auto = 跟随系统 locale）
 K_MAX_RECENT = 10
 
 
@@ -401,6 +402,15 @@ class Settings:
 
     def set_ui_theme(self, theme: str) -> None:
         self.set(K_UI_THEME, theme)
+
+    def ui_language(self) -> str:
+        """界面语言偏好：auto（跟随系统）/ zh / en。"""
+        from .i18n import normalize
+        return normalize(str(self.get(K_UI_LANGUAGE, "") or ""))
+
+    def set_ui_language(self, preference: str) -> None:
+        from .i18n import normalize
+        self.set(K_UI_LANGUAGE, normalize(preference))
 
     def page_size(self, default=(297.0, 210.0)) -> tuple[float, float]:
         return (self.get_float(K_PAGE_W, default[0]),

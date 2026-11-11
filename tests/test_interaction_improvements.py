@@ -737,10 +737,11 @@ def test_history_panel_is_compact_top_right_dock(qapp):
     w.close()
 
 
-def test_history_panel_done_steps_are_white(qapp):
-    """已完成步骤用白色文字：深色面板上原来的暗绿对比度太低。"""
-    from PySide6.QtCore import Qt
+def test_history_panel_uses_theme_text_colors(qapp):
+    """已完成步骤用主题正文色、未完成用次要色（浅色主题下也不再白字白底）。"""
     from PySide6.QtGui import QColor, QUndoCommand
+
+    from writerstudio.ui.theme import semantic_color
 
     w = _win(qapp)
     stack = w.controller.undo_stack
@@ -749,11 +750,11 @@ def test_history_panel_done_steps_are_white(qapp):
     # 第 0 项是「初始状态」，第 1/2 项是已完成步骤
     for row in (1, 2):
         assert w.undo_panel.list.item(row).foreground().color() \
-            == QColor(255, 255, 255)
+            == QColor(semantic_color("text"))
     stack.undo()
-    # 撤销后第二步变成未完成：仍用灰色，与已完成步骤区分
+    # 撤销后第二步变成未完成：用次要色，与已完成步骤区分
     assert w.undo_panel.list.item(2).foreground().color() \
-        == QColor(Qt.GlobalColor.gray)
+        == QColor(semantic_color("muted"))
     w.close()
 
 

@@ -26,6 +26,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+
+from ..i18n import tr, trf
 from ..machine.config import (
     PEN_LASER,
     PEN_M3M5,
@@ -37,7 +39,7 @@ from ..machine.config import (
 from ..machine.gcode_gen import format_duration
 from ..machine.serial_link import GrblLink, LinkEvent, State, list_ports
 from ..machine.start_point import MODE_CANVAS, MODE_REGISTERED, StartPoint
-from .style import spin, unify_inputs
+from .style import set_role, spin, unify_inputs
 
 _BAUD_RATES = [115200, 250000, 57600, 38400, 19200, 9600]
 
@@ -94,7 +96,7 @@ class MachinePanel(QWidget):
         outer.addWidget(scroll)
 
         # ---- 连接 ----
-        conn = QGroupBox("连接")
+        conn = QGroupBox(tr("连接"))
         cf = QFormLayout(conn)
         row = QHBoxLayout()
         self.port_combo = QComboBox()
@@ -102,17 +104,17 @@ class MachinePanel(QWidget):
         self.port_combo.setSizeAdjustPolicy(
             QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.port_combo.setMinimumContentsLength(6)
-        refresh = QPushButton("刷新")
+        refresh = QPushButton(tr("刷新"))
         refresh.clicked.connect(self._refresh_ports)
         row.addWidget(self.port_combo, 1)
         row.addWidget(refresh)
-        cf.addRow("串口", row)
+        cf.addRow(tr("串口"), row)
 
         self.baud_combo = QComboBox()
         for b in _BAUD_RATES:
             self.baud_combo.addItem(str(b))
         self.baud_combo.setCurrentText("115200")
-        cf.addRow("波特率", self.baud_combo)
+        cf.addRow(tr("波特率"), self.baud_combo)
 
         # DTR/RTS：ESP32 板载串口芯片会把它们接到复位/Boot 脚，
         # 打开串口即复位固件；连不上时试着取消勾选。
@@ -121,19 +123,19 @@ class MachinePanel(QWidget):
         self.dtr_check.setChecked(True)
         self.rts_check = QCheckBox("RTS")
         self.rts_check.setChecked(True)
-        self.dtr_check.setToolTip("连接后保持 DTR 电平；ESP32 板连上即复位时取消勾选")
-        self.rts_check.setToolTip("连接后保持 RTS 电平；ESP32 板连上即复位时取消勾选")
+        self.dtr_check.setToolTip(tr("连接后保持 DTR 电平；ESP32 板连上即复位时取消勾选"))
+        self.rts_check.setToolTip(tr("连接后保持 RTS 电平；ESP32 板连上即复位时取消勾选"))
         lines_row.addWidget(self.dtr_check)
         lines_row.addWidget(self.rts_check)
         lines_row.addStretch(1)
-        cf.addRow("串口电平", lines_row)
+        cf.addRow(tr("串口电平"), lines_row)
 
         btns = QHBoxLayout()
-        self.connect_btn = QPushButton("连接")
+        self.connect_btn = QPushButton(tr("连接"))
         self.connect_btn.clicked.connect(self._toggle_connect)
-        self.home_btn = QPushButton("回零")
+        self.home_btn = QPushButton(tr("回零"))
         self.home_btn.clicked.connect(lambda: self._guarded(self.link.home))
-        self.unlock_btn = QPushButton("解锁")
+        self.unlock_btn = QPushButton(tr("解锁"))
         self.unlock_btn.clicked.connect(lambda: self._guarded(self.link.unlock))
         btns.addWidget(self.connect_btn)
         btns.addWidget(self.home_btn)
@@ -142,18 +144,18 @@ class MachinePanel(QWidget):
         root.addWidget(conn)
 
         # ---- 状态 ----
-        st = QGroupBox("状态")
+        st = QGroupBox(tr("状态"))
         sf = QFormLayout(st)
         # 动态文本标签统一可换行：发送中/笔寿命提醒等长文字若不换行，
         # 会把面板最小宽度撑到 350px+（默认停靠宽 300px），内容被挤出
         # 画面外、出现横向滚动条
-        self.state_label = QLabel("未连接")
+        self.state_label = QLabel(tr("未连接"))
         self.state_label.setWordWrap(True)
-        self.pos_label = QLabel("—")
+        self.pos_label = QLabel(tr("—"))
         self.pos_label.setWordWrap(True)
-        self.feed_label = QLabel("—")
+        self.feed_label = QLabel(tr("—"))
         self.feed_label.setWordWrap(True)
-        self.fw_label = QLabel("—")
+        self.fw_label = QLabel(tr("—"))
         self.fw_label.setWordWrap(True)
         # 布局只有拿到 heightForWidth 标志才会按换行后的实际行数给行高，
         # 否则长文本在表单行里被裁掉下半截
@@ -163,16 +165,16 @@ class MachinePanel(QWidget):
             sp.setHeightForWidth(True)
             w.setSizePolicy(sp)
         self.fw_label.setToolTip(
-            "连接后自动读取固件设置（$$）得到的参数快照：\n"
-            "加速度/速率上限用于书写耗时估算；只读取，不修改。")
-        sf.addRow("状态", self.state_label)
-        sf.addRow("机械坐标", self.pos_label)
-        sf.addRow("进给/转速", self.feed_label)
-        sf.addRow("固件参数", self.fw_label)
+            tr("连接后自动读取固件设置（$$）得到的参数快照：\n"
+            "加速度/速率上限用于书写耗时估算；只读取，不修改。"))
+        sf.addRow(tr("状态"), self.state_label)
+        sf.addRow(tr("机械坐标"), self.pos_label)
+        sf.addRow(tr("进给/转速"), self.feed_label)
+        sf.addRow(tr("固件参数"), self.fw_label)
         root.addWidget(st)
 
         # ---- Jog ----
-        jog = QGroupBox("手动控制 (Jog)")
+        jog = QGroupBox(tr("手动控制 (Jog)"))
         jogv = QVBoxLayout(jog)
         # 步长/速度各占一行（竖排），避免和方向键挤在一行而撑宽整个面板
         jf = QFormLayout()
@@ -184,9 +186,9 @@ class MachinePanel(QWidget):
         self.jog_feed.setRange(10, 20000)
         self.jog_feed.setValue(2500)        # 默认 2500 mm/min
         self.jog_feed.setSuffix(" mm/min")
-        self.jog_feed.setToolTip("点动速度（mm/min）")
-        jf.addRow("步长", self.jog_step)
-        jf.addRow("速度", self.jog_feed)
+        self.jog_feed.setToolTip(tr("点动速度（mm/min）"))
+        jf.addRow(tr("步长"), self.jog_step)
+        jf.addRow(tr("速度"), self.jog_feed)
         jogv.addLayout(jf)
 
         pad = QGridLayout()
@@ -207,104 +209,104 @@ class MachinePanel(QWidget):
         root.addWidget(jog)
 
         # ---- 抬落笔设置 ----
-        pen = QGroupBox("抬落笔")
+        pen = QGroupBox(tr("抬落笔"))
         pf = QFormLayout(pen)
         self._pen_form = pf
         self.pen_mode = QComboBox()
         for key, label in PEN_MODES.items():
-            self.pen_mode.addItem(label, key)
+            self.pen_mode.addItem(tr(label), key)
         self.pen_mode.currentIndexChanged.connect(self._on_pen_mode)
-        pf.addRow("方式", self.pen_mode)
+        pf.addRow(tr("方式"), self.pen_mode)
         # 步进 Z 轴（抬/落笔各走一段受控 Z 进给）。默认按弹簧回位笔架标定：
         # 落笔 Z 6mm、抬笔 Z 0mm（弹簧回位笔架释放位）。
         self.pen_down_z = spin(-10.0, 50.0, 6.0, " mm", 0.5)
-        self.pen_down_z.setToolTip("落笔 Z 位置：Z 轴笔控写到该高度即下压触纸")
+        self.pen_down_z.setToolTip(tr("落笔 Z 位置：Z 轴笔控写到该高度即下压触纸"))
         self.pen_up_z = spin(0.0, 50.0, 0.0, " mm", 0.5)
-        self.pen_up_z.setToolTip("抬笔 Z 位置：弹簧回位笔架填 0（释放位）")
+        self.pen_up_z.setToolTip(tr("抬笔 Z 位置：弹簧回位笔架填 0（释放位）"))
         self.pen_z_feed = spin(1.0, 20000.0, 12000.0, " mm/min", 100.0, 0)
         self.pen_z_feed.setToolTip(
-            "Z 抬落笔速度：抬笔与落笔均以此进给升降。\n"
+            tr("Z 抬落笔速度：抬笔与落笔均以此进给升降。\n"
             "每笔两趟 Z 全行程是手写作业的最大固定开销——在固件 Z 速率上限"
-            "（连接后自动探测显示在「固件参数」行）内尽量调高。")
-        pf.addRow("落笔 Z", self.pen_down_z)
-        pf.addRow("抬笔 Z", self.pen_up_z)
-        pf.addRow("Z 速度", self.pen_z_feed)
+            "（连接后自动探测显示在「固件参数」行）内尽量调高。"))
+        pf.addRow(tr("落笔 Z"), self.pen_down_z)
+        pf.addRow(tr("抬笔 Z"), self.pen_up_z)
+        pf.addRow(tr("Z 速度"), self.pen_z_feed)
         # 收笔斜抬/入笔斜落：笔画两端边走边抬/落（手写的压力渐释动作），
         # 消除末端满压停留的墨点与起点重压墨坨。仅 Z 轴笔控生效。
         self.stroke_taper = spin(0.0, 5.0, 1.5, " mm", 0.25, 2)
         self.stroke_taper.setToolTip(
-            "收笔斜抬：笔画最后这段长度内边走边抬笔（0=关闭）。\n"
+            tr("收笔斜抬：笔画最后这段长度内边走边抬笔（0=关闭）。\n"
             "消除「笔在笔画末端满压停留」留下的墨点，收笔更自然。\n"
-            "建议 1~2mm；仅 Z 轴笔控生效，斜率受「Z 速度/书写速度」约束。")
+            "建议 1~2mm；仅 Z 轴笔控生效，斜率受「Z 速度/书写速度」约束。"))
         self.entry_taper = spin(0.0, 5.0, 0.5, " mm", 0.25, 2)
         self.entry_taper.setToolTip(
-            "入笔斜落：笔画开头这段长度内边走边落笔（0=关闭）。\n"
-            "消除起笔重压墨坨，起笔更自然；建议 0.5~1mm。仅 Z 轴笔控生效。")
-        pf.addRow("收笔斜抬", self.stroke_taper)
-        pf.addRow("入笔斜落", self.entry_taper)
+            tr("入笔斜落：笔画开头这段长度内边走边落笔（0=关闭）。\n"
+            "消除起笔重压墨坨，起笔更自然；建议 0.5~1mm。仅 Z 轴笔控生效。"))
+        pf.addRow(tr("收笔斜抬"), self.stroke_taper)
+        pf.addRow(tr("入笔斜落"), self.entry_taper)
         # 舵机角度（抬/落笔均发 M3 S<角度>）
         self.pen_s = QSpinBox()
         self.pen_s.setRange(0, 30000)
         self.pen_s.setValue(0)
-        self.pen_s.setToolTip("落笔角度 / M3 模式落笔 S 值")
-        pf.addRow("落笔角度/S", self.pen_s)
+        self.pen_s.setToolTip(tr("落笔角度 / M3 模式落笔 S 值"))
+        pf.addRow(tr("落笔角度/S"), self.pen_s)
         self.pen_up_s = QSpinBox()
         self.pen_up_s.setRange(0, 30000)
         self.pen_up_s.setValue(50)
-        self.pen_up_s.setToolTip("抬笔角度")
-        pf.addRow("抬笔角度", self.pen_up_s)
+        self.pen_up_s.setToolTip(tr("抬笔角度"))
+        pf.addRow(tr("抬笔角度"), self.pen_up_s)
         # 激光（M3 S 出光 / M5 关光）
         self.laser_power = QSpinBox()
         self.laser_power.setRange(0, 30000)
         self.laser_power.setValue(1000)
-        self.laser_power.setToolTip("出光功率（对应 $30 最大功率的 S 值）")
-        pf.addRow("激光功率", self.laser_power)
+        self.laser_power.setToolTip(tr("出光功率（对应 $30 最大功率的 S 值）"))
+        pf.addRow(tr("激光功率"), self.laser_power)
         self.laser_preview = QSpinBox()
         self.laser_preview.setRange(0, 30000)
         self.laser_preview.setValue(50)
-        self.laser_preview.setToolTip("预览/对位低功率")
-        pf.addRow("激光预览功率", self.laser_preview)
+        self.laser_preview.setToolTip(tr("预览/对位低功率"))
+        pf.addRow(tr("激光预览功率"), self.laser_preview)
         self.pen_on_delay = spin(0.0, 5.0, 0.0, " s", 0.05)
         self.pen_off_delay = spin(0.0, 5.0, 0.0, " s", 0.05)
-        self.pen_on_delay.setToolTip("落笔后等待（G4），让笔完全落下再写字")
-        self.pen_off_delay.setToolTip("抬笔前等待（G4），防止拖墨")
-        pf.addRow("落笔后等待", self.pen_on_delay)
-        pf.addRow("抬笔前等待", self.pen_off_delay)
+        self.pen_on_delay.setToolTip(tr("落笔后等待（G4），让笔完全落下再写字"))
+        self.pen_off_delay.setToolTip(tr("抬笔前等待（G4），防止拖墨"))
+        pf.addRow(tr("落笔后等待"), self.pen_on_delay)
+        pf.addRow(tr("抬笔前等待"), self.pen_off_delay)
         self.draw_feed = spin(1.0, 20000.0, 4400.0, " mm/min", 50.0, 0)
         self.travel_feed = spin(1.0, 30000.0, 9000.0, " mm/min", 100.0, 0)
         self.draw_feed.setToolTip(
-            "书写速度：短笔画受加速度限制，峰速有物理上限（连接后按固件\n"
-            "加速度自动估算并在预览中提示）；设得再高只会平白增加每笔加减速。")
-        pf.addRow("书写速度", self.draw_feed)
-        pf.addRow("空程速度", self.travel_feed)
+            tr("书写速度：短笔画受加速度限制，峰速有物理上限（连接后按固件\n"
+            "加速度自动估算并在预览中提示）；设得再高只会平白增加每笔加减速。"))
+        pf.addRow(tr("书写速度"), self.draw_feed)
+        pf.addRow(tr("空程速度"), self.travel_feed)
         self.custom_start_edit = QLineEdit()
-        self.custom_start_edit.setPlaceholderText("如：M3 S0;G4 P0.5（分号分隔多条）")
+        self.custom_start_edit.setPlaceholderText(tr("如：M3 S0;G4 P0.5（分号分隔多条）"))
         self.custom_start_edit.setToolTip(
-            "作业开始前发送的自定义指令。\n"
+            tr("作业开始前发送的自定义指令。\n"
             "注意：不要包含 G92/G54 等坐标偏移指令——本软件按绝对机械坐标\n"
-            "书写，偏移会让整个作业整体错位（发送前的自动清理也会被它作废）。")
+            "书写，偏移会让整个作业整体错位（发送前的自动清理也会被它作废）。"))
         self.custom_end_edit = QLineEdit()
-        self.custom_end_edit.setPlaceholderText("如：M5")
-        pf.addRow("开始前代码", self.custom_start_edit)
-        pf.addRow("结束后代码", self.custom_end_edit)
+        self.custom_end_edit.setPlaceholderText(tr("如：M5"))
+        pf.addRow(tr("开始前代码"), self.custom_start_edit)
+        pf.addRow(tr("结束后代码"), self.custom_end_edit)
         root.addWidget(pen)
 
         # ---- 坐标轴（对调/反转：适配机器原点朝向与导轨方向不同的机型）----
-        ax = QGroupBox("坐标轴")
+        ax = QGroupBox(tr("坐标轴"))
         axv = QVBoxLayout(ax)
         axv.setContentsMargins(4, 4, 4, 4)
-        self.swap_xy_check = QCheckBox("对调 X/Y 轴")
+        self.swap_xy_check = QCheckBox(tr("对调 X/Y 轴"))
         self.swap_xy_check.setToolTip(
-            "交换 X 与 Y 轴：适合机器横放在纸左侧、笔沿纸的短边移动的装机方式。\n"
-            "机械原点仍在纸张左上角，只是 X 轴改为沿纸边向下、Y 轴沿顶边向右。")
+            tr("交换 X 与 Y 轴：适合机器横放在纸左侧、笔沿纸的短边移动的装机方式。\n"
+            "机械原点仍在纸张左上角，只是 X 轴改为沿纸边向下、Y 轴沿顶边向右。"))
         self.swap_xy_check.toggled.connect(self._on_axis_changed)
         axv.addWidget(self.swap_xy_check)
         irow = QHBoxLayout()
-        self.invert_x_check = QCheckBox("反转 X 轴")
-        self.invert_x_check.setToolTip("X 轴方向取反：原点在纸的右上角一侧的机型用")
+        self.invert_x_check = QCheckBox(tr("反转 X 轴"))
+        self.invert_x_check.setToolTip(tr("X 轴方向取反：原点在纸的右上角一侧的机型用"))
         self.invert_x_check.toggled.connect(self._on_axis_changed)
-        self.invert_y_check = QCheckBox("反转 Y 轴")
-        self.invert_y_check.setToolTip("Y 轴方向取反：原点在纸的左下角一侧的机型用")
+        self.invert_y_check = QCheckBox(tr("反转 Y 轴"))
+        self.invert_y_check.setToolTip(tr("Y 轴方向取反：原点在纸的左下角一侧的机型用"))
         self.invert_y_check.toggled.connect(self._on_axis_changed)
         irow.addWidget(self.invert_x_check)
         irow.addWidget(self.invert_y_check)
@@ -313,44 +315,43 @@ class MachinePanel(QWidget):
         root.addWidget(ax)
 
         # ---- 写字起点 ----
-        sp = QGroupBox("写字起点")
+        sp = QGroupBox(tr("写字起点"))
         spv = QVBoxLayout(sp)
 
-        self.read_pos_start_btn = QPushButton("读取当前笔位作为起点")
+        self.read_pos_start_btn = QPushButton(tr("读取当前笔位作为起点"))
         self.read_pos_start_btn.setMinimumHeight(30)
         self.read_pos_start_btn.setToolTip(
-            "读取机器笔头当前坐标作为写字起点（需已连接）。\n"
-            "会把笔画标记移动到笔头当前位置。")
+            tr("读取机器笔头当前坐标作为写字起点（需已连接）。\n"
+            "会把笔画标记移动到笔头当前位置。"))
         self.read_pos_start_btn.clicked.connect(self.readPenAsStartRequested.emit)
         spv.addWidget(self.read_pos_start_btn)
 
-        self.register_pen_btn = QPushButton("以当前笔位校准标记")
+        self.register_pen_btn = QPushButton(tr("以当前笔位校准标记"))
         self.register_pen_btn.setMinimumHeight(30)
         self.register_pen_btn.setToolTip(
-            "标记不动，用笔来标定：先把红色标记放到纸上「希望笔开始写」的位置，\n"
+            tr("标记不动，用笔来标定：先把红色标记放到纸上「希望笔开始写」的位置，\n"
             "再把笔手动移到纸上同一点，点此按钮。软件记录「笔现在就在标记处」，\n"
-            "据此校正机器原点与纸张的偏差。适合机器原点与纸张角落对不齐时。")
+            "据此校正机器原点与纸张的偏差。适合机器原点与纸张角落对不齐时。"))
         self.register_pen_btn.clicked.connect(self.registerPenRequested.emit)
         spv.addWidget(self.register_pen_btn)
 
-        self.mark_start_btn = QPushButton("手动标记起点")
+        self.mark_start_btn = QPushButton(tr("手动标记起点"))
         self.mark_start_btn.setMinimumHeight(30)
         self.mark_start_btn.setToolTip(
-            "在画布上单击一点作为写字起点；之后也可直接拖动画布上的标记微调。\n"
-            "已设置标记后，此按钮变为「移除手动标记点」。")
+            tr("在画布上单击一点作为写字起点；之后也可直接拖动画布上的标记微调。\n"
+            "已设置标记后，此按钮变为「移除手动标记点」。"))
         self.mark_start_btn.setCheckable(True)
         self.mark_start_btn.toggled.connect(self._on_mark_start_toggled)
         self.mark_start_btn.clicked.connect(self._on_mark_start_clicked)
         spv.addWidget(self.mark_start_btn)
 
-        self.move_pen_btn = QPushButton("移动到标记起点")
-        self.move_pen_btn.setToolTip("抬笔后把笔头移动到标记的起点位置")
+        self.move_pen_btn = QPushButton(tr("移动到标记起点"))
+        self.move_pen_btn.setToolTip(tr("抬笔后把笔头移动到标记的起点位置"))
         self.move_pen_btn.clicked.connect(self.movePenRequested.emit)
         spv.addWidget(self.move_pen_btn)
 
-        self.start_summary = QLabel("当前起点：未设置")
+        self.start_summary = QLabel(tr("当前起点：未设置"))
         self.start_summary.setWordWrap(True)
-        self.start_summary.setStyleSheet("color:#fff;")
         spv.addWidget(self.start_summary)
         root.addWidget(sp)
 
@@ -360,71 +361,71 @@ class MachinePanel(QWidget):
         # （坐标系设置的 pos/revxy/xAxeRev/yAxeRev 在配置导入导出中保留。）
 
         # ---- 作业 ----
-        job = QGroupBox("作业")
+        job = QGroupBox(tr("作业"))
         jf = QVBoxLayout(job)
         # 勾选项分两行放，避免三个挤一行把面板最小宽度撑到需要横向滚动
         flow = QHBoxLayout()
-        self.single_step_check = QCheckBox("单步发送")
+        self.single_step_check = QCheckBox(tr("单步发送"))
         self.single_step_check.setToolTip(
-            "一次只发一条命令，等机器回 ok 再发下一条。\n"
-            "速度慢但最稳，适合调试机器或长内容。")
+            tr("一次只发一条命令，等机器回 ok 再发下一条。\n"
+            "速度慢但最稳，适合调试机器或长内容。"))
         self.single_step_check.toggled.connect(self._on_single_step)
-        self.return_start_check = QCheckBox("完成后回起点")
+        self.return_start_check = QCheckBox(tr("完成后回起点"))
         self.return_start_check.setChecked(True)
-        self.return_start_check.setToolTip("写完后笔头回到 X0 Y0（写字起点）")
+        self.return_start_check.setToolTip(tr("写完后笔头回到 X0 Y0（写字起点）"))
         flow.addWidget(self.single_step_check)
         flow.addWidget(self.return_start_check)
         flow.addStretch(1)
         jf.addLayout(flow)
         flow2 = QHBoxLayout()
-        self.sleep_check = QCheckBox("完成后休眠")
-        self.sleep_check.setToolTip("写完让机器休眠（$SLP，需固件支持）")
+        self.sleep_check = QCheckBox(tr("完成后休眠"))
+        self.sleep_check.setToolTip(tr("写完让机器休眠（$SLP，需固件支持）"))
         flow2.addWidget(self.sleep_check)
         flow2.addStretch(1)
         jf.addLayout(flow2)
         # 书写顺序：阅读顺序 vs 最短空程
         orow = QHBoxLayout()
-        orow.addWidget(QLabel("书写顺序"))
+        orow.addWidget(QLabel(tr("书写顺序")))
         self.order_combo = QComboBox()
-        self.order_combo.addItem("阅读顺序（逐字/从上到下）", "reading")
-        self.order_combo.addItem("最短空程（图形/签名）", "shortest")
+        self.order_combo.addItem(tr("阅读顺序（逐字/从上到下）"), "reading")
+        self.order_combo.addItem(tr("最短空程（图形/签名）"), "shortest")
         self.order_combo.setToolTip(
-            "阅读顺序：写完一个字/一组再写下一个，文字从左到右、从上到下，\n"
+            tr("阅读顺序：写完一个字/一组再写下一个，文字从左到右、从上到下，\n"
             "读起来自然（常规书写顺序）。\n"
-            "最短空程：贪心最近邻，抬笔移动最少，但会打乱顺序，适合矢量图/签名。")
+            "最短空程：贪心最近邻，抬笔移动最少，但会打乱顺序，适合矢量图/签名。"))
         orow.addWidget(self.order_combo, 1)
         jf.addLayout(orow)
         # 笔画抽稀：高速书写时微小线段频繁换向会让线条发抖，适度抽稀更顺滑
         srow = QHBoxLayout()
-        srow.addWidget(QLabel("笔画抽稀"))
+        srow.addWidget(QLabel(tr("笔画抽稀")))
         self.simplify_spin = QDoubleSpinBox()
         self.simplify_spin.setRange(0.0, 1.0)
         self.simplify_spin.setSingleStep(0.05)
         self.simplify_spin.setValue(0.0)
         self.simplify_spin.setSuffix(" mm")
         self.simplify_spin.setToolTip(
-            "按此容差合并笔画上的密集采样点（0=关闭）。\n"
-            "书写速度快时线条发抖可试 0.1~0.3；0.5 以上会明显失真。")
+            tr("按此容差合并笔画上的密集采样点（0=关闭）。\n"
+            "书写速度快时线条发抖可试 0.1~0.3；0.5 以上会明显失真。"))
         srow.addWidget(self.simplify_spin, 1)
         jf.addLayout(srow)
-        gen = QPushButton("生成预览")
+        gen = QPushButton(tr("生成预览"))
         gen.clicked.connect(self.generateRequested.emit)
-        exp = QPushButton("导出 G-code…")
+        exp = QPushButton(tr("导出 G-code…"))
         exp.clicked.connect(self.exportRequested.emit)
         jf.addWidget(gen)
         jf.addWidget(exp)
         ctrl = QHBoxLayout()
-        self.send_btn = QPushButton("发送")
+        self.send_btn = QPushButton(tr("发送"))
         self.send_btn.clicked.connect(self.sendRequested.emit)
-        self.pause_btn = QPushButton("暂停")
+        self.pause_btn = QPushButton(tr("暂停"))
         self.pause_btn.clicked.connect(self._toggle_pause)
-        self.abort_btn = QPushButton("中止")
+        self.abort_btn = QPushButton(tr("中止"))
         self.abort_btn.clicked.connect(self._abort)
         ctrl.addWidget(self.send_btn)
         ctrl.addWidget(self.pause_btn)
         ctrl.addWidget(self.abort_btn)
         jf.addLayout(ctrl)
-        self.progress_label = QLabel("—")
+        self.progress_label = QLabel(tr("—"))
         self.progress_label.setWordWrap(True)
         jf.addWidget(self.progress_label)
 
@@ -433,13 +434,13 @@ class MachinePanel(QWidget):
         self.penlife_label = QLabel()
         self.penlife_label.setWordWrap(True)
         self.pen_limit = spin(0.0, 10000.0, 0.0, " m", 5.0, 1)
-        self.pen_limit.setToolTip("累计书写达到该长度时提醒更换/削笔；0 = 不提醒")
+        self.pen_limit.setToolTip(tr("累计书写达到该长度时提醒更换/削笔；0 = 不提醒"))
         self.pen_limit.valueChanged.connect(self._save_penlife)
         lrow = QHBoxLayout()
-        self.pen_reset_btn = QPushButton("清零")
+        self.pen_reset_btn = QPushButton(tr("清零"))
         self.pen_reset_btn.clicked.connect(self._reset_penlife)
         lrow.addWidget(self.pen_reset_btn)
-        lrow.addWidget(QLabel("提醒阈值"))
+        lrow.addWidget(QLabel(tr("提醒阈值")))
         lrow.addWidget(self.pen_limit)
         lf.addRow(self.penlife_label)
         lf.addRow(lrow)
@@ -467,9 +468,12 @@ class MachinePanel(QWidget):
         ports = list_ports()
         real = [(d, s) for d, s in ports if not d.startswith("/dev/ttyS")]
         if not real:
-            self.port_combo.addItem("（未发现串口）", "")
+            self.port_combo.addItem(tr("（未发现串口）"), "")
+            self.port_combo.setToolTip(tr("未发现串口；点「刷新」重新扫描"))
+        else:
+            self.port_combo.setToolTip("")
         for dev, desc in real:
-            self.port_combo.addItem(f"{dev} — {desc}", dev)
+            self.port_combo.addItem(trf('{v0} — {v1}', v0=dev, v1=desc), dev)
 
     # --------------------------------------------------------------- 连接
     def _toggle_connect(self) -> None:
@@ -485,30 +489,30 @@ class MachinePanel(QWidget):
                                   dtr=self.dtr_check.isChecked(),
                                   rts=self.rts_check.isChecked())
             except Exception as exc:
-                self.state_label.setText(f"连接失败：{exc}")
+                self.state_label.setText(trf('连接失败：{v0}', v0=exc))
 
     def _on_state(self, st: State) -> None:
         names = {
-            State.DISCONNECTED: "未连接",
-            State.CONNECTING: "连接中…",
-            State.IDLE: "空闲",
-            State.RUNNING: "运行中",
-            State.PAUSED: "已暂停",
-            State.ALARM: "报警",
+            State.DISCONNECTED: tr("未连接"),
+            State.CONNECTING: tr("连接中…"),
+            State.IDLE: tr("空闲"),
+            State.RUNNING: tr("运行中"),
+            State.PAUSED: tr("已暂停"),
+            State.ALARM: tr("报警"),
         }
         self.state_label.setText(names.get(st, st.value))
-        self.connect_btn.setText("断开" if st is not State.DISCONNECTED else "连接")
+        self.connect_btn.setText(tr('断开') if st is not State.DISCONNECTED else tr('连接'))
         # 控制器可能在本软件之外进入保持（Hold）——按钮显示「继续」以便恢复
-        self.pause_btn.setText("继续" if st is State.PAUSED else "暂停")
+        self.pause_btn.setText(tr('继续') if st is State.PAUSED else tr('暂停'))
         if st is State.DISCONNECTED:
             # 断开后旧坐标不再代表笔头位置，留着会让「读取当前笔位」
             # 拿到上一次连接的过期值；固件参数同理，未连接时不显示。
             self._machine_pos = None
-            self.pos_label.setText("—")
-            self.feed_label.setText("—")
-            self.fw_label.setText("—")
+            self.pos_label.setText(tr("—"))
+            self.feed_label.setText(tr("—"))
+            self.fw_label.setText(tr("—"))
         elif st is State.CONNECTING:
-            self.fw_label.setText("读取中…")
+            self.fw_label.setText(tr("读取中…"))
 
     # ------------------------------------------------- 进度与笔寿命
     def _tick_progress(self) -> None:
@@ -527,8 +531,7 @@ class MachinePanel(QWidget):
         pct = acked / total * 100.0
         eta = elapsed / pct * (100.0 - pct) if pct > 0.5 else 0.0
         self.set_progress(
-            f"发送中：{pct:.0f}%（{acked}/{total} 行）"
-            f"  已用 {format_duration(elapsed)}  预计还需 {format_duration(eta)}")
+            trf('发送中：{v0:.0f}%（{v1}/{v2} 行）  已用 {v3}  预计还需 {v4}', v0=pct, v1=acked, v2=total, v3=format_duration(elapsed), v4=format_duration(eta)))
 
     # -- 笔寿命（累计落笔书写长度，QSettings 持久化）--
     _PEN_KEY = "machine/pen_draw_mm"
@@ -565,13 +568,13 @@ class MachinePanel(QWidget):
     def _update_penlife_label(self) -> None:
         draw_m = getattr(self, "_pen_draw", 0.0) / 1000.0
         limit = self.pen_limit.value()
-        txt = f"累计书写：{draw_m:.1f} m"
+        txt = trf('累计书写：{v0:.1f} m', v0=draw_m)
         if limit > 0 and draw_m >= limit:
-            self.penlife_label.setText(f"{txt}，已超过提醒阈值，建议更换/削笔！")
-            self.penlife_label.setStyleSheet("color:#c22;")
+            self.penlife_label.setText(trf('{v0}，已超过提醒阈值，建议更换/削笔！', v0=txt))
+            set_role(self.penlife_label, "danger")
         else:
             self.penlife_label.setText(txt)
-            self.penlife_label.setStyleSheet("color:#444;")
+            set_role(self.penlife_label, "muted")
 
     def _on_event(self, e: LinkEvent) -> None:
         if e.kind == "state":
@@ -594,15 +597,15 @@ class MachinePanel(QWidget):
         elif e.kind == "alarm":
             self.progress_label.setText(f"{e.text}")
         elif e.kind == "version":
-            self.connect_btn.setToolTip(f"固件：{e.text}")
+            self.connect_btn.setToolTip(trf('固件：{v0}', v0=e.text))
         elif e.kind == "profile" and e.profile is not None:
             self._on_profile(e.profile)
         elif e.kind == "stale":
-            self.state_label.setText("无响应？")
-            self.progress_label.setText(f"{e.text}（检查 USB/固件）")
+            self.state_label.setText(tr("无响应？"))
+            self.progress_label.setText(trf('{v0}（检查 USB/固件）', v0=e.text))
         elif e.kind == "job_done":
-            self.pause_btn.setText("暂停")
-            self.set_progress("作业完成")
+            self.pause_btn.setText(tr("暂停"))
+            self.set_progress(tr("作业完成"))
             if self.sleep_check.isChecked():
                 try:
                     self.link.sleep_now()
@@ -614,12 +617,12 @@ class MachinePanel(QWidget):
     def _guarded(self, fn, *args) -> None:
         """未连接时点命令按钮给界面提示，而不是抛未捕获的 ConnectionError。"""
         if not self.link.connected:
-            self.state_label.setText("未连接")
+            self.state_label.setText(tr("未连接"))
             return
         try:
             fn(*args)
         except Exception as exc:
-            self.progress_label.setText(f"命令失败：{exc}")
+            self.progress_label.setText(trf('命令失败：{v0}', v0=exc))
 
     def _on_profile(self, prof) -> None:
         """能力探测完成：显示固件参数摘要（只读快照，不给建议）。
@@ -686,7 +689,7 @@ class MachinePanel(QWidget):
         has = self.start_point.pen_marker is not None
         self.mark_start_btn.blockSignals(True)
         self.mark_start_btn.setCheckable(not has)
-        self.mark_start_btn.setText("移除手动标记点" if has else "手动标记起点")
+        self.mark_start_btn.setText(tr('移除手动标记点') if has else tr('手动标记起点'))
         self.mark_start_btn.setChecked(False)
         self.mark_start_btn.blockSignals(False)
 
@@ -717,31 +720,31 @@ class MachinePanel(QWidget):
         """用一句人话说明当前起点设置。"""
         marker = self.start_point.pen_marker
         if marker is None:
-            self.start_summary.setText("当前起点：未设置")
+            self.start_summary.setText(tr("当前起点：未设置"))
         elif self.start_point.mode == MODE_REGISTERED:
             x, y = self.start_point.point
             self.start_summary.setText(
-                f"当前起点：标记处 = 机器坐标 ({x:.1f}, {y:.1f}) mm（笔位校准）")
+                trf('当前起点：标记处 = 机器坐标 ({v0:.1f}, {v1:.1f}) mm（笔位校准）', v0=x, v1=y))
         else:
             self.start_summary.setText(
-                f"当前起点：机器坐标 ({marker[0]:.1f}, {marker[1]:.1f}) mm")
+                trf('当前起点：机器坐标 ({v0:.1f}, {v1:.1f}) mm', v0=marker[0], v1=marker[1]))
 
     def _toggle_pause(self) -> None:
         try:
             if self.link.state is State.PAUSED:
                 self.link.resume()
-                self.pause_btn.setText("暂停")
+                self.pause_btn.setText(tr("暂停"))
             elif self.link.state is State.RUNNING:
                 # 抬笔暂停：笔尖离纸，避免进给保持期间洇墨
                 self.link.pause(pen_cfg=self.current_config())
-                self.pause_btn.setText("继续")
+                self.pause_btn.setText(tr("继续"))
         except Exception as exc:
             # 槽里抛未捕获异常会让应用直接退出（PySide6 行为）
-            self.progress_label.setText(f"命令失败：{exc}")
+            self.progress_label.setText(trf('命令失败：{v0}', v0=exc))
 
     def _abort(self) -> None:
         if not self.link.connected:
-            self.state_label.setText("未连接")
+            self.state_label.setText(tr("未连接"))
             return
         self.link.abort(pen_cfg=self.current_config(),
                         return_start=self.return_start_check.isChecked())

@@ -14,7 +14,10 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+
+from ..i18n import tr, trf
 from ..settings import Settings
+from ..ui.style import set_role
 
 #: MCP 客户端通用配置片段（stdio；任何支持 MCP 的 AI 应用同构）
 _CONFIG_TEMPLATE = """\
@@ -51,7 +54,7 @@ class AiServiceDialog(QDialog):
     def __init__(self, window) -> None:
         super().__init__(window)
         self._win = window
-        self.setWindowTitle("AI 排版服务（MCP）")
+        self.setWindowTitle(tr("AI 排版服务（MCP）"))
         self.setMinimumWidth(560)
 
         layout = QVBoxLayout(self)
@@ -61,20 +64,20 @@ class AiServiceDialog(QDialog):
         layout.addWidget(self._status)
 
         row = QHBoxLayout()
-        self._enabled = QCheckBox("随软件启动 AI 排版服务", self)
+        self._enabled = QCheckBox(tr("随软件启动 AI 排版服务"), self)
         row.addWidget(self._enabled)
         row.addStretch(1)
-        row.addWidget(QLabel("端口：", self))
+        row.addWidget(QLabel(tr("端口："), self))
         self._port = QSpinBox(self)
         self._port.setRange(1024, 65535)
         row.addWidget(self._port)
         layout.addLayout(row)
 
-        apply_btn = QPushButton("保存并应用", self)
+        apply_btn = QPushButton(tr("保存并应用"), self)
         apply_btn.clicked.connect(self._apply)
         row.addWidget(apply_btn)
 
-        layout.addWidget(QLabel("AI 客户端配置（复制到 Claude Desktop 等）：", self))
+        layout.addWidget(QLabel(tr("AI 客户端配置（复制到 Claude Desktop 等）："), self))
         self._config = QTextEdit(self)
         self._config.setReadOnly(True)
         font = self._config.font()
@@ -84,14 +87,14 @@ class AiServiceDialog(QDialog):
 
         copy_row = QHBoxLayout()
         copy_row.addStretch(1)
-        copy_btn = QPushButton("复制配置", self)
+        copy_btn = QPushButton(tr("复制配置"), self)
         copy_btn.clicked.connect(self._copy_config)
         copy_row.addWidget(copy_btn)
         layout.addLayout(copy_row)
 
-        note = QLabel(_CONFIG_NOTE, self)
+        note = QLabel(tr(_CONFIG_NOTE), self)
         note.setWordWrap(True)
-        note.setStyleSheet("color: #888;")
+        set_role(note, "muted")
         layout.addWidget(note)
 
         self._refresh()
@@ -105,10 +108,9 @@ class AiServiceDialog(QDialog):
         server = getattr(self._win, "ai_server", None)
         if server is not None and server.port is not None:
             self._status.setText(
-                f"状态：运行中 — 127.0.0.1:{server.port}"
-                f"（共 {len(server._tools.names())} 个工具可用）")
+                trf('状态：运行中 — 127.0.0.1:{v0}（共 {v1} 个工具可用）', v0=server.port, v1=len(server._tools.names())))
         else:
-            self._status.setText("状态：已停止")
+            self._status.setText(tr("状态：已停止"))
         # 框内只放配置本身（可直接整段复制）；使用说明放在框外
         self._config.setPlainText(_fill(_CONFIG_TEMPLATE, port))
 
@@ -124,4 +126,4 @@ class AiServiceDialog(QDialog):
         from PySide6.QtWidgets import QApplication
         QApplication.clipboard().setText(
             _fill(_CONFIG_TEMPLATE, self._port.value()))
-        self._status.setText("已复制 MCP 客户端配置到剪贴板")
+        self._status.setText(tr("已复制 MCP 客户端配置到剪贴板"))

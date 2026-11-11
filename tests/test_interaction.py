@@ -261,13 +261,22 @@ def test_batch_drag_moves_all_selected_as_one_undo(qapp):
     assert obj2.transform.e == pytest.approx(220.0)
 
 
-def test_drag_uses_fast_preview_bitmap_and_clears(qapp):
-    """拖动期间用位图预览（避免每帧重光栅化整条路径），松手清掉。"""
+def test_drag_preview_uses_cache_for_move_and_bitmap_for_handle(qapp):
+    """平移直接复用显示缓存；缩放/旋转才构建预览位图。"""
     ctrl, obj, item = _make_item(qapp)
     item.setSelected(True)
     item.mousePressEvent(FakeEvent((50.0, 25.0)))
     assert item._fast_pix is None          # 单击不预建
     item.mouseMoveEvent(FakeEvent((60.0, 30.0)))
-    assert item._fast_pix is not None      # 真正移动时构建
+    assert item._fast_pix is None          # 平移：显示缓存 1:1 跟随，不另建位图
     item.mouseReleaseEvent(FakeEvent((60.0, 30.0)))
-    assert item._fast_pix is None          # 松手回到矢量全质量
+    # 缩放/旋转拖动需要能被拉伸的本地位图预览
+    item._drag_kind = "handle"
+    item._drag_paint_hint_changed()
+    item._ensure_fast_preview()
+    assert item._fast_pix is not None
+    item._drag_kind = None
+    item._pending = None
+    item._drag_paint_hint_changed()
+    # 预览位图保留到新显示缓存建成为止（旋转提交后第一帧也有正确方向）
+    assert item._fast_pix is not None

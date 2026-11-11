@@ -256,4 +256,5 @@ def _default_name(spec: TextSpec) -> str:
     first = spec.text.strip().split("\n", 1)[0]
     if len(first) > 12:
         first = first[:12] + "…"
-    return f"文本：{first}" if first else "文本"
+    from ..i18n import tr, trf
+    return trf("文本：{v0}", v0=first) if first else tr("文本")

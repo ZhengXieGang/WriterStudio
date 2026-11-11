@@ -20,6 +20,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+
+from ..i18n import tr
 from ..fonts.builder import TextSpec
 from .style import spin, unify_inputs
 
@@ -37,35 +39,35 @@ class TextPropsPanel(QWidget):
 
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
-        box = QGroupBox("文字属性")
+        box = QGroupBox(tr("文字属性"))
         form = QFormLayout(box)
 
         self.font_combo = QComboBox()
         self.font_combo.currentIndexChanged.connect(
             lambda _i: self._on_change("font"))
-        form.addRow("字体", self.font_combo)
+        form.addRow(tr("字体"), self.font_combo)
 
         self.size_spin = spin(0.5, 500.0, 10.0, " mm")
         self.size_spin.valueChanged.connect(lambda _v: self._on_change("size"))
-        form.addRow("字号", self.size_spin)
+        form.addRow(tr("字号"), self.size_spin)
 
         self.cs_spin = spin(-20.0, 50.0, 0.0, " mm", step=0.1)
         self.cs_spin.valueChanged.connect(
             lambda _v: self._on_change("char_spacing"))
-        form.addRow("字距", self.cs_spin)
+        form.addRow(tr("字距"), self.cs_spin)
 
         self.ls_spin = spin(0.5, 5.0, 1.4, " ×", step=0.05)
         self.ls_spin.valueChanged.connect(
             lambda _v: self._on_change("line_spacing"))
-        form.addRow("行距", self.ls_spin)
+        form.addRow(tr("行距"), self.ls_spin)
 
         self.fw_spin = spin(0.0, 2000.0, 0.0, " mm", step=5.0)
         self.fw_spin.setToolTip(
-            "文本框宽度：大于 0 时按该宽度自动换行（0 = 不限宽）。\n"
-            "也可以在画布上直接拖动文本框右缘的手柄调整。")
+            tr("文本框宽度：大于 0 时按该宽度自动换行（0 = 不限宽）。\n"
+            "也可以在画布上直接拖动文本框右缘的手柄调整。"))
         self.fw_spin.valueChanged.connect(
             lambda _v: self._on_change("frame_width"))
-        form.addRow("文本框宽度", self.fw_spin)
+        form.addRow(tr("文本框宽度"), self.fw_spin)
 
         v.addWidget(box)
         # 与同列的手写扰动面板同规格（高度取全局 FIELD_HEIGHT）

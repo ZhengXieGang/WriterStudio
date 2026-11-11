@@ -26,9 +26,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+
+from ..i18n import tr, trf
 from ..core.document import PageSpec
 from ..page_presets import PagePreset, PagePresetStore
-from .style import spin, unify_inputs
+from .style import (ask_yes_no, localize_dialog_buttons, set_role, spin,
+                    unify_inputs)
 
 _CUSTOM_LABEL = "自定义尺寸"
 
@@ -46,7 +49,7 @@ class PagePresetEditorDialog(QDialog):
         super().__init__(parent)
         self.store = store
         self._original = preset
-        self.setWindowTitle("纸张预设编辑器")
+        self.setWindowTitle(tr("纸张预设编辑器"))
         self.setMinimumWidth(360)
 
         root = QVBoxLayout(self)
@@ -55,36 +58,38 @@ class PagePresetEditorDialog(QDialog):
         self.name_edit = QComboBox()
         self.name_edit.setEditable(True)
         for p in store.builtin():
-            self.name_edit.addItem(f"{p.name}（{p.width:g}×{p.height:g}）",
-                                   p.name)
+            self.name_edit.addItem(
+                trf('{v0}（{v1:g}×{v2:g}）', v0=tr(p.name),
+                    v1=p.width, v2=p.height), p.name)
         self.name_edit.setCurrentIndex(-1)
         self.name_edit.setEditText(preset.name if preset else "")
         self.name_edit.activated.connect(self._on_base_chosen)
-        form.addRow("名称", self.name_edit)
+        form.addRow(tr("名称"), self.name_edit)
 
         self.width_spin = _spin(10.0, 5000.0, preset.width if preset else 210.0)
         self.height_spin = _spin(10.0, 5000.0, preset.height if preset else 297.0)
         size_row = QHBoxLayout()
-        size_row.addWidget(QLabel("宽"))
+        size_row.addWidget(QLabel(tr("宽")))
         size_row.addWidget(self.width_spin, 1)
-        size_row.addWidget(QLabel("高"))
+        size_row.addWidget(QLabel(tr("高")))
         size_row.addWidget(self.height_spin, 1)
-        form.addRow("尺寸", size_row)
+        form.addRow(tr("尺寸"), size_row)
 
         self.margin_spin = _spin(0.0, 200.0, preset.margin if preset else 10.0)
-        form.addRow("页边距", self.margin_spin)
+        form.addRow(tr("页边距"), self.margin_spin)
 
         root.addLayout(form)
 
-        hint = QLabel("提示：尺寸以纵向 (宽≤高) 保存，使用时可在页面设置里切换横向。")
+        hint = QLabel(tr("尺寸按纵向保存，使用时可在页面设置里切换横向。"))
         hint.setWordWrap(True)
-        hint.setStyleSheet("color:#666;")
+        set_role(hint, "muted")
         root.addWidget(hint)
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btns.accepted.connect(self._on_accept)
         btns.rejected.connect(self.reject)
         root.addWidget(btns)
+        localize_dialog_buttons(self)
         unify_inputs(self)
 
     def _on_base_chosen(self, index: int) -> None:
@@ -94,14 +99,14 @@ class PagePresetEditorDialog(QDialog):
         p = self.store.find(name)
         if p is None:
             return
-        self.name_edit.setEditText(name)
+        self.name_edit.setEditText(tr(name))
         self.width_spin.setValue(p.width)
         self.height_spin.setValue(p.height)
         self.margin_spin.setValue(p.margin)
 
     def _on_accept(self) -> None:
         if not self.result_preset().name:
-            QMessageBox.warning(self, "名称为空", "请填写预设名称。")
+            QMessageBox.warning(self, tr("名称为空"), tr("请填写预设名称。"))
             return
         self.accept()
 
@@ -127,7 +132,7 @@ class PageSetupDialog(QDialog):
         self._on_rotate = on_rotate
         self._preset_name = page.preset_name or ""
         self._landscape = page.width > page.height
-        self.setWindowTitle("页面设置")
+        self.setWindowTitle(tr("页面设置"))
         self.setMinimumWidth(430)
 
         root = QVBoxLayout(self)
@@ -137,14 +142,14 @@ class PageSetupDialog(QDialog):
         self.preset_combo = QComboBox()
         self._reload_presets()
         self.preset_combo.currentIndexChanged.connect(self._on_preset_changed)
-        top.addRow("纸张预设", self.preset_combo)
+        top.addRow(tr("纸张预设"), self.preset_combo)
 
         self.orient_combo = QComboBox()
-        self.orient_combo.addItem("横向", True)
-        self.orient_combo.addItem("纵向", False)
+        self.orient_combo.addItem(tr("横向"), True)
+        self.orient_combo.addItem(tr("纵向"), False)
         self.orient_combo.setCurrentIndex(0 if self._landscape else 1)
         self.orient_combo.currentIndexChanged.connect(self._on_orientation)
-        top.addRow("方向", self.orient_combo)
+        top.addRow(tr("方向"), self.orient_combo)
         root.addLayout(top)
 
         # ---- 尺寸 & 边距 ----
@@ -152,32 +157,35 @@ class PageSetupDialog(QDialog):
         self.width_spin = _spin(10.0, 5000.0, page.width)
         self.height_spin = _spin(10.0, 5000.0, page.height)
         srow = QHBoxLayout()
-        srow.addWidget(QLabel("宽"))
+        srow.addWidget(QLabel(tr("宽")))
         srow.addWidget(self.width_spin, 1)
-        srow.addWidget(QLabel("高"))
+        srow.addWidget(QLabel(tr("高")))
         srow.addWidget(self.height_spin, 1)
-        form.addRow("尺寸", srow)
+        form.addRow(tr("尺寸"), srow)
         for s in (self.width_spin, self.height_spin):
             s.valueChanged.connect(self._on_manual_size)
 
         self.margin_spin = _spin(0.0, 200.0, page.margin)
-        form.addRow("页边距", self.margin_spin)
+        form.addRow(tr("页边距"), self.margin_spin)
 
-        self.guide_check = QCheckBox("显示页边距参考线")
+        self.guide_check = QCheckBox(tr("显示页边距参考线"))
         self.guide_check.setChecked(bool(guide_visible))
         form.addRow("", self.guide_check)
         root.addLayout(form)
 
         # ---- 旋转纸张（连同内容） ----
         rot_row = QHBoxLayout()
-        rot_row.addWidget(QLabel("旋转纸张"))
+        rot_row.addWidget(QLabel(tr("旋转纸张")))
         if on_rotate is not None:
-            extra = ("\n坐标映射（原点对齐/对调/反转）随页面坐标系自动换算，"
-                     "机械原点标注与书写位置保持一致；撤销时一并还原。")
+            extra = tr("\n坐标映射（原点对齐/对调/反转）随页面坐标系自动换算，"
+                       "机械原点标注与书写位置保持一致；撤销时一并还原。")
             for label, direction, tip in (
-                    ("顺时针 90°", "cw", "纸张与内容一起顺时针旋转 90°" + extra),
-                    ("逆时针 90°", "ccw", "纸张与内容一起逆时针旋转 90°" + extra),
-                    ("180°", "180", "纸张与内容一起旋转 180°" + extra)):
+                    (tr("顺时针 90°"), "cw",
+                     tr("纸张与内容一起顺时针旋转 90°") + extra),
+                    (tr("逆时针 90°"), "ccw",
+                     tr("纸张与内容一起逆时针旋转 90°") + extra),
+                    (tr("180°"), "180",
+                     tr("纸张与内容一起旋转 180°") + extra)):
                 b = QPushButton(label)
                 b.setToolTip(tip)
                 b.clicked.connect(
@@ -187,15 +195,15 @@ class PageSetupDialog(QDialog):
         root.addLayout(rot_row)
 
         # ---- 尺寸信息 ----
-        self.info = QLabel("—")
-        self.info.setStyleSheet("color:#666;")
+        self.info = QLabel(tr("—"))
+        set_role(self.info, "muted")
         root.addWidget(self.info)
 
         # ---- 预设管理 ----
         manage = QHBoxLayout()
-        save_btn = QPushButton("另存为预设…")
+        save_btn = QPushButton(tr("另存为预设…"))
         save_btn.clicked.connect(self._save_as_preset)
-        del_btn = QPushButton("删除预设")
+        del_btn = QPushButton(tr("删除预设"))
         del_btn.clicked.connect(self._delete_preset)
         manage.addWidget(save_btn)
         manage.addWidget(del_btn)
@@ -206,6 +214,7 @@ class PageSetupDialog(QDialog):
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         root.addWidget(btns)
+        localize_dialog_buttons(self)
         self._update_info()
         unify_inputs(self)
 
@@ -213,10 +222,10 @@ class PageSetupDialog(QDialog):
     def _reload_presets(self) -> None:
         self.preset_combo.blockSignals(True)
         self.preset_combo.clear()
-        self.preset_combo.addItem(_CUSTOM_LABEL, "")
+        self.preset_combo.addItem(tr(_CUSTOM_LABEL), "")
         for p in self.store.builtin():
             self.preset_combo.addItem(
-                f"{p.name}  ({p.width:g}×{p.height:g})", p.name)
+                f"{tr(p.name)}  ({p.width:g}×{p.height:g})", p.name)
         users = self.store.user()
         if users:
             self.preset_combo.insertSeparator(self.preset_combo.count())
@@ -281,7 +290,7 @@ class PageSetupDialog(QDialog):
     def _update_info(self) -> None:
         w, h = self.width_spin.value(), self.height_spin.value()
         self.info.setText(
-            f"{w:.1f} × {h:.1f} mm   （{w / 25.4:.2f} × {h / 25.4:.2f} 英寸）")
+            trf('{v0:.1f} × {v1:.1f} mm   （{v2:.2f} × {v3:.2f} 英寸）', v0=w, v1=h, v2=w / 25.4, v3=h / 25.4))
 
     def _rotate(self, direction: str) -> None:
         """在对话框内就地旋转纸张（会改动文档并立即刷新界面）。"""
@@ -315,13 +324,13 @@ class PageSetupDialog(QDialog):
             return
         preset = dlg.result_preset()
         if self.store.is_builtin(preset.name):
-            QMessageBox.warning(self, "名称冲突",
-                                f"「{preset.name}」是内置预设名，请换一个名称。")
+            QMessageBox.warning(self, tr("名称冲突"),
+                                trf('「{v0}」是内置预设名，请换一个名称。', v0=preset.name))
             return
         try:
             self.store.add(preset)
         except ValueError as exc:
-            QMessageBox.warning(self, "无法保存预设", str(exc))
+            QMessageBox.warning(self, tr("无法保存预设"), str(exc))
             return
         self._preset_name = preset.name
         self._reload_presets()
@@ -330,13 +339,13 @@ class PageSetupDialog(QDialog):
     def _delete_preset(self) -> None:
         name = self.preset_combo.currentData() or ""
         if not name:
-            QMessageBox.information(self, "删除预设", "当前是自定义尺寸，无可删除的预设。")
+            QMessageBox.information(self, tr("删除预设"), tr("当前是自定义尺寸，无可删除的预设。"))
             return
         if self.store.is_builtin(name):
-            QMessageBox.information(self, "删除预设", f"「{name}」是内置预设，无法删除。")
+            QMessageBox.information(self, tr("删除预设"), trf('「{v0}」是内置预设，无法删除。', v0=name))
             return
-        r = QMessageBox.question(self, "删除预设", f"确定删除用户预设「{name}」？")
-        if r != QMessageBox.Yes:
+        if not ask_yes_no(self, tr("删除预设"),
+                          trf('确定删除用户预设「{v0}」？', v0=name)):
             return
         self.store.remove(name)
         self._preset_name = ""

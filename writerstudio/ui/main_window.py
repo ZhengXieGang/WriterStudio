@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, Qt, QTimer
-from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QPalette
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QDockWidget,
@@ -25,6 +25,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+
+from ..i18n import tr, trf
 from ..core.document import (
     ROTATE_180,
     ROTATE_CCW,
@@ -92,7 +94,8 @@ from ..project import (
 )
 from ..settings import Settings
 from .canvas import CanvasView
-from .theme import THEMES, apply_theme
+from .style import ask_save_discard_cancel, ask_yes_no, fit_dialog_to_screen
+from .theme import THEMES, apply_theme, stroke_bar_qss
 from .theme import available as theme_available
 from .content_dialog import (
     KIND_EQUATION,
@@ -124,7 +127,7 @@ def _box_corners(box: BBox):
 class MainWindow(QMainWindow):
     def __init__(self, settings: Settings | None = None) -> None:
         super().__init__()
-        self.setWindowTitle("WriterStudio — ESP32 GRBL 写字机软件")
+        self.setWindowTitle(tr("WriterStudio — ESP32 GRBL 写字机软件"))
         self.resize(1280, 840)
 
         self.settings = settings if settings is not None else Settings()
@@ -194,18 +197,18 @@ class MainWindow(QMainWindow):
         self.ai_server = None
         self._start_ai_server_from_settings()
 
-        self._status_coord = QLabel("—")
-        self._status_zoom = QLabel("—")
+        self._status_coord = QLabel(tr("—"))
+        self._status_zoom = QLabel(tr("—"))
         # 纸张尺寸常驻状态栏，并且可点击 → 直接打开页面设置
-        self._status_page = QLabel("—")
-        self._status_page.setToolTip("点击修改纸张大小/方向/页边距")
+        self._status_page = QLabel(tr("—"))
+        self._status_page.setToolTip(tr("点击修改纸张大小/方向/页边距"))
         self._status_page.setCursor(Qt.PointingHandCursor)
         self._status_page.mousePressEvent = lambda _e: self._page_setup()
-        self.statusBar().addPermanentWidget(QLabel("纸张:"))
+        self.statusBar().addPermanentWidget(QLabel(tr("纸张:")))
         self.statusBar().addPermanentWidget(self._status_page)
-        self.statusBar().addPermanentWidget(QLabel("坐标(mm):"))
+        self.statusBar().addPermanentWidget(QLabel(tr("坐标(mm):")))
         self.statusBar().addPermanentWidget(self._status_coord)
-        self.statusBar().addPermanentWidget(QLabel("缩放:"))
+        self.statusBar().addPermanentWidget(QLabel(tr("缩放:")))
         self.statusBar().addPermanentWidget(self._status_zoom)
         self._update_page_status()
 
@@ -231,236 +234,239 @@ class MainWindow(QMainWindow):
         self.controller.undo_stack.clear()
         self._loaded_ready = True
         self._mark_clean()
+        # 1280×840 在 1366×768 笔记本屏上会顶出屏幕下沿（含标题栏与任务栏）；
+        # 按屏幕可用区域收敛，窄屏上画布仍保留完整操作区。
+        fit_dialog_to_screen(self, 1280, 840, margin_h=56, margin_v=64)
 
     # --------------------------------------------------------------- actions
     def _build_actions(self) -> None:
         st = self.controller.undo_stack
 
         # -- 文件 --
-        self.act_new = QAction("新建", self)
+        self.act_new = QAction(tr("新建"), self)
         self.act_new.setShortcut(QKeySequence.New)
         self.act_new.triggered.connect(self._new_project)
 
-        self.act_open = QAction("打开…", self)
+        self.act_open = QAction(tr("打开…"), self)
         self.act_open.setShortcut(QKeySequence.Open)
         self.act_open.triggered.connect(self._open_project)
 
-        self.act_save = QAction("保存", self)
+        self.act_save = QAction(tr("保存"), self)
         self.act_save.setShortcut(QKeySequence.Save)
         self.act_save.triggered.connect(self._save_project)
 
-        self.act_save_as = QAction("另存为…", self)
+        self.act_save_as = QAction(tr("另存为…"), self)
         self.act_save_as.setShortcut(QKeySequence.SaveAs)
         self.act_save_as.triggered.connect(self._save_project_as)
 
-        self.act_page_setup = QAction("页面设置…", self)
+        self.act_page_setup = QAction(tr("页面设置…"), self)
         self.act_page_setup.setShortcut("Ctrl+Shift+N")
-        self.act_page_setup.setToolTip("设置纸张大小、方向、页边距（快捷键 Ctrl+Shift+N）")
+        self.act_page_setup.setToolTip(tr("设置纸张大小、方向、页边距（快捷键 Ctrl+Shift+N）"))
         self.act_page_setup.triggered.connect(self._page_setup)
 
-        self.act_toggle_guide = QAction("显示页边距参考线", self)
+        self.act_toggle_guide = QAction(tr("显示页边距参考线"), self)
         self.act_toggle_guide.setCheckable(True)
         self.act_toggle_guide.setChecked(True)
         self.act_toggle_guide.triggered.connect(self._toggle_page_guide)
 
         # -- 旋转纸张（连同内容一起转，避免内容转出纸外） --
-        self.act_rotate_cw = QAction("顺时针旋转 90°", self)
+        self.act_rotate_cw = QAction(tr("顺时针旋转 90°"), self)
         self.act_rotate_cw.setShortcut("Ctrl+R")
-        self.act_rotate_cw.setToolTip("把纸张连同其上内容一起顺时针旋转 90°")
+        self.act_rotate_cw.setToolTip(tr("把纸张连同其上内容一起顺时针旋转 90°"))
         self.act_rotate_cw.triggered.connect(lambda: self._rotate_page(ROTATE_CW))
 
-        self.act_rotate_ccw = QAction("逆时针旋转 90°", self)
+        self.act_rotate_ccw = QAction(tr("逆时针旋转 90°"), self)
         self.act_rotate_ccw.setShortcut("Ctrl+Shift+R")
-        self.act_rotate_ccw.setToolTip("把纸张连同其上内容一起逆时针旋转 90°")
+        self.act_rotate_ccw.setToolTip(tr("把纸张连同其上内容一起逆时针旋转 90°"))
         self.act_rotate_ccw.triggered.connect(lambda: self._rotate_page(ROTATE_CCW))
 
-        self.act_rotate_180 = QAction("旋转 180°", self)
-        self.act_rotate_180.setToolTip("把纸张连同其上内容一起旋转 180°")
+        self.act_rotate_180 = QAction(tr("旋转 180°"), self)
+        self.act_rotate_180.setToolTip(tr("把纸张连同其上内容一起旋转 180°"))
         self.act_rotate_180.triggered.connect(lambda: self._rotate_page(ROTATE_180))
 
-        self.act_undo = st.createUndoAction(self, "撤销")
+        self.act_undo = st.createUndoAction(self, tr("撤销"))
         self.act_undo.setShortcut(QKeySequence.Undo)
-        self.act_redo = st.createRedoAction(self, "重做")
+        self.act_redo = st.createRedoAction(self, tr("重做"))
         self.act_redo.setShortcut(QKeySequence.Redo)
 
-        self.act_delete = QAction("删除", self)
+        self.act_delete = QAction(tr("删除"), self)
         self.act_delete.setShortcut(QKeySequence.Delete)
-        self.act_delete.setToolTip("删除选中对象；笔画编辑模式下删除选中的笔画")
+        self.act_delete.setToolTip(tr("删除选中对象；笔画编辑模式下删除选中的笔画"))
         self.act_delete.triggered.connect(self._delete_selected)
 
-        self.act_duplicate = QAction("复制对象", self)
+        self.act_duplicate = QAction(tr("复制对象"), self)
         self.act_duplicate.setShortcut("Ctrl+D")
         self.act_duplicate.triggered.connect(self._duplicate_selected)
 
-        self.act_stroke_edit = QAction("笔画编辑", self)
+        self.act_stroke_edit = QAction(tr("笔画编辑"), self)
         self.act_stroke_edit.setCheckable(True)
         self.act_stroke_edit.setShortcut("E")
         self.act_stroke_edit.setToolTip(
-            "进入笔画编辑：鼠标下的笔画自动高亮，点击确认选中；可移动/缩放/"
-            "旋转/弯折，Delete 删除选中笔画（E 或 Esc 退出）")
+            tr("进入笔画编辑：鼠标下的笔画自动高亮，点击确认选中；可移动/缩放/"
+            "旋转/弯折，Delete 删除选中笔画（E 或 Esc 退出）"))
         self.act_stroke_edit.toggled.connect(self._toggle_stroke_edit)
 
-        self.act_select_all = QAction("全选", self)
+        self.act_select_all = QAction(tr("全选"), self)
         self.act_select_all.setShortcut(QKeySequence.SelectAll)
         self.act_select_all.triggered.connect(self._select_all)
 
-        self.act_raise = QAction("上移图层", self)
+        self.act_raise = QAction(tr("上移图层"), self)
         self.act_raise.setShortcut("Ctrl+]")
         self.act_raise.triggered.connect(lambda: self._move_z(1))
 
-        self.act_lower = QAction("下移图层", self)
+        self.act_lower = QAction(tr("下移图层"), self)
         self.act_lower.setShortcut("Ctrl+[")
         self.act_lower.triggered.connect(lambda: self._move_z(-1))
 
-        self.act_toggle_visible = QAction("显示/隐藏", self)
+        self.act_toggle_visible = QAction(tr("显示/隐藏"), self)
         self.act_toggle_visible.setShortcut("Ctrl+H")
         self.act_toggle_visible.triggered.connect(self._toggle_visible_selected)
 
-        self.act_toggle_lock = QAction("锁定/解锁", self)
+        self.act_toggle_lock = QAction(tr("锁定/解锁"), self)
         self.act_toggle_lock.setShortcut("Ctrl+L")
         self.act_toggle_lock.triggered.connect(self._toggle_lock_selected)
 
         # 对齐 / 分布
-        self.act_align_left = self._mk_align("左对齐", "left")
-        self.act_align_hcenter = self._mk_align("水平居中", "hcenter")
-        self.act_align_right = self._mk_align("右对齐", "right")
-        self.act_align_top = self._mk_align("顶对齐", "top")
-        self.act_align_vcenter = self._mk_align("垂直居中", "vcenter")
-        self.act_align_bottom = self._mk_align("底对齐", "bottom")
-        self.act_distribute_h = QAction("水平等距分布", self)
+        self.act_align_left = self._mk_align(tr("左对齐"), "left")
+        self.act_align_hcenter = self._mk_align(tr("水平居中"), "hcenter")
+        self.act_align_right = self._mk_align(tr("右对齐"), "right")
+        self.act_align_top = self._mk_align(tr("顶对齐"), "top")
+        self.act_align_vcenter = self._mk_align(tr("垂直居中"), "vcenter")
+        self.act_align_bottom = self._mk_align(tr("底对齐"), "bottom")
+        self.act_distribute_h = QAction(tr("水平等距分布"), self)
         self.act_distribute_h.triggered.connect(lambda: self._distribute("h"))
-        self.act_distribute_v = QAction("垂直等距分布", self)
+        self.act_distribute_v = QAction(tr("垂直等距分布"), self)
         self.act_distribute_v.triggered.connect(lambda: self._distribute("v"))
 
-        self.act_zoom_in = QAction("放大", self)
+        self.act_zoom_in = QAction(tr("放大"), self)
         self.act_zoom_in.setShortcut(QKeySequence.ZoomIn)
         self.act_zoom_in.triggered.connect(self.canvas.zoom_in)
 
-        self.act_zoom_out = QAction("缩小", self)
+        self.act_zoom_out = QAction(tr("缩小"), self)
         self.act_zoom_out.setShortcut(QKeySequence.ZoomOut)
         self.act_zoom_out.triggered.connect(self.canvas.zoom_out)
 
-        self.act_fit = QAction("适应页面", self)
+        self.act_fit = QAction(tr("适应页面"), self)
         self.act_fit.setShortcut("Ctrl+0")
         self.act_fit.triggered.connect(self.canvas.fit_page)
 
-        self.act_zoom_100 = QAction("实际尺寸", self)
+        self.act_zoom_100 = QAction(tr("实际尺寸"), self)
         self.act_zoom_100.setShortcut("Ctrl+1")
         self.act_zoom_100.triggered.connect(self.canvas.zoom_100)
 
-        self.act_zoom_selection = QAction("缩放到选中", self)
+        self.act_zoom_selection = QAction(tr("缩放到选中"), self)
         self.act_zoom_selection.setShortcut("Ctrl+Shift+F")
         self.act_zoom_selection.triggered.connect(self._zoom_selection)
 
-        self.act_about = QAction("关于", self)
+        self.act_about = QAction(tr("关于"), self)
         self.act_about.triggered.connect(self._about)
 
-        self.act_quit = QAction("退出", self)
+        self.act_quit = QAction(tr("退出"), self)
         self.act_quit.setShortcut(QKeySequence.Quit)
         self.act_quit.triggered.connect(self.close)
 
         # -- 文本 / 字体 --
-        self.act_new_text = QAction("插入文本…", self)
+        self.act_new_text = QAction(tr("插入文本…"), self)
         self.act_new_text.setShortcut("Ctrl+T")
         self.act_new_text.triggered.connect(self._new_text)
 
-        self.act_edit_text = QAction("编辑文本…", self)
+        self.act_edit_text = QAction(tr("编辑文本…"), self)
         self.act_edit_text.setShortcut("Ctrl+Shift+T")
         self.act_edit_text.triggered.connect(self._edit_text)
 
-        self.act_import_font = QAction("导入字体…", self)
+        self.act_import_font = QAction(tr("导入字体…"), self)
         self.act_import_font.triggered.connect(self._import_font)
 
-        self.act_show_fonts = QAction("显示字体库", self)
+        self.act_show_fonts = QAction(tr("显示字体库"), self)
         self.act_show_fonts.setCheckable(True)
         self.act_show_fonts.setChecked(True)
         self.act_show_fonts.triggered.connect(self._toggle_font_panel)
 
         # -- 手写扰动（文本与矢量图形通用） --
-        self.act_perturb_selected = QAction("手写扰动…", self)
+        self.act_perturb_selected = QAction(tr("手写扰动…"), self)
         self.act_perturb_selected.setShortcut("Ctrl+P")
-        self.act_perturb_selected.setToolTip("调整选中对象的手写扰动（文本逐字扰动，矢量线条手抖）")
+        self.act_perturb_selected.setToolTip(tr("调整选中对象的手写扰动（文本逐字扰动，矢量线条手抖）"))
         self.act_perturb_selected.triggered.connect(self._perturb_selected)
 
-        self.act_reseed_selected = QAction("重新随机（换种子）", self)
+        self.act_reseed_selected = QAction(tr("重新随机（换种子）"), self)
         self.act_reseed_selected.setShortcut("Ctrl+Shift+P")
         self.act_reseed_selected.triggered.connect(self._reseed_selected)
 
-        self.act_clear_perturb = QAction("清除扰动", self)
+        self.act_clear_perturb = QAction(tr("清除扰动"), self)
         self.act_clear_perturb.triggered.connect(self._clear_perturb)
 
-        self.act_show_perturb_panel = QAction("显示扰动面板", self)
+        self.act_show_perturb_panel = QAction(tr("显示扰动面板"), self)
         self.act_show_perturb_panel.setCheckable(True)
         self.act_show_perturb_panel.setChecked(True)
         self.act_show_perturb_panel.triggered.connect(self._toggle_perturb_panel)
 
         # -- 富内容 --
-        self.act_insert_md = QAction("插入 Markdown / 表格…", self)
+        self.act_insert_md = QAction(tr("插入 Markdown / 表格…"), self)
         self.act_insert_md.setShortcut("Ctrl+M")
         self.act_insert_md.triggered.connect(lambda: self._insert_content(KIND_MARKDOWN))
 
-        self.act_insert_eq = QAction("插入公式…", self)
+        self.act_insert_eq = QAction(tr("插入公式…"), self)
         self.act_insert_eq.setShortcut("Ctrl+E")
         self.act_insert_eq.triggered.connect(lambda: self._insert_content(KIND_EQUATION))
 
-        self.act_insert_tex = QAction("插入 LaTeX 文档…", self)
+        self.act_insert_tex = QAction(tr("插入 LaTeX 文档…"), self)
         self.act_insert_tex.triggered.connect(lambda: self._insert_content(KIND_LATEX))
 
-        self.act_insert_tikz = QAction("插入 TikZ 图形…", self)
-        self.act_insert_tikz.setToolTip("用 TikZ 画几何图形/流程图/坐标图（需 TeX 工具链）")
+        self.act_insert_tikz = QAction(tr("插入 TikZ 图形…"), self)
+        self.act_insert_tikz.setToolTip(tr("用 TikZ 画几何图形/流程图/坐标图（需 TeX 工具链）"))
         self.act_insert_tikz.triggered.connect(lambda: self._insert_content(KIND_TIKZ))
 
-        self.act_import_svg = QAction("导入 SVG 矢量图…", self)
+        self.act_import_svg = QAction(tr("导入 SVG 矢量图…"), self)
         self.act_import_svg.setShortcut("Ctrl+Shift+I")
         self.act_import_svg.triggered.connect(lambda: self._insert_content(KIND_SVG))
 
         # -- 参考层（只对齐，不书写） --
-        self.act_add_ref_image = QAction("添加参考图片…", self)
+        self.act_add_ref_image = QAction(tr("添加参考图片…"), self)
         self.act_add_ref_image.triggered.connect(self._add_reference_image)
 
-        self.act_add_ref_svg = QAction("添加参考 SVG…", self)
+        self.act_add_ref_svg = QAction(tr("添加参考 SVG…"), self)
         self.act_add_ref_svg.triggered.connect(self._add_reference_svg)
 
-        self.act_show_reference = QAction("显示参考层面板", self)
+        self.act_show_reference = QAction(tr("显示参考层面板"), self)
         self.act_show_reference.setCheckable(True)
         self.act_show_reference.setChecked(True)
         self.act_show_reference.triggered.connect(
             lambda c: self.reference_dock.setVisible(c))
         # -- 机器 --
-        self.act_gen_gcode = QAction("生成 G-code 预览", self)
+        self.act_gen_gcode = QAction(tr("生成 G-code 预览"), self)
         self.act_gen_gcode.setShortcut("Ctrl+G")
         self.act_gen_gcode.triggered.connect(self._generate_preview)
 
-        self.act_export_gcode = QAction("导出 G-code…", self)
+        self.act_export_gcode = QAction(tr("导出 G-code…"), self)
         self.act_export_gcode.triggered.connect(self._export_gcode)
 
-        self.act_export_png = QAction("导出为 PNG…", self)
+        self.act_export_png = QAction(tr("导出为 PNG…"), self)
         self.act_export_png.triggered.connect(lambda: self._export_image("png"))
 
-        self.act_export_svg = QAction("导出为 SVG…", self)
+        self.act_export_svg = QAction(tr("导出为 SVG…"), self)
         self.act_export_svg.triggered.connect(lambda: self._export_image("svg"))
 
-        self.act_send_job = QAction("发送到机器", self)
+        self.act_send_job = QAction(tr("发送到机器"), self)
         self.act_send_job.triggered.connect(self._send_job)
 
-        self.act_show_machine = QAction("显示机器面板", self)
+        self.act_show_machine = QAction(tr("显示机器面板"), self)
         self.act_show_machine.setCheckable(True)
         self.act_show_machine.setChecked(True)
         self.act_show_machine.triggered.connect(self._toggle_machine_panel)
 
-        self.act_show_undo = QAction("显示历史面板", self)
+        self.act_show_undo = QAction(tr("显示历史面板"), self)
         self.act_show_undo.setCheckable(True)
         self.act_show_undo.setChecked(True)
         self.act_show_undo.triggered.connect(
             lambda c: self.undo_panel.setVisible(c))
 
-        self.act_show_objects = QAction("显示对象面板", self)
+        self.act_show_objects = QAction(tr("显示对象面板"), self)
         self.act_show_objects.setCheckable(True)
         self.act_show_objects.setChecked(True)
         self.act_show_objects.triggered.connect(
             lambda c: self.dock.setVisible(c))
 
-        self.act_ai_settings = QAction("AI 服务设置…", self)
+        self.act_ai_settings = QAction(tr("AI 服务设置…"), self)
         self.act_ai_settings.triggered.connect(self._show_ai_settings)
 
         self._apply_action_icons()
@@ -477,14 +483,22 @@ class MainWindow(QMainWindow):
         self.stop_ai_server()
         server = AiTcpServer(AiTools(self), port, parent=self)
         if not server.start():
-            # 端口被占（常见：已开了一个 WriterStudio）不致命，仅提示
-            self.statusBar().showMessage(
-                f"AI 排版服务启动失败：{server.error}（端口 {port}）", 8000)
+            # 端口被占（常见：已开了一个 WriterStudio）不致命，仅提示。
+            # 底层异常文字是英文，这里把最常见的一种换成完整中文提示，
+            # 免得中文界面里出现「失败：The bound address is already in use」。
+            error = str(getattr(server, "error", "") or "")
+            if "already in use" in error.lower() or "address in use" in error.lower():
+                message = trf('AI 排版服务启动失败：端口 {v0} 已被占用'
+                              '（可能已有一个 WriterStudio 正在运行）', v0=port)
+            else:
+                message = trf('AI 排版服务启动失败：{v0}（端口 {v1}）',
+                              v0=error, v1=port)
+            self.statusBar().showMessage(message, 8000)
             server.deleteLater()
             return False
         self.ai_server = server
         self.statusBar().showMessage(
-            f"AI 排版服务已启动：127.0.0.1:{server.port}", 5000)
+            trf('AI 排版服务已启动：127.0.0.1:{v0}', v0=server.port), 5000)
         return True
 
     def stop_ai_server(self) -> None:
@@ -532,17 +546,17 @@ class MainWindow(QMainWindow):
     def _build_menus(self) -> None:
         mb = self.menuBar()
 
-        m_file = mb.addMenu("文件(&F)")
+        m_file = mb.addMenu(tr("文件(&F)"))
         m_file.addAction(self.act_new)
         m_file.addAction(self.act_open)
         m_file.addAction(self.act_save)
         m_file.addAction(self.act_save_as)
-        self.recent_menu = QMenu("最近打开", self)
+        self.recent_menu = QMenu(tr("最近打开"), self)
         m_file.addMenu(self.recent_menu)
         m_file.addSeparator()
         m_file.addAction(self.act_page_setup)
         m_file.addAction(self.act_toggle_guide)
-        m_rotate = m_file.addMenu("旋转纸张")
+        m_rotate = m_file.addMenu(tr("旋转纸张"))
         m_rotate.addAction(self.act_rotate_cw)
         m_rotate.addAction(self.act_rotate_ccw)
         m_rotate.addAction(self.act_rotate_180)
@@ -553,7 +567,7 @@ class MainWindow(QMainWindow):
         m_file.addSeparator()
         m_file.addAction(self.act_quit)
 
-        m_edit = mb.addMenu("编辑(&E)")
+        m_edit = mb.addMenu(tr("编辑(&E)"))
         m_edit.addAction(self.act_undo)
         m_edit.addAction(self.act_redo)
         m_edit.addSeparator()
@@ -562,21 +576,21 @@ class MainWindow(QMainWindow):
         m_edit.addSeparator()
         m_edit.addAction(self.act_select_all)
 
-        m_obj = mb.addMenu("对象(&O)")
+        m_obj = mb.addMenu(tr("对象(&O)"))
         m_obj.addAction(self.act_raise)
         m_obj.addAction(self.act_lower)
         m_obj.addSeparator()
         m_obj.addAction(self.act_toggle_visible)
         m_obj.addAction(self.act_toggle_lock)
         m_obj.addSeparator()
-        m_align = m_obj.addMenu("对齐")
+        m_align = m_obj.addMenu(tr("对齐"))
         for a in (self.act_align_left, self.act_align_hcenter, self.act_align_right,
                   self.act_align_top, self.act_align_vcenter, self.act_align_bottom):
             m_align.addAction(a)
         m_obj.addAction(self.act_distribute_h)
         m_obj.addAction(self.act_distribute_v)
 
-        m_view = mb.addMenu("视图(&V)")
+        m_view = mb.addMenu(tr("视图(&V)"))
         m_view.addAction(self.act_zoom_in)
         m_view.addAction(self.act_zoom_out)
         m_view.addAction(self.act_fit)
@@ -591,18 +605,19 @@ class MainWindow(QMainWindow):
         m_view.addAction(self.act_show_undo)
         m_view.addSeparator()
         m_view.addMenu(self._build_theme_menu())
+        m_view.addMenu(self._build_language_menu())
 
-        m_help = mb.addMenu("帮助(&H)")
+        m_help = mb.addMenu(tr("帮助(&H)"))
         m_help.addAction(self.act_about)
 
-        m_text = mb.addMenu("文本(&T)")
+        m_text = mb.addMenu(tr("文本(&T)"))
         m_text.addAction(self.act_new_text)
         m_text.addAction(self.act_edit_text)
         m_text.addSeparator()
         m_text.addAction(self.act_import_font)
         m_text.addAction(self.act_show_fonts)
 
-        m_content = mb.addMenu("内容(&C)")
+        m_content = mb.addMenu(tr("内容(&C)"))
         m_content.addAction(self.act_insert_md)
         m_content.addAction(self.act_insert_eq)
         m_content.addAction(self.act_insert_tex)
@@ -610,13 +625,13 @@ class MainWindow(QMainWindow):
         m_content.addSeparator()
         m_content.addAction(self.act_import_svg)
 
-        m_ref = mb.addMenu("参考层(&R)")
+        m_ref = mb.addMenu(tr("参考层(&R)"))
         m_ref.addAction(self.act_add_ref_image)
         m_ref.addAction(self.act_add_ref_svg)
         m_ref.addSeparator()
         m_ref.addAction(self.act_show_reference)
 
-        m_pen = mb.addMenu("扰动(&P)")
+        m_pen = mb.addMenu(tr("扰动(&P)"))
         m_pen.addAction(self.act_perturb_selected)
         m_pen.addAction(self.act_reseed_selected)
         m_pen.addSeparator()
@@ -624,7 +639,7 @@ class MainWindow(QMainWindow):
         m_pen.addSeparator()
         m_pen.addAction(self.act_show_perturb_panel)
 
-        m_machine = mb.addMenu("机器(&M)")
+        m_machine = mb.addMenu(tr("机器(&M)"))
         m_machine.addAction(self.act_gen_gcode)
         m_machine.addAction(self.act_export_gcode)
         m_machine.addSeparator()
@@ -632,17 +647,49 @@ class MainWindow(QMainWindow):
         m_machine.addSeparator()
         m_machine.addAction(self.act_show_machine)
 
-        m_ai = mb.addMenu("AI 排版(&A)")
+        m_ai = mb.addMenu(tr("AI 排版(&A)"))
         m_ai.addAction(self.act_ai_settings)
+
+    def _build_language_menu(self) -> QMenu:
+        """「语言」子菜单：自动（跟随系统）/ 中文 / English。
+
+        界面文案在控件构造时翻译，运行中重建整个主窗口会丢当前文档状态，
+        所以切换写入设置、下次启动生效；菜单里勾选当前偏好。
+        """
+        from ..i18n import LANG_AUTO, LANG_EN, LANG_ZH, LANGUAGE_NAMES
+        menu = QMenu(tr("语言"), self)
+        self._language_group = QActionGroup(self)
+        cur = self.settings.ui_language()
+        for key in (LANG_AUTO, LANG_ZH, LANG_EN):
+            act = QAction(tr(LANGUAGE_NAMES[key]), self)
+            act.setCheckable(True)
+            act.setChecked(key == cur)
+            act.setData(key)
+            act.triggered.connect(
+                lambda checked=False, k=key: self._apply_language_setting(k))
+            self._language_group.addAction(act)
+            menu.addAction(act)
+        return menu
+
+    def _apply_language_setting(self, preference: str) -> None:
+        """保存语言偏好；实际文案在下次启动时套用。"""
+        from ..i18n import current_language, resolve
+        before = current_language()
+        self.settings.set_ui_language(preference)
+        self.settings.sync()
+        if resolve(preference) != before:
+            QMessageBox.information(
+                self, tr("语言已更换"),
+                tr("界面语言将在下次启动 WriterStudio 时生效。"))
 
     def _build_theme_menu(self) -> QMenu:
         """「主题」子菜单：深色/浅色互斥切换（qdarktheme 热切换）。"""
         from .theme import theme_label
-        menu = QMenu("主题", self)
+        menu = QMenu(tr("主题"), self)
         self._theme_group = QActionGroup(self)
         cur = self.settings.ui_theme()
         for key in THEMES:
-            act = QAction(theme_label(key), self)
+            act = QAction(tr(theme_label(key)), self)
             act.setCheckable(True)
             act.setChecked(key == cur)
             act.setData(key)
@@ -653,43 +700,48 @@ class MainWindow(QMainWindow):
         if not theme_available():
             for act in menu.actions():
                 act.setEnabled(False)
-            menu.setToolTip("主题库未安装，主题不可用")
+            menu.setToolTip(tr("主题库未安装，主题不可用"))
         return menu
 
     def _apply_theme_setting(self, key: str) -> None:
         """切换主题：重设全局样式表并持久化（视图菜单 → 主题）。"""
         if not apply_theme(QApplication.instance(), key):
-            self.statusBar().showMessage("主题切换失败（主题库不可用）", 5000)
+            self.statusBar().showMessage(tr("主题切换失败（主题库不可用）"), 5000)
             return
         self.settings.set_ui_theme(key)
         self.settings.sync()
+        # 图标颜色随主题反转（深色白、浅色黑）：先清位图缓存，再重建
+        # 工具栏动作与面板按钮的 QIcon，否则旧图标仍是上一套配色。
+        from . import icons as icons_mod
+        icons_mod.clear_cache()
+        self._apply_action_icons()
+        for panel in (getattr(self, "font_panel", None),
+                      getattr(self, "global_perturb", None)):
+            refresh = getattr(panel, "refresh_icons", None)
+            if refresh is not None:
+                try:
+                    refresh()
+                except Exception:
+                    pass
         self._restyle_stroke_bar()
+        # 历史面板的文字颜色是逐项写进 QListWidgetItem 的，QSS 重建不会
+        # 自动刷新；重画一次，浅色主题下已完成步骤才不会白字白底。
+        try:
+            self.undo_panel._refresh()
+        except Exception:
+            pass
 
     def _restyle_stroke_bar(self) -> None:
         """笔画编辑浮条跟随主题配色（深/浅色下都不突兀，可热切换）。"""
         if not hasattr(self, "_stroke_bar"):
             return
-        pal = self.palette()
+        self._stroke_bar.setStyleSheet(stroke_bar_qss())
 
-        def rgba(c, alpha=235):
-            return f"rgba({c.red()},{c.green()},{c.blue()},{alpha})"
-
-        bg = rgba(pal.color(QPalette.ColorRole.Window))
-        border = pal.color(QPalette.ColorRole.Mid).name()
-        text = pal.color(QPalette.ColorRole.WindowText).name()
-        hl = pal.color(QPalette.ColorRole.Highlight).name()
-        hl_text = pal.color(QPalette.ColorRole.HighlightedText).name()
-        self._stroke_bar.setStyleSheet(
-            f"QWidget {{ background: {bg};"
-            f" border: 1px solid {border}; border-radius: 6px; }}"
-            f"QToolButton {{ border: none; padding: 3px 8px;"
-            f" color: {text}; border-radius: 4px; }}"
-            f"QToolButton:checked {{ background: {hl}; color: {hl_text}; }}")
     def _build_toolbar(self) -> None:
-        tb = QToolBar("主工具栏", self)
+        tb = QToolBar(tr("主工具栏"), self)
         tb.setMovable(False)
         tb.setToolButtonStyle(Qt.ToolButtonIconOnly)   # 图标化（文字进工具提示）
-        tb.setToolTip("主工具栏")
+        tb.setToolTip(tr("主工具栏"))
         self.addToolBar(tb)
         tb.addAction(self.act_undo)
         tb.addAction(self.act_redo)
@@ -730,7 +782,7 @@ class MainWindow(QMainWindow):
             preset_name=self.settings.page_preset_name("")))
 
     def _build_object_panel(self) -> None:
-        self.dock = QDockWidget("对象", self)
+        self.dock = QDockWidget(tr("对象"), self)
         self.dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         self.obj_list = QListWidget()
         self.obj_list.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -784,7 +836,7 @@ class MainWindow(QMainWindow):
         self.settings.sync()
 
     def _build_perturb_panel(self) -> None:
-        self.perturb_dock = QDockWidget("手写扰动", self)
+        self.perturb_dock = QDockWidget(tr("手写扰动"), self)
         self.perturb_dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         # 顶部：选中单个文本对象时出现的「文字属性」区（即改即得）；
         # 下面是原有的手写扰动参数区
@@ -795,7 +847,9 @@ class MainWindow(QMainWindow):
         self.global_perturb.paramsChanged.connect(self._on_global_perturb_changed)
         wrap = QWidget()
         v = QVBoxLayout(wrap)
-        v.setContentsMargins(6, 6, 6, 6)
+        # 左右 4px：英文参数面板最小宽 249px，280px 停靠区扣除边框后只剩
+        # 248px，6px 边距会挤出 1px 横向滚动条
+        v.setContentsMargins(4, 6, 4, 6)
         v.setSpacing(6)
         v.addWidget(self.text_props)
         v.addWidget(self.global_perturb, 1)
@@ -811,7 +865,7 @@ class MainWindow(QMainWindow):
         self.perturb_dock.setVisible(checked)
 
     def _build_machine_panel(self) -> None:
-        self.machine_dock = QDockWidget("机器控制", self)
+        self.machine_dock = QDockWidget(tr("机器控制"), self)
         self.machine_dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         self.machine_panel = MachinePanel(parent=self)
         self.machine_panel.generateRequested.connect(self._generate_preview)
@@ -904,7 +958,7 @@ class MainWindow(QMainWindow):
         objs = self._perturbable_objects()
         if not objs:
             self.statusBar().showMessage(
-                "请先选择一个对象，再调整手写扰动参数。", 4000)
+                tr("请先选择一个对象，再调整手写扰动参数。"), 4000)
             return
         params = self.global_perturb.params()
         # 参数与对象当前值完全一致时跳过（防抖后的重复触发、程序化回填）
@@ -916,7 +970,7 @@ class MainWindow(QMainWindow):
             apply_perturb(o, params, self.font_manager)
             entries.append((o, old, snapshot_object(o)))
         key = "global-perturb:" + ",".join(sorted(o.id for o in objs))
-        self.controller.replace_objects(entries, "调整手写扰动", merge_key=key)
+        self.controller.replace_objects(entries, tr("调整手写扰动"), merge_key=key)
         self.canvas.sync_scene()
 
     def _sync_global_perturb_to_selection(self) -> None:
@@ -948,10 +1002,10 @@ class MainWindow(QMainWindow):
 
     def _update_page_status(self) -> None:
         page = self.controller.doc.page
-        orient = "横向" if page.width > page.height else "纵向"
-        name = f"{page.preset_name} " if page.preset_name else ""
+        orient = tr('横向') if page.width > page.height else tr('纵向')
+        name = f"{tr(page.preset_name)} " if page.preset_name else ""
         self._status_page.setText(
-            f"{name}{page.width:.0f}×{page.height:.0f} mm（{orient}）")
+            trf('{v0}{v1:.0f}×{v2:.0f} mm（{v3}）', v0=name, v1=page.width, v2=page.height, v3=orient))
 
     def _on_doc_geometry_changed(self) -> None:
         # 撤销/重做「页面设置」等会改变场景范围，需同步
@@ -975,7 +1029,9 @@ class MainWindow(QMainWindow):
         self.obj_list.blockSignals(True)
         self.obj_list.clear()
         for obj in self.controller.doc.objects:
-            item = QListWidgetItem(self._object_item_label(obj))
+            label = self._object_item_label(obj)
+            item = QListWidgetItem(label)
+            item.setToolTip(label)
             item.setData(Qt.UserRole, obj.id)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Checked if obj.visible else Qt.Unchecked)
@@ -987,11 +1043,11 @@ class MainWindow(QMainWindow):
     def _object_item_label(obj) -> str:
         flags = []
         if not obj.visible:
-            flags.append("隐藏")
+            flags.append(tr("隐藏"))
         if obj.locked:
-            flags.append("锁定")
+            flags.append(tr("锁定"))
         suffix = ("  [" + "/".join(flags) + "]") if flags else ""
-        return f"{obj.name}  ({len(obj.local_strokes)} 笔){suffix}"
+        return trf('{v0}  ({v1} 笔){v2}', v0=obj.name, v1=len(obj.local_strokes), v2=suffix)
 
     def _on_object_item_changed(self, item) -> None:
         obj = self.controller.doc.find(item.data(Qt.UserRole))
@@ -1000,7 +1056,7 @@ class MainWindow(QMainWindow):
         want = item.checkState() == Qt.Checked
         if want != obj.visible:
             self.controller.set_object_flags(
-                obj, "显示对象" if want else "隐藏对象", {"visible": want})
+                obj, tr('显示对象') if want else tr('隐藏对象'), {"visible": want})
             self.canvas.sync_scene()
 
     def _refresh_selection(self) -> None:
@@ -1033,7 +1089,7 @@ class MainWindow(QMainWindow):
         se = getattr(self, "stroke_editor", None)
         if se is not None and se.active:
             if not se.delete_selected():
-                self.statusBar().showMessage("请先点选笔画再删除。", 3000)
+                self.statusBar().showMessage(tr("请先点选笔画再删除。"), 3000)
             return
         objs = self._selected()
         if objs:
@@ -1080,10 +1136,10 @@ class MainWindow(QMainWindow):
         # 以第一个对象的目标状态为准应用到全部
         target = not objs[0].visible
         self.controller.undo_stack.beginMacro(
-            "显示对象" if target else "隐藏对象")
+            tr('显示对象') if target else tr('隐藏对象'))
         for o in objs:
             self.controller.set_object_flags(
-                o, "显示对象" if target else "隐藏对象", {"visible": target})
+                o, tr('显示对象') if target else tr('隐藏对象'), {"visible": target})
         self.controller.undo_stack.endMacro()
         self.canvas.sync_scene()
 
@@ -1093,10 +1149,10 @@ class MainWindow(QMainWindow):
             return
         target = not objs[0].locked
         self.controller.undo_stack.beginMacro(
-            "锁定对象" if target else "解锁对象")
+            tr('锁定对象') if target else tr('解锁对象'))
         for o in objs:
             self.controller.set_object_flags(
-                o, "锁定对象" if target else "解锁对象", {"locked": target})
+                o, tr('锁定对象') if target else tr('解锁对象'), {"locked": target})
         self.controller.undo_stack.endMacro()
         self.canvas.sync_scene()
 
@@ -1110,7 +1166,7 @@ class MainWindow(QMainWindow):
     def _align(self, mode: str) -> None:
         targets = [m for m in self._targets() if m.visible]
         if len(targets) < 2:
-            self.statusBar().showMessage("请先选择至少两个对象再对齐。", 4000)
+            self.statusBar().showMessage(tr("请先选择至少两个对象再对齐。"), 4000)
             return
         boxes = {id(m): m.world_bbox() for m in targets}
         boxes = {k: b for k, b in boxes.items() if not b.is_empty}
@@ -1133,7 +1189,7 @@ class MainWindow(QMainWindow):
                 ref = (min(b.y0 for b in boxes.values())
                        + max(b.y1 for b in boxes.values())) / 2.0
         from ..core.geometry import AffineTransform
-        self.controller.undo_stack.beginMacro(f"对齐（{mode}）")
+        self.controller.undo_stack.beginMacro(trf('对齐（{v0}）', v0=mode))
         for m in targets:
             b = m.world_bbox()
             if b.is_empty:
@@ -1153,14 +1209,14 @@ class MainWindow(QMainWindow):
             if dx == 0.0 and dy == 0.0:
                 continue
             self.controller.set_model_transform(
-                m, AffineTransform.translate(dx, dy) @ m.transform, "对齐")
+                m, AffineTransform.translate(dx, dy) @ m.transform, tr("对齐"))
         self.controller.undo_stack.endMacro()
         self.canvas.sync_scene()
 
     def _distribute(self, axis: str) -> None:
         targets = [m for m in self._targets() if m.visible]
         if len(targets) < 3:
-            self.statusBar().showMessage("请先选择至少三个对象再分布。", 4000)
+            self.statusBar().showMessage(tr("请先选择至少三个对象再分布。"), 4000)
             return
         from ..core.geometry import AffineTransform
         key = (lambda m: m.world_bbox().center[0]) if axis == "h" \
@@ -1170,7 +1226,7 @@ class MainWindow(QMainWindow):
         lo, hi = centers[0], centers[-1]
         step = (hi - lo) / (len(ordered) - 1)
         self.controller.undo_stack.beginMacro(
-            "水平分布" if axis == "h" else "垂直分布")
+            tr('水平分布') if axis == "h" else tr('垂直分布'))
         for i, m in enumerate(ordered):
             want = lo + step * i
             cur = key(m)
@@ -1179,13 +1235,13 @@ class MainWindow(QMainWindow):
                 continue
             delta = (d, 0.0) if axis == "h" else (0.0, d)
             self.controller.set_model_transform(
-                m, AffineTransform.translate(*delta) @ m.transform, "分布")
+                m, AffineTransform.translate(*delta) @ m.transform, tr("分布"))
         self.controller.undo_stack.endMacro()
         self.canvas.sync_scene()
 
     def _zoom_selection(self) -> None:
         if not self.canvas.zoom_to_selection():
-            self.statusBar().showMessage("请先选择对象再缩放到选中。", 3000)
+            self.statusBar().showMessage(tr("请先选择对象再缩放到选中。"), 3000)
 
     # --------------------------------------------------------- 缺字 / 超界
     def _report_missing(self, obj) -> None:
@@ -1198,9 +1254,9 @@ class MainWindow(QMainWindow):
         if not missing:
             return
         shown = "".join(missing[:12])
-        more = f" 等 {len(missing)} 个" if len(missing) > 12 else ""
+        more = trf(' 等 {v0} 个', v0=len(missing)) if len(missing) > 12 else ""
         self.statusBar().showMessage(
-            f"缺字未绘制：{shown}{more}（请添加含该字符的字体）", 8000)
+            trf('缺字未绘制：{v0}{v1}（请添加含该字符的字体）', v0=shown, v1=more), 8000)
 
     def _check_bounds(self):
         """检查书写对象是否超出页面，返回 (对象列表, 是否越界)。"""
@@ -1224,16 +1280,15 @@ class MainWindow(QMainWindow):
         if not out:
             return True
         names = "、".join(o.name for o in out[:5])
-        more = f" 等 {len(out)} 个" if len(out) > 5 else ""
+        more = trf(' 等 {v0} 个', v0=len(out)) if len(out) > 5 else ""
         if not self.isVisible():
             # 无人值守（测试/批处理）时只记状态栏，不弹模态框
-            self.statusBar().showMessage(f"内容超出页面：{names}{more}", 8000)
+            self.statusBar().showMessage(trf('内容超出页面：{v0}{v1}', v0=names, v1=more), 8000)
             return True
-        r = QMessageBox.warning(
-            self, "内容超出页面",
-            f"以下内容超出页面范围：\n{names}{more}\n\n仍要继续吗？",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
-        return r == QMessageBox.Yes
+        return ask_yes_no(
+            self, tr("内容超出页面"),
+            trf('以下内容超出页面范围：\n{v0}{v1}\n\n仍要继续吗？', v0=names, v1=more),
+            default_yes=True, warning=True)
 
     # ------------------------------------------------------------ 文本命令
     def _default_font_chain(self) -> list[str]:
@@ -1283,7 +1338,7 @@ class MainWindow(QMainWindow):
         self._remember_font_chain(spec.font_names)
         obj = make_text_object(spec, self.font_manager)
         if not obj.local_strokes:
-            QMessageBox.warning(self, "无法生成", "所选字体无法绘制该文本（缺字）。")
+            QMessageBox.warning(self, tr("无法生成"), tr("所选字体无法绘制该文本（缺字）。"))
             return
         self._place_object(obj)
         self.controller.add_object(obj)
@@ -1300,10 +1355,10 @@ class MainWindow(QMainWindow):
         """
         objs = self._selected()
         if not objs or len(objs) > 1:
-            msg = ("请先选择一个对象（文本/公式/Markdown/SVG 等）。"
-                   if not objs else "请只选择一个对象再编辑。")
+            msg = (tr('请先选择一个对象（文本/公式/Markdown/SVG 等）。')
+                   if not objs else tr('请只选择一个对象再编辑。'))
             if self.isVisible():
-                QMessageBox.information(self, "编辑内容", msg)
+                QMessageBox.information(self, tr("编辑内容"), msg)
             else:
                 self.statusBar().showMessage(msg, 5000)
             return
@@ -1333,9 +1388,8 @@ class MainWindow(QMainWindow):
             self._perturb_selected()
         else:
             QMessageBox.information(
-                self, "编辑对象",
-                f"「{obj.name}」是静态图形，无可编辑的源内容。\n"
-                "可拖动/缩放/旋转，或使用扰动菜单。")
+                self, tr("编辑对象"),
+                trf('「{v0}」是静态图形，无可编辑的源内容。\n可拖动/缩放/旋转，或使用扰动菜单。', v0=obj.name))
 
     def _edit_content(self, obj) -> None:
         """重新打开富内容对话框编辑（Markdown/公式/SVG）。"""
@@ -1497,31 +1551,26 @@ class MainWindow(QMainWindow):
         bar.setFocusPolicy(Qt.NoFocus)
         self._bend_btn = QToolButton(bar)
         self._bend_btn.setFocusPolicy(Qt.NoFocus)
-        self._bend_btn.setText("弯折")
+        self._bend_btn.setText(tr("弯折"))
         self._bend_btn.setCheckable(True)
         self._bend_btn.setToolTip(
-            "弯折模式：拖动笔画上的点做局部扭曲（衰减半径≈字号的 1/3）")
+            tr("弯折模式：拖动笔画上的点做局部扭曲（衰减半径≈字号的 1/3）"))
         self._bend_btn.toggled.connect(
             lambda on: se.set_bend_mode(on))
         h.addWidget(self._bend_btn)
         dl = QToolButton(bar)
         dl.setFocusPolicy(Qt.NoFocus)
-        dl.setText("删除笔画")
+        dl.setText(tr("删除笔画"))
         dl.clicked.connect(self._delete_selected_stroke)
         h.addWidget(dl)
         done = QToolButton(bar)
         done.setFocusPolicy(Qt.NoFocus)
-        done.setText("完成")
-        done.setToolTip("退出笔画编辑（Esc）")
+        done.setText(tr("完成"))
+        done.setToolTip(tr("退出笔画编辑（Esc）"))
         done.clicked.connect(self._exit_stroke_edit)
         h.addWidget(done)
-        bar.setStyleSheet(
-            "QWidget { background: rgba(250,250,252,235);"
-            " border: 1px solid #b8c4d0; border-radius: 6px; }"
-            "QToolButton { border: none; padding: 3px 8px; }")
         self._stroke_bar = bar
-        # 覆写为主题配色（背景/文字/选中色取自当前调色板，
-        # 深/浅色主题及热切换都跟随，不再硬编码浅色）
+        # 配色取自主题语义色（深/浅色主题及热切换都跟随，不再硬编码浅色）
         self._restyle_stroke_bar()
         bar.hide()
         # 浮条是视口浮动控件：QAbstractScrollArea 滚动的 blit 会把它挪出
@@ -1534,7 +1583,7 @@ class MainWindow(QMainWindow):
             if not objs:
                 self.act_stroke_edit.setChecked(False)
                 self.statusBar().showMessage(
-                    "请先选择一个对象，再进入笔画编辑。", 4000)
+                    tr("请先选择一个对象，再进入笔画编辑。"), 4000)
                 return
             if not hasattr(self, "stroke_editor"):
                 self._build_stroke_editor()
@@ -1546,10 +1595,10 @@ class MainWindow(QMainWindow):
             self._stroke_bar.move(10, 10)
             self._stroke_bar.show()
             self.statusBar().showMessage(
-                "笔画编辑：鼠标下的笔画自动高亮，点击选中；拖动笔画请按在"
+                tr("笔画编辑：鼠标下的笔画自动高亮，点击选中；拖动笔画请按在"
                 "笔画线上（空白处拖动=框选，Shift 追加）；拖动即移动，"
                 "按在笔画旁空白处的角点上缩放、上方手柄旋转（单选）；"
-                "Delete 删除选中；勾选「弯折」后拖点扭曲。Esc 退出。", 9000)
+                "Delete 删除选中；勾选「弯折」后拖点扭曲。Esc 退出。"), 9000)
         else:
             self._exit_stroke_edit()
 
@@ -1595,7 +1644,7 @@ class MainWindow(QMainWindow):
             strokes[index] = local_stroke
         obj.local_strokes = strokes
         self.controller.replace_objects(
-            [(obj, old, snapshot_object(obj))], "编辑笔画",
+            [(obj, old, snapshot_object(obj))], tr("编辑笔画"),
             merge_key=f"stroke-edit:{obj.id}")
         self.canvas.sync_scene()
 
@@ -1608,7 +1657,7 @@ class MainWindow(QMainWindow):
             strokes.pop(index)
         obj.local_strokes = strokes
         self.controller.replace_objects(
-            [(obj, old, snapshot_object(obj))], "删除笔画")
+            [(obj, old, snapshot_object(obj))], tr("删除笔画"))
         self.canvas.sync_scene()
 
     def _commit_strokes_edit(self, obj, indices, locals_) -> None:
@@ -1624,7 +1673,7 @@ class MainWindow(QMainWindow):
             strokes[i] = lc
         obj.local_strokes = strokes
         self.controller.replace_objects(
-            [(obj, old, snapshot_object(obj))], "编辑笔画",
+            [(obj, old, snapshot_object(obj))], tr("编辑笔画"),
             merge_key=f"stroke-edit:{obj.id}")
         self.canvas.sync_scene()
 
@@ -1646,7 +1695,7 @@ class MainWindow(QMainWindow):
             return
         obj.local_strokes = strokes
         self.controller.replace_objects(
-            [(obj, old, snapshot_object(obj))], "删除笔画")
+            [(obj, old, snapshot_object(obj))], tr("删除笔画"))
         self.canvas.sync_scene()
 
     @staticmethod
@@ -1669,7 +1718,7 @@ class MainWindow(QMainWindow):
         se = self.stroke_editor
         if hasattr(self, "stroke_editor") and se.active:
             if not se.delete_selected():
-                self.statusBar().showMessage("请先点选一条笔画。", 3000)
+                self.statusBar().showMessage(tr("请先点选一条笔画。"), 3000)
 
     def _on_text_props_changed(self) -> None:
         """属性面板改动 → 覆盖写回选中文本对象（即改即得，可撤销）。"""
@@ -1689,7 +1738,7 @@ class MainWindow(QMainWindow):
         spec.char_spacing = vals["char_spacing"]
         spec.line_spacing = vals["line_spacing"]
         spec.frame_width = vals["frame_width"]
-        label, key = "修改文字属性", field or "props"
+        label, key = tr("修改文字属性"), field or "props"
         old = snapshot_object(obj)
         update_text_object(obj, spec, self.font_manager)
         self.controller.replace_objects(
@@ -1712,10 +1761,10 @@ class MainWindow(QMainWindow):
         try:
             obj = self._build_content_object(payload)
         except Exception as exc:
-            QMessageBox.critical(self, "插入失败", str(exc))
+            QMessageBox.critical(self, tr("插入失败"), str(exc))
             return
         if obj is None or not obj.local_strokes:
-            QMessageBox.warning(self, "无内容", "未能生成任何笔画。")
+            QMessageBox.warning(self, tr("无内容"), tr("未能生成任何笔画。"))
             return
         self._place_object(obj)
         self.controller.add_object(obj)
@@ -1769,7 +1818,7 @@ class MainWindow(QMainWindow):
         if payload.kind == KIND_SVG:
             path = d.get("path", "")
             if not path:
-                raise ValueError("未选择 SVG 文件")
+                raise ValueError(tr("未选择 SVG 文件"))
             return make_svg_object(
                 path, d.get("target_width"),
                 wobble_amplitude=float(d.get("wobble_amplitude", 0.0)),
@@ -1830,8 +1879,8 @@ class MainWindow(QMainWindow):
         objs = self._perturbable_objects()
         if not objs:
             QMessageBox.information(
-                self, "手写扰动",
-                "请先选择一个对象（文本或矢量图形均可）。")
+                self, tr("手写扰动"),
+                tr("请先选择一个对象（文本或矢量图形均可）。"))
             return
         obj = objs[0]
         before = snapshot_object(obj)
@@ -1847,7 +1896,7 @@ class MainWindow(QMainWindow):
             params = resolve_perturb(obj) or PerturbParams()
             from .perturb_panel import PerturbDialog
             hint = object_reference_size(obj)
-            dlg = PerturbDialog(params, title=f"手写扰动 — {obj.name}",
+            dlg = PerturbDialog(params, title=trf('手写扰动 — {v0}', v0=obj.name),
                                 size_hint=hint, parent=self)
             if dlg.exec() != PerturbDialog.Accepted:
                 return
@@ -1862,7 +1911,7 @@ class MainWindow(QMainWindow):
         objs = self._perturbable_objects()
         if not objs:
             return
-        self.controller.undo_stack.beginMacro("重新随机")
+        self.controller.undo_stack.beginMacro(tr("重新随机"))
         for o in objs:
             p = resolve_perturb(o)
             if p is None:
@@ -1883,7 +1932,7 @@ class MainWindow(QMainWindow):
         if not objs:
             return
         off = PerturbParams(enabled=False)
-        self.controller.undo_stack.beginMacro("清除扰动")
+        self.controller.undo_stack.beginMacro(tr("清除扰动"))
         for o in objs:
             before = snapshot_object(o)
             apply_perturb(o, off, self.font_manager)
@@ -1913,9 +1962,9 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ 文件命令
     def _window_title(self) -> str:
-        name = Path(self.project_path).name if self.project_path else "未命名"
+        name = Path(self.project_path).name if self.project_path else tr('未命名')
         mark = " *" if self._dirty else ""
-        return f"{name}{mark} — WriterStudio"
+        return trf('{v0}{v1} — WriterStudio', v0=name, v1=mark)
 
     def _update_title(self) -> None:
         self.setWindowTitle(self._window_title())
@@ -1956,27 +2005,26 @@ class MainWindow(QMainWindow):
             return False
         from PySide6.QtWidgets import QMessageBox
         snap = recovery.newest()
-        where = f"\n\n快照文件：{snap}" if snap is not None else ""
-        ans = QMessageBox.question(
-            self, "恢复未保存的文档",
-            "检测到上次异常退出时未保存的内容，是否恢复？"
+        where = trf('\n\n快照文件：{v0}', v0=snap) if snap is not None else ""
+        if not ask_yes_no(
+            self, tr("恢复未保存的文档"),
+            tr("检测到上次异常退出时未保存的内容，是否恢复？")
             + where
-            + "\n（选「否」将丢弃该快照，不影响已保存的项目文件）",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes)
-        if ans != QMessageBox.StandardButton.Yes:
+            + tr("\n（选「否」将丢弃该快照，不影响已保存的项目文件）"),
+            default_yes=True,
+        ):
             recovery.clear()
             return False
         try:
             project = recovery.load()
         except Exception as exc:
-            QMessageBox.warning(self, "恢复失败", str(exc))
+            QMessageBox.warning(self, tr("恢复失败"), str(exc))
             recovery.clear()
             return False
         self._apply_project(project)
         self._set_current_path(None)      # 恢复到未命名文档，另存为准
         self._mark_dirty()                # 仍是未保存状态
-        self.statusBar().showMessage("已恢复上次未保存的内容，请另存为项目文件",
+        self.statusBar().showMessage(tr("已恢复上次未保存的内容，请另存为项目文件"),
                                      8000)
         return True
 
@@ -2032,14 +2080,12 @@ class MainWindow(QMainWindow):
         """
         if not self._dirty or not self.confirm_on_close or not self.isVisible():
             return True
-        r = QMessageBox.question(
-            self, "未保存的修改",
-            "当前项目有未保存的修改，是否保存？",
-            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
-            QMessageBox.Save)
-        if r == QMessageBox.Save:
+        choice = ask_save_discard_cancel(
+            self, tr("未保存的修改"),
+            tr("当前项目有未保存的修改，是否保存？"))
+        if choice == "save":
             return self._save_project()
-        return r == QMessageBox.Discard
+        return choice == "discard"
 
     def _new_project(self) -> None:
         if not self._confirm_discard():
@@ -2052,15 +2098,15 @@ class MainWindow(QMainWindow):
         self._set_current_path(None)
         self._mark_clean()
         self.canvas.fit_page()
-        self.statusBar().showMessage("已新建项目", 3000)
+        self.statusBar().showMessage(tr("已新建项目"), 3000)
 
     def _open_project(self) -> None:
         if not self._confirm_discard():
             return
         start_dir = filedialog.start_dir()
         path, _ = QFileDialog.getOpenFileName(
-            self, "打开项目", start_dir,
-            f"WriterStudio 项目 (*{FILE_SUFFIX});;所有文件 (*)")
+            self, tr("打开项目"), start_dir,
+            trf('WriterStudio 项目 (*{v0});;所有文件 (*)', v0=FILE_SUFFIX))
         if not path:
             return
         self._load_project_path(path)
@@ -2069,7 +2115,7 @@ class MainWindow(QMainWindow):
         try:
             project = load_project(path)
         except Exception as exc:
-            QMessageBox.critical(self, "打开失败", f"{path}\n\n{exc}")
+            QMessageBox.critical(self, tr("打开失败"), f"{path}\n\n{exc}")
             return False
         n = self._apply_project(project)
         self._set_current_path(path)
@@ -2077,9 +2123,9 @@ class MainWindow(QMainWindow):
         self.settings.add_recent_file(path)
         self.settings.set_last_dir(str(Path(path).parent))
         self._rebuild_recent_menu()
-        msg = f"已打开 {Path(path).name}"
+        msg = trf('已打开 {v0}', v0=Path(path).name)
         if n:
-            msg += f"（重新生成 {n} 个对象）"
+            msg += trf('（重新生成 {v0} 个对象）', v0=n)
         self.statusBar().showMessage(msg, 4000)
         self._warn_if_shared(path)
         return True
@@ -2103,14 +2149,8 @@ class MainWindow(QMainWindow):
             return
         pids = "、".join(str(w.get("pid")) for w in who[:3])
         QMessageBox.warning(
-            self, "该文件已在另一个实例中打开",
-            f"「{Path(path).name}」已被另一个 WriterStudio 实例"
-            f"（PID {pids}）打开。\n\n"
-            "两个实例各编各的，后保存的那份会整份覆盖先保存的——"
-            "建议只留一个实例编辑这个文件。\n\n"
-            "万一被覆盖：未保存的改动会定期快照到\n"
-            f"{recovery.home_dir()}（recovery-<PID>.wsproj），"
-            "可从最新一份快照里找回。")
+            self, tr("该文件已在另一个实例中打开"),
+            trf('「{v0}」已被另一个 WriterStudio 实例（PID {v1}）打开。\n\n两个实例各编各的，后保存的那份会整份覆盖先保存的——建议只留一个实例编辑这个文件。\n\n万一被覆盖：未保存的改动会定期快照到\n{v2}（recovery-<PID>.wsproj），可从最新一份快照里找回。', v0=Path(path).name, v1=pids, v2=recovery.home_dir()))
 
     def _save_project(self) -> bool:
         if not self.project_path:
@@ -2131,7 +2171,7 @@ class MainWindow(QMainWindow):
                     return self._load_project_path(str(exc.path))
                 return False
             except Exception as exc:
-                QMessageBox.critical(self, "保存失败", str(exc))
+                QMessageBox.critical(self, tr("保存失败"), str(exc))
                 return False
             break
         self._set_current_path(path)
@@ -2144,7 +2184,7 @@ class MainWindow(QMainWindow):
         self.settings.add_recent_file(self.project_path)
         self.settings.set_last_dir(str(Path(self.project_path).parent))
         self._rebuild_recent_menu()
-        self.statusBar().showMessage(f"已保存 {Path(self.project_path).name}", 3000)
+        self.statusBar().showMessage(trf('已保存 {v0}', v0=Path(self.project_path).name), 3000)
         return True
 
     def _ask_external_change(self, exc: ExternalChangeError) -> str:
@@ -2154,20 +2194,16 @@ class MainWindow(QMainWindow):
         """
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Warning)
-        box.setWindowTitle("文件已被外部修改")
+        box.setWindowTitle(tr("文件已被外部修改"))
         box.setText(
-            f"「{exc.path.name}」在打开之后被别的程序或实例改过，"
-            "直接保存会把对方写进去的内容整份覆盖。\n\n"
-            f"磁盘上的版本：{exc.actual.mtime_text()}"
-            f"（{exc.actual.size / 1e6:.2f} MB）\n"
-            f"内存里的版本：{exc.expected.size / 1e6:.2f} MB")
-        overwrite = box.addButton("覆盖保存", QMessageBox.ButtonRole.DestructiveRole)
-        save_as = box.addButton("另存为…", QMessageBox.ButtonRole.ActionRole)
-        reload_btn = box.addButton("重新载入磁盘版本", QMessageBox.ButtonRole.ActionRole)
-        box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+            trf('「{v0}」在打开之后被别的程序或实例改过，直接保存会把对方写进去的内容整份覆盖。\n\n磁盘上的版本：{v1}（{v2:.2f} MB）\n内存里的版本：{v3:.2f} MB', v0=exc.path.name, v1=exc.actual.mtime_text(), v2=exc.actual.size / 1e6, v3=exc.expected.size / 1e6))
+        overwrite = box.addButton(tr("覆盖保存"), QMessageBox.ButtonRole.DestructiveRole)
+        save_as = box.addButton(tr("另存为…"), QMessageBox.ButtonRole.ActionRole)
+        reload_btn = box.addButton(tr("重新载入磁盘版本"), QMessageBox.ButtonRole.ActionRole)
+        box.addButton(tr("取消"), QMessageBox.ButtonRole.RejectRole)
         box.setInformativeText(
-            "「重新载入磁盘版本」会丢弃内存中的内容"
-            + ("（包括当前未保存的改动）" if self._dirty else "") + "。")
+            tr("「重新载入磁盘版本」会丢弃内存中的内容")
+            + (tr('（包括当前未保存的改动）') if self._dirty else "") + tr("。"))
         box.exec()
         clicked = box.clickedButton()
         if clicked is overwrite:
@@ -2179,10 +2215,10 @@ class MainWindow(QMainWindow):
         return "cancel"
 
     def _save_project_as(self) -> bool:
-        default = self.project_path or f"未命名{FILE_SUFFIX}"
+        default = self.project_path or trf('未命名{v0}', v0=FILE_SUFFIX)
         path, _ = QFileDialog.getSaveFileName(
-            self, "另存为", filedialog.path_for(default),
-            f"WriterStudio 项目 (*{FILE_SUFFIX});;所有文件 (*)")
+            self, tr("另存为"), filedialog.path_for(default),
+            trf('WriterStudio 项目 (*{v0});;所有文件 (*)', v0=FILE_SUFFIX))
         if not path:
             return False
         if not path.lower().endswith(FILE_SUFFIX):
@@ -2225,8 +2261,8 @@ class MainWindow(QMainWindow):
         self.canvas._update_scene_rect()
         self.canvas.fit_page()
         self.statusBar().showMessage(
-            f"页面：{new.width:.0f}×{new.height:.0f} mm"
-            + (f"（{new.preset_name}）" if new.preset_name else ""), 4000)
+            trf('页面：{v0:.0f}×{v1:.0f} mm', v0=new.width, v1=new.height)
+            + (trf('（{v0}）', v0=new.preset_name) if new.preset_name else ""), 4000)
 
     def _toggle_page_guide(self, checked: bool) -> None:
         self.canvas.show_page_guide = bool(checked)
@@ -2244,7 +2280,7 @@ class MainWindow(QMainWindow):
         """
         page = self.controller.doc.page
         rot, new_w, new_h = page_rotation(direction, page.width, page.height)
-        label = ROTATE_LABELS.get(direction, direction)
+        label = tr(ROTATE_LABELS.get(direction, direction))
         objs = list(self.controller.doc.objects)
         refs = list(self.controller.doc.references)
         # 起点标记是纸面上的物理参考点：纸转它也转，否则校准锚点漂移
@@ -2253,16 +2289,16 @@ class MainWindow(QMainWindow):
             marker_q_old = self._machine_to_page(
                 self.machine_panel.start_point.pen_marker)
 
-        self.controller.undo_stack.beginMacro(f"旋转纸张（{label}）")
+        self.controller.undo_stack.beginMacro(trf('旋转纸张（{v0}）', v0=label))
         for o in objs:
-            self.controller.set_model_transform(o, rot @ o.transform, "旋转纸张")
+            self.controller.set_model_transform(o, rot @ o.transform, tr("旋转纸张"))
         for r in refs:
             self.controller.edit_reference(
-                r, "旋转纸张", {"transform": rot @ r.transform})
+                r, tr("旋转纸张"), {"transform": rot @ r.transform})
         self.controller.set_page(
             PageSpec(page.width, page.height, page.margin, page.preset_name),
             PageSpec(new_w, new_h, page.margin, page.preset_name),
-            f"旋转纸张（{label}）")
+            trf('旋转纸张（{v0}）', v0=label))
         self.controller.undo_stack.endMacro()
 
         if marker_q_old is not None:
@@ -2274,23 +2310,21 @@ class MainWindow(QMainWindow):
         self._on_machine_config_changed()
         self.settings.set_page_size(new_w, new_h)
         self.statusBar().showMessage(
-            f"已{label}旋转纸张：{new_w:.0f}×{new_h:.0f} mm"
-            f"（{len(objs)} 个对象、{len(refs)} 个参考图随之旋转；"
-            f"机械原点保持在左上角）", 5000)
+            trf('已{v0}旋转纸张：{v1:.0f}×{v2:.0f} mm（{v3} 个对象、{v4} 个参考图随之旋转；机械原点保持在左上角）', v0=label, v1=new_w, v2=new_h, v3=len(objs), v4=len(refs)), 5000)
 
     # ------------------------------------------------------------ 参考层
     def _add_reference_image(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "添加参考图片", filedialog.start_dir(),
-            "图片 (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp *.gif);;所有文件 (*)")
+            self, tr("添加参考图片"), filedialog.start_dir(),
+            tr("图片 (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp *.gif);;所有文件 (*)"))
         if not path:
             return
         self._add_reference(path, KIND_IMAGE)
 
     def _add_reference_svg(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "添加参考 SVG", filedialog.start_dir(),
-            "SVG (*.svg *.svgz);;所有文件 (*)")
+            self, tr("添加参考 SVG"), filedialog.start_dir(),
+            tr("SVG (*.svg *.svgz);;所有文件 (*)"))
         if not path:
             return
         self._add_reference(path, REF_KIND_SVG)
@@ -2299,7 +2333,7 @@ class MainWindow(QMainWindow):
         try:
             ref = make_reference_from_file(path, kind=kind)
         except Exception as exc:
-            QMessageBox.critical(self, "添加参考图失败", str(exc))
+            QMessageBox.critical(self, tr("添加参考图失败"), str(exc))
             return
         # 默认缩放到页边距内并居中
         page = self.controller.doc.page
@@ -2309,7 +2343,7 @@ class MainWindow(QMainWindow):
         self.reference_panel.select_ref(ref)
         self.canvas.select_reference(ref)
         filedialog.remember(path)
-        self.statusBar().showMessage(f"已添加参考图：{Path(path).name}", 4000)
+        self.statusBar().showMessage(trf('已添加参考图：{v0}', v0=Path(path).name), 4000)
 
     def _on_reference_activated(self, ref) -> None:
         """双击参考图：选中并聚焦到面板（可改透明度/适应/删除）。"""
@@ -2484,12 +2518,12 @@ class MainWindow(QMainWindow):
                 link.request_status()
             except Exception as exc:
                 self._pen_read_pending = False
-                self.statusBar().showMessage(f"读取失败：{exc}", 5000)
+                self.statusBar().showMessage(trf('读取失败：{v0}', v0=exc), 5000)
                 return
-            self.statusBar().showMessage("正在读取笔头位置…", 2000)
+            self.statusBar().showMessage(tr("正在读取笔头位置…"), 2000)
         else:
             self.statusBar().showMessage(
-                "未连接机器：请先连接，或点「手动标记起点」", 5000)
+                tr("未连接机器：请先连接，或点「手动标记起点」"), 5000)
 
     def _apply_read_pen(self, pos) -> None:
         """把读到的笔位落到起点上。
@@ -2503,8 +2537,7 @@ class MainWindow(QMainWindow):
             self._register_pen_at(pos)
             return
         self._set_start_from_machine(
-            pos, f"已把笔头当前位置 ({pos[0]:.1f}, {pos[1]:.1f}) mm "
-                 f"设为写字起点")
+            pos, trf('已把笔头当前位置 ({v0:.1f}, {v1:.1f}) mm 设为写字起点', v0=pos[0], v1=pos[1]))
 
     def _on_machine_status_for_marker(self, status) -> None:
         # 校准请求优先（保持标记不动）
@@ -2537,7 +2570,7 @@ class MainWindow(QMainWindow):
         marker = self.machine_panel.start_point.pen_marker
         if marker is None:
             self.statusBar().showMessage(
-                "请先放置起点标记（用「手动标记起点」或拖动红色标记）", 5000)
+                tr("请先放置起点标记（用「手动标记起点」或拖动红色标记）"), 5000)
             return
         pos = self._read_machine_pos()
         if pos is not None:
@@ -2550,12 +2583,12 @@ class MainWindow(QMainWindow):
                 link.request_status()
             except Exception as exc:
                 self._pen_register_pending = False
-                self.statusBar().showMessage(f"读取失败：{exc}", 5000)
+                self.statusBar().showMessage(trf('读取失败：{v0}', v0=exc), 5000)
                 return
-            self.statusBar().showMessage("正在读取笔头位置…", 2000)
+            self.statusBar().showMessage(tr("正在读取笔头位置…"), 2000)
         else:
             self.statusBar().showMessage(
-                "未连接机器：请先连接并把笔移到标记处，再点校准", 5000)
+                tr("未连接机器：请先连接并把笔移到标记处，再点校准"), 5000)
 
     def _register_pen_at(self, machine_pos) -> None:
         """记录笔位并切到笔位校准模式（标记保持不变）。"""
@@ -2563,15 +2596,14 @@ class MainWindow(QMainWindow):
             MODE_REGISTERED, machine_pos[0], machine_pos[1])
         self._on_machine_config_changed()
         self.statusBar().showMessage(
-            f"已用笔位校准：标记处 = 机器坐标 "
-            f"({machine_pos[0]:.1f}, {machine_pos[1]:.1f}) mm", 5000)
+            trf('已用笔位校准：标记处 = 机器坐标 ({v0:.1f}, {v1:.1f}) mm', v0=machine_pos[0], v1=machine_pos[1]), 5000)
         self._mark_dirty()
 
     def _on_mark_start_toggled(self, checked: bool) -> None:
         """「手动标记起点」：画布单击一点作为写字起点。"""
         if checked:
             self.canvas.set_pick_mode(True, self._on_start_marked)
-            self.statusBar().showMessage("请在画布上单击写字起点…")
+            self.statusBar().showMessage(tr("请在画布上单击写字起点…"))
         else:
             self.canvas.set_pick_mode(False, None)
 
@@ -2580,7 +2612,7 @@ class MainWindow(QMainWindow):
         self.machine_panel.reset_mark_start()
         marker = self._page_to_machine((x, y))
         self._set_start_from_machine(
-            marker, f"写字起点已设为机器坐标 ({marker[0]:.1f}, {marker[1]:.1f}) mm")
+            marker, trf('写字起点已设为机器坐标 ({v0:.1f}, {v1:.1f}) mm', v0=marker[0], v1=marker[1]))
 
     def _on_pen_marker_moved(self, x: float, y: float) -> None:
         """画布拖动起点标记（页面坐标）→ 起点跟随标记。
@@ -2601,8 +2633,8 @@ class MainWindow(QMainWindow):
                 MODE_REGISTERED, marker[0] + t[0], marker[1] + t[1])
             self._mark_dirty()
             self.statusBar().showMessage(
-                "标记已移动，校准平移保持不变（书写内容不动）；"
-                "如需以新位置为准，把笔移到标记处重新校准", 5000)
+                tr("标记已移动，校准平移保持不变（书写内容不动）；"
+                "如需以新位置为准，把笔移到标记处重新校准"), 5000)
             return
         self._set_start_from_machine(marker)
 
@@ -2610,7 +2642,7 @@ class MainWindow(QMainWindow):
         """「移除手动标记点」：清掉标记（退出笔位校准），画布不再显示。"""
         self.machine_panel.remove_start_marker()
         self._mark_dirty()
-        self.statusBar().showMessage("已移除手动标记点", 4000)
+        self.statusBar().showMessage(tr("已移除手动标记点"), 4000)
 
     def _on_move_pen_to_marker(self) -> None:
         """把笔头移动到起点标记（机器坐标，直接 G0）。
@@ -2625,11 +2657,11 @@ class MainWindow(QMainWindow):
         else:
             marker = self._pen_marker_machine()
         if marker is None:
-            self.statusBar().showMessage("尚未设置写字起点", 4000)
+            self.statusBar().showMessage(tr("尚未设置写字起点"), 4000)
             return
         link = self.machine_panel.link
         if not link.connected:
-            self.statusBar().showMessage("未连接机器：请先在上方连接串口", 4000)
+            self.statusBar().showMessage(tr("未连接机器：请先在上方连接串口"), 4000)
             return
         cfg = self.machine_panel.current_config()
         mx, my = marker[0], marker[1]
@@ -2639,27 +2671,27 @@ class MainWindow(QMainWindow):
                 link.send_line(line)
             link.goto(mx, my, feed=cfg.travel_feed)
         except Exception as exc:
-            self.statusBar().showMessage(f"移动失败：{exc}", 5000)
+            self.statusBar().showMessage(trf('移动失败：{v0}', v0=exc), 5000)
             return
         self.statusBar().showMessage(
-            f"已命令笔头移动到机器坐标 ({mx:.1f}, {my:.1f}) mm", 4000)
+            trf('已命令笔头移动到机器坐标 ({v0:.1f}, {v1:.1f}) mm', v0=mx, v1=my), 4000)
 
     def _rebuild_recent_menu(self) -> None:
         self.recent_menu.clear()
         recents = self.settings.recent_files()
         if not recents:
-            a = self.recent_menu.addAction("（无）")
+            a = self.recent_menu.addAction(tr("（无）"))
             a.setEnabled(False)
             return
         for p in recents:
             act = self.recent_menu.addAction(p)
             act.triggered.connect(lambda checked=False, path=p: self._open_recent(path))
         self.recent_menu.addSeparator()
-        self.recent_menu.addAction("清除列表", self._clear_recent)
+        self.recent_menu.addAction(tr("清除列表"), self._clear_recent)
 
     def _open_recent(self, path: str) -> None:
         if not Path(path).exists():
-            QMessageBox.warning(self, "文件不存在", path)
+            QMessageBox.warning(self, tr("文件不存在"), path)
             recents = [p for p in self.settings.recent_files() if p != path]
             self.settings.set("files/recent", recents)
             self._rebuild_recent_menu()
@@ -2877,7 +2909,7 @@ class MainWindow(QMainWindow):
 
     def _generate_preview(self) -> None:
         if not self.controller.doc.objects:
-            QMessageBox.information(self, "生成 G-code", "文档为空。")
+            QMessageBox.information(self, tr("生成 G-code"), tr("文档为空。"))
             return
         sp = self.machine_panel.start_point
         if sp.mode != MODE_ORIGIN and sp.pen_marker is not None:
@@ -2885,8 +2917,7 @@ class MainWindow(QMainWindow):
             page = self.controller.doc.page
             if not (0 <= q[0] <= page.width and 0 <= q[1] <= page.height):
                 self.statusBar().showMessage(
-                    f"提示：起点标记在页面外 ({q[0]:.1f}, {q[1]:.1f}) mm，"
-                    "校准可能已失效，建议重新放置并校准", 8000)
+                    trf('提示：起点标记在页面外 ({v0:.1f}, {v1:.1f}) mm，校准可能已失效，建议重新放置并校准', v0=q[0], v1=q[1]), 8000)
         if not self._warn_bounds():
             return
         self.global_perturb.flush()
@@ -2916,8 +2947,8 @@ class MainWindow(QMainWindow):
         if not self._warn_bounds():
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "导出 G-code", filedialog.path_for("output.gcode"),
-            "G-code (*.gcode *.nc *.ngc);;所有文件 (*)")
+            self, tr("导出 G-code"), filedialog.path_for("output.gcode"),
+            tr("G-code (*.gcode *.nc *.ngc);;所有文件 (*)"))
         if not path:
             return
         filedialog.remember(path)
@@ -2927,12 +2958,11 @@ class MainWindow(QMainWindow):
             with open(path, "w", encoding="ascii", errors="replace") as f:
                 f.write(result.text())
         except Exception as exc:
-            QMessageBox.critical(self, "导出失败", str(exc))
+            QMessageBox.critical(self, tr("导出失败"), str(exc))
             return
         QMessageBox.information(
-            self, "导出完成",
-            f"已导出 {len(result.lines)} 行到\n{path}\n"
-            f"绘制 {result.draw_length:.1f} mm，空程 {result.travel_length:.1f} mm")
+            self, tr("导出完成"),
+            trf('已导出 {v0} 行到\n{v1}\n绘制 {v2:.1f} mm，空程 {v3:.1f} mm', v0=len(result.lines), v1=path, v2=result.draw_length, v3=result.travel_length))
 
     def _export_image(self, fmt: str) -> None:
         """导出整页为 PNG（位图，分辨率可选）或 SVG（矢量）。
@@ -2942,7 +2972,7 @@ class MainWindow(QMainWindow):
         与画布上所见相同。
         """
         if not self.controller.doc.objects:
-            self.statusBar().showMessage("文档为空，没有可导出的内容", 5000)
+            self.statusBar().showMessage(tr("文档为空，没有可导出的内容"), 5000)
             return
         from PySide6.QtWidgets import QFileDialog, QMessageBox
 
@@ -2951,10 +2981,10 @@ class MainWindow(QMainWindow):
 
         doc = self.controller.doc
         if fmt == "png":
-            title, filt, default = ("导出为 PNG", "PNG 图片 (*.png)",
+            title, filt, default = (tr("导出为 PNG"), tr("PNG 图片 (*.png)"),
                                     "output.png")
         else:
-            title, filt, default = ("导出为 SVG", "SVG 矢量图 (*.svg)",
+            title, filt, default = (tr("导出为 SVG"), tr("SVG 矢量图 (*.svg)"),
                                     "output.svg")
         choice = ExportOptionsDialog.ask(
             doc.page, self.settings.png_export_dpi(), fmt=fmt,
@@ -2978,16 +3008,16 @@ class MainWindow(QMainWindow):
             if fmt == "png":
                 w, h = save_page_png(doc, path, float(dpi),
                                      transparent=transparent)
-                detail = f"{w}×{h} 像素（{dpi} DPI）"
+                detail = trf('{v0}×{v1} 像素（{v2} DPI）', v0=w, v1=h, v2=dpi)
             else:
                 n = save_page_svg(doc, path, transparent=transparent)
-                detail = f"{n} 个对象，1 单位 = 1 mm"
+                detail = trf('{v0} 个对象，1 单位 = 1 mm', v0=n)
             if transparent:
                 detail += "\n透明背景"
         except Exception as exc:
-            QMessageBox.critical(self, "导出失败", str(exc))
+            QMessageBox.critical(self, tr("导出失败"), str(exc))
             return
-        QMessageBox.information(self, "导出完成", f"已导出到\n{path}\n{detail}")
+        QMessageBox.information(self, tr("导出完成"), trf('已导出到\n{v0}\n{v1}', v0=path, v1=detail))
 
     def _warn_stale_marker(self) -> bool:
         """起点标记显示在页面外 → 标记/校准已因轴映射或页面几何变化失效。
@@ -3006,28 +3036,24 @@ class MainWindow(QMainWindow):
         if (-tol <= q[0] <= page.width + tol
                 and -tol <= q[1] <= page.height + tol):
             return True
-        r = QMessageBox.warning(
-            self, "起点标记在页面外",
-            f"起点标记当前位于页面外 ({q[0]:.1f}, {q[1]:.1f}) mm。\n"
-            "这通常说明放置标记后改过坐标轴设置或页面尺寸，\n"
-            "先前的笔位校准已失效，直接书写会整体错位。\n\n"
-            "建议：移除标记后重新放置并校准。仍要继续吗？",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        return r == QMessageBox.Yes
+        return ask_yes_no(
+            self, tr("起点标记在页面外"),
+            trf('起点标记当前位于页面外 ({v0:.1f}, {v1:.1f}) mm。\n这通常说明放置标记后改过坐标轴设置或页面尺寸，\n先前的笔位校准已失效，直接书写会整体错位。\n\n建议：移除标记后重新放置并校准。仍要继续吗？', v0=q[0], v1=q[1]),
+            warning=True)
 
     def _send_job(self) -> None:
         link = self.machine_panel.link
         if not link.connected:
-            QMessageBox.warning(self, "未连接", "请先在机器面板连接串口。")
+            QMessageBox.warning(self, tr("未连接"), tr("请先在机器面板连接串口。"))
             return
         if link.state is LinkState.ALARM:
             QMessageBox.warning(
-                self, "机器报警",
-                "控制器处于 ALARM 状态，作业不会被执行。\n"
-                "请先回零（$H）或解锁（$X）再发送。")
+                self, tr("机器报警"),
+                tr("控制器处于 ALARM 状态，作业不会被执行。\n"
+                "请先回零（$H）或解锁（$X）再发送。"))
             return
         if link.state.value in ("running", "paused"):
-            QMessageBox.information(self, "正在发送", "已有作业在发送中。")
+            QMessageBox.information(self, tr("正在发送"), tr("已有作业在发送中。"))
             return
         if not self._warn_stale_marker():
             return
@@ -3036,11 +3062,10 @@ class MainWindow(QMainWindow):
         self.global_perturb.flush()
         result = self._build_gcode(optimize=True)
         if self._start_machine_xy() is None:
-            r = QMessageBox.question(
-                self, "写字起点",
-                "当前还没有设置起点，是否以机械原点作为起点？",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
-            if r == QMessageBox.Yes:
+            if ask_yes_no(
+                    self, tr("写字起点"),
+                    tr("当前还没有设置起点，是否以机械原点作为起点？"),
+                    default_yes=True):
                 # 先读取笔的坐标，把笔移动到机械原点，再开始写
                 self._send_job_from_origin(result)
                 return
@@ -3051,10 +3076,10 @@ class MainWindow(QMainWindow):
         try:
             self.machine_panel.link.load_job(result.lines)
         except Exception as exc:
-            self.statusBar().showMessage(f"发送失败：{exc}", 6000)
+            self.statusBar().showMessage(trf('发送失败：{v0}', v0=exc), 6000)
             return
         self.machine_panel.add_draw_length(result.draw_length)  # 笔寿命累计
-        self.machine_panel.set_progress(f"发送中：0%（0/{len(result.lines)} 行）")
+        self.machine_panel.set_progress(trf('发送中：0%（0/{v0} 行）', v0=len(result.lines)))
 
     def _send_job_from_origin(self, result) -> None:
         """以机械原点为起点发送：先读笔位，再移到原点，然后开始作业。"""
@@ -3067,9 +3092,9 @@ class MainWindow(QMainWindow):
                 link.request_status()
             except Exception as exc:
                 self._origin_job_pending = None
-                self.statusBar().showMessage(f"读取失败：{exc}", 5000)
+                self.statusBar().showMessage(trf('读取失败：{v0}', v0=exc), 5000)
                 return
-            self.statusBar().showMessage("正在读取笔头位置…", 2000)
+            self.statusBar().showMessage(tr("正在读取笔头位置…"), 2000)
             return
         self._origin_move_and_send(result, pos)
 
@@ -3081,10 +3106,10 @@ class MainWindow(QMainWindow):
                 link.send_line(line)
             link.goto(0.0, 0.0, feed=cfg.travel_feed)   # 移动到机械原点
         except Exception as exc:
-            self.statusBar().showMessage(f"移动失败：{exc}", 5000)
+            self.statusBar().showMessage(trf('移动失败：{v0}', v0=exc), 5000)
             return
         self.statusBar().showMessage(
-            f"笔位 ({pos[0]:.1f}, {pos[1]:.1f}) mm，已移动到机械原点，开始书写…",
+            trf('笔位 ({v0:.1f}, {v1:.1f}) mm，已移动到机械原点，开始书写…', v0=pos[0], v1=pos[1]),
             4000)
         self._dispatch_job(result)
 
@@ -3100,11 +3125,10 @@ class MainWindow(QMainWindow):
         self._origin_move_and_send(result, (float(pos[0]), float(pos[1])))
 
     def _about(self) -> None:
+        from .. import __version__
         QMessageBox.information(
-            self, "关于 WriterStudio",
-            "WriterStudio — ESP32 GRBL 写字机软件\n\n"
-            "已实现：P1 画布 / P2 字体 / P3 手写扰动 / P4 富内容 / P5 机器控制 / "
-            "P6 项目存档 / P7 排版对齐\n"
-            "新增：纸张预设与编辑器、参考层（图片/SVG 对齐）、笔位对齐标记、\n"
-            "对象显示/锁定、对齐与分布、缩放到选中、缺字与越界提示。",
+            self, tr("关于 WriterStudio"),
+            trf("WriterStudio — ESP32 GRBL 写字机软件\n\n版本 {v0}\n"
+                "开源写字机 / 绘图软件（GPL-3.0）。\n"
+                "项目主页：github.com/ZhengXieGang/WriterStudio", v0=__version__),
         )

@@ -18,6 +18,11 @@ _REDIRECTED = os.environ.setdefault(
     "XDG_CONFIG_HOME", tempfile.mkdtemp(prefix="writerstudio-test-config-"))
 os.makedirs(os.path.join(_REDIRECTED, "WriterStudio"), exist_ok=True)
 
+# 现有用例大量断言中文界面文案（按钮/标题/状态），测试环境固定中文；
+# i18n 的英文行为由 test_i18n.py 显式切换后再断言。直接覆盖而不是
+# setdefault——开发机/CI 导出 LANG 或 WRITERSTUDIO_LANG 时结果也应一致。
+os.environ["WRITERSTUDIO_LANG"] = "zh"
+
 
 @pytest.fixture(autouse=True)
 def _isolated_settings(monkeypatch):
@@ -28,6 +33,9 @@ def _isolated_settings(monkeypatch):
     「手动标记点」泄漏给后面的测试。换成每测试独立的内存后端，测试顺序
     不再影响结果。
     """
+    from writerstudio import i18n
     from writerstudio import settings as _settings
+    monkeypatch.setenv("WRITERSTUDIO_LANG", "zh")
+    i18n.update()               # 清掉上一个用例可能留下的语言缓存
     monkeypatch.setattr(_settings, "_QSettingsBackend",
                         _settings._MemoryBackend)

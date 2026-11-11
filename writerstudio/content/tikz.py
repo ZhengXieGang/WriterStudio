@@ -21,6 +21,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional, Sequence
 
+from ..i18n import tr, trf
 from ..core.strokes import Stroke
 
 from .latex_doc import (
@@ -306,21 +307,22 @@ def tikz_report() -> dict:
     converter = find_pdf_converter()
     notes: list[str] = []
     if engine is None:
-        notes.append("未找到可用的 LaTeX 引擎，请安装 texlive（xelatex/pdflatex）")
+        notes.append(tr("未找到可用的 LaTeX 引擎，请安装 texlive（xelatex/pdflatex）"))
     if converter is None:
-        notes.append("缺少 PDF→SVG 转换器，请安装 poppler（pdftocairo）或 dvisvgm")
+        notes.append(tr("缺少 PDF→SVG 转换器，请安装 poppler（pdftocairo）或 dvisvgm"))
     if engine is not None and not _has_tikz_package(engine):
-        notes.append(
+        notes.append(tr(
             "缺少 TikZ 宏包（pgf/tikz.sty）：除未装 texlive-pictures 外，"
-            "隔离 HOME/TEXMFHOME 下也会查不到个人 texmf 树——见 texmf 字段")
+            "隔离 HOME/TEXMFHOME 下也会查不到个人 texmf 树——见 texmf 字段"))
     if engine is not None and not find_pdf_converter():
         pass
     if engine is not None and engine.endswith("xelatex"):
         fmt = _texmf_env()["xelatex_fmt"]
         if not fmt["exists"]:
             notes.append(
-                f"xelatex 格式文件缺失（{fmt['path']}）：隔离 HOME 下需把"
-                " TEXMFVAR/TEXMFCONFIG 指回真实 HOME，或跑一次 fmtutil 生成")
+                trf("xelatex 格式文件缺失（{v0}）：隔离 HOME 下需把"
+                    " TEXMFVAR/TEXMFCONFIG 指回真实 HOME，或跑一次 fmtutil 生成",
+                    v0=fmt["path"]))
     return {"engine": engine, "converter": converter,
             "ok": not notes, "notes": notes, "texmf": _texmf_env()}
 

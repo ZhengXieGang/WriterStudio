@@ -18,18 +18,22 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QScrollArea,
     QStackedWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
+
+from ..i18n import tr, trf
 from ..content import (
     render_equation,
     render_markdown,
@@ -42,7 +46,8 @@ from ..fonts.builder import TextSpec
 from ..fonts.manager import FontManager
 from . import filedialog
 from .perturb_panel import PerturbPanel
-from .style import spin, unify_inputs
+from .style import (fit_dialog_to_screen, localize_dialog_buttons,
+                    set_role, spin, unify_inputs)
 
 # 类型标识
 KIND_MARKDOWN = "markdown"
@@ -82,26 +87,42 @@ class ContentDialog(QDialog):
                  parent: Optional[QWidget] = None,
                  default_font_chain: Optional[list[str]] = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("插入富内容")
-        self.resize(780, 620)
+        self.setWindowTitle(tr("插入富内容"))
         self.manager = manager
         self._default_font_chain = list(default_font_chain or [])
         self._build_ui()
         self._select_kind(initial_kind)
         self._update_preview()
+        # 内容区最小高度约 840px（Markdown 页嵌了整套扰动面板）——
+        # 先在 stack 里套滚动区，再按屏幕收敛默认尺寸，768 高的笔记本
+        # 屏幕也能完整操作。
+        self.setMinimumWidth(500)   # 英文页最小宽约 440，留出滚动条/边距
+        fit_dialog_to_screen(self, 780, 720)
+
+    @staticmethod
+    def _scroll_page(page: QWidget) -> QScrollArea:
+        """把页签内容放进滚动区：窗口变矮时滚动，而不是把对话框顶出屏幕。"""
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.NoFrame)
+        # 英文页最小宽约 440 < 对话框最小宽 500，横向不会溢出；关掉横条，
+        # 避免首次布局时闪出一条无用的横向滚动条。
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        area.setWidget(page)
+        return area
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
 
         top = QHBoxLayout()
-        top.addWidget(QLabel("类型:"))
+        top.addWidget(QLabel(tr("类型:")))
         self.kind_combo = QComboBox()
-        self.kind_combo.addItem("Markdown（含表格）", KIND_MARKDOWN)
-        self.kind_combo.addItem("LaTeX 公式", KIND_EQUATION)
-        self.kind_combo.addItem("LaTeX 文档", KIND_LATEX)
-        self.kind_combo.addItem("TikZ 图形", KIND_TIKZ)
-        self.kind_combo.addItem("SVG 矢量图", KIND_SVG)
+        self.kind_combo.addItem(tr("Markdown（含表格）"), KIND_MARKDOWN)
+        self.kind_combo.addItem(tr("LaTeX 公式"), KIND_EQUATION)
+        self.kind_combo.addItem(tr("LaTeX 文档"), KIND_LATEX)
+        self.kind_combo.addItem(tr("TikZ 图形"), KIND_TIKZ)
+        self.kind_combo.addItem(tr("SVG 矢量图"), KIND_SVG)
         self.kind_combo.currentIndexChanged.connect(
             lambda: self._select_kind(self.kind_combo.currentData()))
         top.addWidget(self.kind_combo)
@@ -117,23 +138,27 @@ class ContentDialog(QDialog):
         self._build_svg_page()
 
         # 预览信息
-        self.preview_label = QLabel("—")
+        self.preview_label = QLabel(tr("—"))
         self.preview_label.setWordWrap(True)
-        self.preview_label.setStyleSheet("color:#666;")
+        set_role(self.preview_label, "muted")
         root.addWidget(self.preview_label)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
+        localize_dialog_buttons(self)
         unify_inputs(self)
 
     # -- Markdown 页 -------------------------------------------------------
     def _build_markdown_page(self) -> None:
         page = QWidget()
         lay = QVBoxLayout(page)
-        lay.addWidget(QLabel("Markdown 内容（支持标题、列表、引用、代码块、表格、$公式$）："))
+        md_hint = QLabel(tr("Markdown 内容（表格 / $公式$）："))
+        md_hint.setToolTip(tr("支持标题、列表、引用、代码块、表格与 $公式$。"))
+        lay.addWidget(md_hint)
         self.md_edit = QTextEdit()
+        self.md_edit.setMinimumHeight(240)   # 至少 12 行，编辑/预览都够用
         self.md_edit.setPlainText(_MD_SAMPLE)
         self.md_edit.setFont(self._mono())
         self.md_edit.textChanged.connect(self._update_preview)
@@ -142,53 +167,53 @@ class ContentDialog(QDialog):
         form = QFormLayout()
         self.md_size = spin(1.0, 30.0, 4.0, " mm", 0.5)
         self.md_size.valueChanged.connect(self._update_preview)
-        form.addRow("正文字号", self.md_size)
+        form.addRow(tr("正文字号"), self.md_size)
         self.md_cs = spin(-5.0, 20.0, 0.0, " mm", 0.1)
-        self.md_cs.setToolTip("额外字距：均匀加在每个字符的步距上")
+        self.md_cs.setToolTip(tr("额外字距：均匀加在每个字符的步距上"))
         self.md_cs.valueChanged.connect(self._update_preview)
-        form.addRow("字距", self.md_cs)
+        form.addRow(tr("字距"), self.md_cs)
         self.md_wrap = spin(20.0, 400.0, 120.0, " mm", 5.0)
         self.md_wrap.valueChanged.connect(self._update_preview)
-        form.addRow("换行宽度", self.md_wrap)
+        form.addRow(tr("换行宽度"), self.md_wrap)
         self.md_table_w = spin(0.0, 1000.0, 0.0, " mm", 5.0)
         self.md_table_w.setToolTip(
-            "表格整体宽度：0 = 按内容自适应。\n"
+            tr("表格整体宽度：0 = 按内容自适应。\n"
             "设了宽度后各列按该总宽缩放、过宽的单元格自动折行——\n"
-            "也可在画布上直接拖动表格左右缘手柄调整（与文本框同手感）。")
+            "也可在画布上直接拖动表格左右缘手柄调整（与文本框同手感）。"))
         self.md_table_w.valueChanged.connect(self._update_preview)
-        form.addRow("表格宽度", self.md_table_w)
+        form.addRow(tr("表格宽度"), self.md_table_w)
         # 表格随机化（手绘感）：默认线端轻偏移+出头（网格仍对齐），
         # 行/列界抖动默认关——需要「画出来」的表格再开
         jrow1 = QHBoxLayout()
         self.md_tab_ej = spin(0.0, 3.0, 0.5, " mm", 0.1, 2)
         self.md_tab_ej.setToolTip(
-            "线端随机偏移 σ：每条表格线的两端沿轴向随机平移，并带垂直分量\n"
-            "（线条微倾）——线不再横平竖直、精确交在角上。0 = 规整。")
+            tr("线端随机偏移 σ：每条表格线的两端沿轴向随机平移，并带垂直分量\n"
+            "（线条微倾）——线不再横平竖直、精确交在角上。0 = 规整。"))
         self.md_tab_os = spin(0.0, 3.0, 0.6, " mm", 0.1, 2)
         self.md_tab_os.setToolTip(
-            "线端出头上限：线端随机越过相交线一点，手绘表格的「过线」笔感。\n"
-            "0 = 不出头。")
-        jrow1.addWidget(QLabel("偏移"))
+            tr("线端出头上限：线端随机越过相交线一点，手绘表格的「过线」笔感。\n"
+            "0 = 不出头。"))
+        jrow1.addWidget(QLabel(tr("偏移")))
         jrow1.addWidget(self.md_tab_ej)
-        jrow1.addWidget(QLabel("出头"))
+        jrow1.addWidget(QLabel(tr("出头")))
         jrow1.addWidget(self.md_tab_os)
         jrow1.addStretch(1)
-        form.addRow("线端随机", jrow1)
+        form.addRow(tr("线端随机"), jrow1)
         jrow2 = QHBoxLayout()
         self.md_tab_rj = spin(0.0, 3.0, 0.0, " mm", 0.1, 2)
         self.md_tab_rj.setToolTip(
-            "行界随机偏移 σ：各行高度不再一致（顶/底界与外框不动，\n"
-            "单元格文字随行界走）。0 = 行高一致。")
+            tr("行界随机偏移 σ：各行高度不再一致（顶/底界与外框不动，\n"
+            "单元格文字随行界走）。0 = 行高一致。"))
         self.md_tab_cj = spin(0.0, 3.0, 0.0, " mm", 0.1, 2)
         self.md_tab_cj.setToolTip(
-            "列界随机偏移 σ：各列宽度不再一致（外框不动；折行走抖动后的\n"
-            "列宽，文字不会越过列线）。0 = 列宽规整。")
-        jrow2.addWidget(QLabel("行界"))
+            tr("列界随机偏移 σ：各列宽度不再一致（外框不动；折行走抖动后的\n"
+            "列宽，文字不会越过列线）。0 = 列宽规整。"))
+        jrow2.addWidget(QLabel(tr("行界")))
         jrow2.addWidget(self.md_tab_rj)
-        jrow2.addWidget(QLabel("列界"))
+        jrow2.addWidget(QLabel(tr("列界")))
         jrow2.addWidget(self.md_tab_cj)
         jrow2.addStretch(1)
-        form.addRow("网格抖动", jrow2)
+        form.addRow(tr("网格抖动"), jrow2)
         for w in (self.md_tab_ej, self.md_tab_os, self.md_tab_rj,
                   self.md_tab_cj):
             w.valueChanged.connect(self._update_preview)
@@ -202,14 +227,15 @@ class ContentDialog(QDialog):
         self.md_fonts.changed.connect(self._update_preview)
         lay.addWidget(self.md_fonts)
         lay.addWidget(self.md_perturb)
-        self.stack.addWidget(page)
+        self.stack.addWidget(self._scroll_page(page))
 
     # -- 公式页 ------------------------------------------------------------
     def _build_equation_page(self) -> None:
         page = QWidget()
         lay = QVBoxLayout(page)
-        lay.addWidget(QLabel("LaTeX 公式（无需安装 TeX，使用内置 mathtext 渲染）："))
+        lay.addWidget(QLabel(tr("LaTeX 公式（无需安装 TeX，使用内置 mathtext 渲染）：")))
         self.eq_edit = QTextEdit()
+        self.eq_edit.setMinimumHeight(240)
         self.eq_edit.setPlainText(_EQ_SAMPLE)
         self.eq_edit.setFont(self._mono())
         self.eq_edit.textChanged.connect(self._update_preview)
@@ -218,11 +244,11 @@ class ContentDialog(QDialog):
         form = QFormLayout()
         self.eq_size = spin(1.0, 60.0, 6.0, " mm", 0.5)
         self.eq_size.valueChanged.connect(self._update_preview)
-        form.addRow("公式字号", self.eq_size)
+        form.addRow(tr("公式字号"), self.eq_size)
         self.eq_text_scale = spin(0.2, 5.0, 1.0, " ×", 0.05)
         self.eq_text_scale.setToolTip(
-            "替换文字的字号微调（相对 mathtext 排版得到的字号）")
-        form.addRow("文字字号", self.eq_text_scale)
+            tr("替换文字的字号微调（相对 mathtext 排版得到的字号）"))
+        form.addRow(tr("文字字号"), self.eq_text_scale)
         self.eq_text_scale.valueChanged.connect(self._update_preview)
         lay.addLayout(form)
 
@@ -235,13 +261,14 @@ class ContentDialog(QDialog):
         self.eq_fonts.changed.connect(self._update_preview)
         lay.addWidget(self.eq_fonts)
 
-        tips = QLabel("示例：\\frac{a}{b}　\\sqrt{x^2+1}　\\sum_{i=1}^{n}　"
-                      "\\int_0^\\infty　\\alpha \\beta \\gamma　x^{2}　a_{i}")
+        tips = QLabel(tr("示例：\\frac{a}{b}　\\sqrt{x^2+1}　\\sum_{i=1}^{n}　"
+                      "\\int_0^\\infty　\\alpha \\beta \\gamma　x^{2}　a_{i}"))
         tips.setWordWrap(True)
-        tips.setStyleSheet("color:#666; font-size:11px;")
+        tips.setStyleSheet("font-size:11px;")
+        set_role(tips, "muted")
         lay.addWidget(tips)
         lay.addStretch(1)
-        self.stack.addWidget(page)
+        self.stack.addWidget(self._scroll_page(page))
 
     # -- LaTeX 文档页 ------------------------------------------------------
     def _build_latex_page(self) -> None:
@@ -249,27 +276,28 @@ class ContentDialog(QDialog):
         lay = QVBoxLayout(page)
         report = toolchain_report()
         if report["ok"]:
-            note = "使用外部 TeX 工具链编译（xelatex/pdflatex → PDF → SVG）。"
-            color = "#2a7"
+            note = tr("使用外部 TeX 工具链编译（xelatex/pdflatex → PDF → SVG）。")
+            role = "success"
         else:
-            note = ("未检测到 TeX 工具链：将用内置排版引擎渲染常用子集"
-                    "（标题/章节/列表/公式/简单表格），零依赖可用；"
-                    "安装 texlive + poppler 后自动改为忠实编译。")
-            color = "#c33"
+            note = tr("未检测到 TeX 工具链：将用内置排版引擎渲染常用子集"
+                      "（标题/章节/列表/公式/简单表格），零依赖可用；"
+                      "安装 texlive + poppler 后自动改为忠实编译。")
+            role = "danger"
         lab = QLabel(note)
         lab.setWordWrap(True)
-        lab.setStyleSheet(f"color:{color};")
+        set_role(lab, role)
         lay.addWidget(lab)
 
-        lay.addWidget(QLabel("LaTeX 源码（可含标题、公式、宏包）："))
+        lay.addWidget(QLabel(tr("LaTeX 源码（可含标题、公式、宏包）：")))
         self.tex_edit = QTextEdit()
+        self.tex_edit.setMinimumHeight(240)
         self.tex_edit.setPlainText(_LATEX_SAMPLE)
         self.tex_edit.setFont(self._mono())
         lay.addWidget(self.tex_edit, 1)
 
         form = QFormLayout()
         self.tex_width = spin(10.0, 500.0, 150.0, " mm", 5.0)
-        form.addRow("目标宽度", self.tex_width)
+        form.addRow(tr("目标宽度"), self.tex_width)
         lay.addLayout(form)
         # 内置引擎回退路径用字体链渲染文字（TeX 编译路径忽略此项）
         self.tex_fonts = _FontChainWidget(self.manager)
@@ -277,7 +305,7 @@ class ContentDialog(QDialog):
             self.tex_fonts.set_names(self._default_font_chain)
         self.tex_fonts.changed.connect(self._update_preview)
         lay.addWidget(self.tex_fonts)
-        self.stack.addWidget(page)
+        self.stack.addWidget(self._scroll_page(page))
 
     # -- TikZ 页 -----------------------------------------------------------
     def _build_tikz_page(self) -> None:
@@ -285,30 +313,32 @@ class ContentDialog(QDialog):
         lay = QVBoxLayout(page)
         rep = tikz_report()
         if rep["ok"]:
-            note = ("使用 TeX 工具链编译 TikZ（standalone 裁切 → PDF → SVG）。"
-                    "坐标即 TikZ 的 (x,y) 单位（默认 1cm）。")
-            color = "#2a7"
+            note = tr("使用 TeX 工具链编译 TikZ（standalone 裁切 → PDF → SVG）。"
+                      "坐标即 TikZ 的 (x,y) 单位（默认 1cm）。")
+            role = "success"
         else:
-            note = "TikZ 不可用：" + "；".join(rep["notes"])
-            color = "#c33"
+            note = tr("TikZ 不可用：") + tr("；").join(
+                tr(note) for note in rep["notes"])
+            role = "danger"
         lab = QLabel(note)
         lab.setWordWrap(True)
-        lab.setStyleSheet(f"color:{color};")
+        set_role(lab, role)
         lay.addWidget(lab)
 
-        lay.addWidget(QLabel("TikZ 源码（tikzpicture 内容；可含坐标轴、节点、函数曲线）："))
+        lay.addWidget(QLabel(tr("TikZ 源码（tikzpicture 内容；可含坐标轴、节点、函数曲线）：")))
         self.tikz_edit = QTextEdit()
+        self.tikz_edit.setMinimumHeight(240)
         self.tikz_edit.setPlainText(TIKZ_SAMPLE)
         self.tikz_edit.setFont(self._mono())
         lay.addWidget(self.tikz_edit, 1)
 
         form = QFormLayout()
-        self.tikz_width = spin(0.0, 500.0, 0.0, " mm (0=原始尺寸)", 5.0)
-        form.addRow("目标宽度", self.tikz_width)
+        self.tikz_width = spin(0.0, 500.0, 0.0, tr(" mm (0=原始尺寸)"), 5.0)
+        form.addRow(tr("目标宽度"), self.tikz_width)
         self.tikz_text_scale = spin(0.2, 5.0, 1.0, " ×", 0.05)
         self.tikz_text_scale.setToolTip(
-            "替换文字的字号微调（相对 TeX 排版得到的字号）")
-        form.addRow("文字字号", self.tikz_text_scale)
+            tr("替换文字的字号微调（相对 TeX 排版得到的字号）"))
+        form.addRow(tr("文字字号"), self.tikz_text_scale)
         lay.addLayout(form)
 
         # 文字字体：TikZ 节点/标注文字改用**本软件的字体**（如自己的手写真迹）
@@ -319,21 +349,21 @@ class ContentDialog(QDialog):
             self.tikz_fonts.set_names(self._default_font_chain)
         self.tikz_fonts.changed.connect(self._update_preview)
         lay.addWidget(self.tikz_fonts)
-        self.stack.addWidget(page)
+        self.stack.addWidget(self._scroll_page(page))
 
     # -- SVG 页 ------------------------------------------------------------
     def _build_svg_page(self) -> None:
         page = QWidget()
         lay = QVBoxLayout(page)
         if not svg_available():
-            lab = QLabel("未安装 svgelements，无法导入 SVG：pip install svgelements")
-            lab.setStyleSheet("color:#c33;")
+            lab = QLabel(tr("未安装 svgelements，无法导入 SVG：pip install svgelements"))
+            set_role(lab, "danger")
             lay.addWidget(lab)
 
         row = QHBoxLayout()
         self.svg_path = QLineEdit()
-        self.svg_path.setPlaceholderText("选择 SVG 文件…")
-        browse = QPushButton("浏览…")
+        self.svg_path.setPlaceholderText(tr("选择 SVG 文件…"))
+        browse = QPushButton(tr("浏览…"))
         browse.clicked.connect(self._browse_svg)
         row.addWidget(self.svg_path, 1)
         row.addWidget(browse)
@@ -343,22 +373,22 @@ class ContentDialog(QDialog):
         self.svg_width = QDoubleSpinBox()
         self.svg_width.setRange(0.0, 500.0)
         self.svg_width.setValue(0.0)
-        self.svg_width.setSuffix(" mm (0=原始尺寸)")
+        self.svg_width.setSuffix(tr(" mm (0=原始尺寸)"))
         self.svg_width.setDecimals(1)
-        form.addRow("目标宽度", self.svg_width)
+        form.addRow(tr("目标宽度"), self.svg_width)
         self.svg_wobble = spin(0.0, 5.0, 0.0, " mm", 0.05, 2)
-        self.svg_wobble.setToolTip("给线条叠加多频正弦抖动，产生手绘感")
+        self.svg_wobble.setToolTip(tr("给线条叠加多频正弦抖动，产生手绘感"))
         self.svg_wobble.valueChanged.connect(self._update_preview)
-        form.addRow("手绘抖动幅度", self.svg_wobble)
+        form.addRow(tr("手绘抖动幅度"), self.svg_wobble)
         self.svg_wl = spin(2.0, 200.0, 20.0, " mm", 2.0)
-        form.addRow("抖动波长", self.svg_wl)
+        form.addRow(tr("抖动波长"), self.svg_wl)
         lay.addLayout(form)
 
-        lay.addWidget(QLabel("整笔扰动（可选）："))
+        lay.addWidget(QLabel(tr("整笔扰动（可选）：")))
         self.svg_perturb = PerturbPanel()
         lay.addWidget(self.svg_perturb)
         lay.addStretch(1)
-        self.stack.addWidget(page)
+        self.stack.addWidget(self._scroll_page(page))
 
     # --------------------------------------------------------------- 工具
     def _mono(self) -> QFont:
@@ -368,7 +398,7 @@ class ContentDialog(QDialog):
 
     def _browse_svg(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "选择 SVG", filedialog.start_dir(), "SVG (*.svg)")
+            self, tr("选择 SVG"), filedialog.start_dir(), "SVG (*.svg)")
         if path:
             self.svg_path.setText(path)
             filedialog.remember(path)
@@ -393,35 +423,36 @@ class ContentDialog(QDialog):
                 rep = toolchain_report()
                 if rep["ok"]:
                     self.preview_label.setText(
-                        "工具链就绪，点击确定开始编译（可能需要数秒）。")
+                        tr("工具链就绪，点击确定开始编译（可能需要数秒）。"))
                 else:
                     nfonts = len(self.tex_fonts.names())
                     self.preview_label.setText(
-                        "未检测到 TeX：将用内置排版引擎渲染常用子集"
-                        "（标题/章节/列表/公式/简单表格），点击确定即插入。"
-                        + (f"文字将用所选 {nfonts} 款本软件字体重排。"
+                        tr("未检测到 TeX：将用内置排版引擎渲染常用子集"
+                           "（标题/章节/列表/公式/简单表格），点击确定即插入。")
+                        + (trf('文字将用所选 {v0} 款本软件字体重排。', v0=nfonts)
                            if nfonts else ""))
             elif kind == KIND_TIKZ:
                 rep = tikz_report()
                 if not rep["ok"]:
                     self.preview_label.setText(
-                        "TikZ 不可用，无法编译：" + "；".join(rep["notes"]))
+                        tr("TikZ 不可用，无法编译：")
+                        + tr("；").join(tr(note) for note in rep["notes"]))
                 else:
                     nfonts = len(self.tikz_fonts.names())
                     self.preview_label.setText(
-                        "TikZ 就绪，点击确定开始编译（可能需要数秒）。"
-                        + (f"节点文字将用所选 {nfonts} 款本软件字体重排。"
+                        tr("TikZ 就绪，点击确定开始编译（可能需要数秒）。")
+                        + (trf('节点文字将用所选 {v0} 款本软件字体重排。', v0=nfonts)
                            if nfonts else
-                           "未选字体：节点文字保留 TeX 轮廓。"))
+                           tr('未选字体：节点文字保留 TeX 轮廓。')))
             elif kind == KIND_SVG:
                 self._preview_svg()
         except Exception as exc:
-            self.preview_label.setText(f"预览失败：{exc}")
+            self.preview_label.setText(trf('预览失败：{v0}', v0=exc))
 
     def _preview_markdown(self) -> None:
         fonts = self.md_fonts.resolve()
         if not fonts:
-            self.preview_label.setText("未选择有效字体")
+            self.preview_label.setText(tr("未选择有效字体"))
             return
         from ..content.markdown import MarkdownStyle
         st = MarkdownStyle(size=self.md_size.value(),
@@ -434,8 +465,7 @@ class ContentDialog(QDialog):
                            table_col_jitter=self.md_tab_cj.value())
         r = render_markdown(self.md_edit.toPlainText(), fonts, st)
         self.preview_label.setText(
-            f"块类型：{', '.join(r.blocks) or '—'}\n"
-            f"笔画 {len(r.strokes)} 条，尺寸 {r.width:.1f} × {r.height:.1f} mm")
+            trf('块类型：{v0}\n笔画 {v1} 条，尺寸 {v2:.1f} × {v3:.1f} mm', v0=', '.join(r.blocks) or '—', v1=len(r.strokes), v2=r.width, v3=r.height))
 
     def _preview_equation(self) -> None:
         strokes = render_equation(
@@ -446,25 +476,24 @@ class ContentDialog(QDialog):
         from ..core.geometry import BBox
         b = BBox.from_points(p for s in strokes for p in s.points)
         if b.is_empty:
-            self.preview_label.setText("（无内容）")
+            self.preview_label.setText(tr("（无内容）"))
         else:
             replaced = sum(1 for s in strokes if s.role == "glyph")
             self.preview_label.setText(
-                f"笔画 {len(strokes)} 条（字体替换 {replaced} 条），"
-                f"尺寸 {b.width:.1f} × {b.height:.1f} mm")
+                trf('笔画 {v0} 条（字体替换 {v1} 条），尺寸 {v2:.1f} × {v3:.1f} mm', v0=len(strokes), v1=replaced, v2=b.width, v3=b.height))
 
     def _preview_svg(self) -> None:
         path = self.svg_path.text().strip()
         if not path or not Path(path).exists():
-            self.preview_label.setText("请选择 SVG 文件")
+            self.preview_label.setText(tr("请选择 SVG 文件"))
             return
         from ..content import import_svg
         w = self.svg_width.value() or None
         r = import_svg(path, target_width_mm=w)
-        extra = f"；{len(r.warnings)} 条警告" if r.warnings else ""
+        extra = trf('；{v0} 条警告', v0=len(r.warnings)) if r.warnings else ""
         self.preview_label.setText(
-            f"矢量元素 {len(r.strokes)} 条，尺寸 {r.width:.1f} × {r.height:.1f} mm"
-            + (f"（目标宽 {w:.0f} mm）" if w else "") + extra)
+            trf('矢量元素 {v0} 条，尺寸 {v1:.1f} × {v2:.1f} mm', v0=len(r.strokes), v1=r.width, v2=r.height)
+            + (trf('（目标宽 {v0:.0f} mm）', v0=w) if w else "") + extra)
 
     # ------------------------------------------------------------- 结果
     def load_from_object(self, obj) -> None:
@@ -600,7 +629,7 @@ class _FontChainWidget(QWidget):
         self.manager = manager
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.addWidget(QLabel("字体（回退链，先匹配者优先）："))
+        lay.addWidget(QLabel(tr("字体（按顺序回退）：")))
 
         self.list = QListWidget()
         # 固定高度：只设 setMaximumHeight 会与 QListWidget 自带的
@@ -613,9 +642,9 @@ class _FontChainWidget(QWidget):
         for e in manager.visible_entries():
             self.combo.addItem(f"{e.display_name}  [{e.kind}]", e.name)
         row.addWidget(self.combo, 1)
-        add = QPushButton("添加")
+        add = QPushButton(tr("添加"))
         add.clicked.connect(self._add)
-        rm = QPushButton("移除")
+        rm = QPushButton(tr("移除"))
         rm.clicked.connect(self._remove)
         row.addWidget(add)
         row.addWidget(rm)

@@ -3,7 +3,7 @@
 把 ui-ux-pro-max skill 的 ``consistency``（同一板块同一风格）、
 ``spacing-scale``（4px 栅格）与 ``touch-friendly-input``（输入目标
 不要太小）准则落到桌面表单：同一板块内所有输入框/下拉框等高、同列
-等宽对齐。只调几何、不写死颜色——控件配色继续取自调色板并随主题
+等宽对齐。只调几何、不写死颜色——控件配色继续取自主题样式并随主题
 热切换（``system-controls`` 与语义色令牌原则）。
 
 各板块在构造末尾调用一次::
@@ -26,13 +26,18 @@
 
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
+    QApplication,
     QComboBox,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QWidget,
 )
+
+from ..i18n import is_english
 
 # 全局统一的输入框/下拉框高度（逻辑像素）。取 30：机器控制面板与手写
 # 扰动面板（用户此前指定按机器面板对齐）都已用 30，索性全项目统一一个
@@ -138,3 +143,110 @@ def unify_inputs(root: QWidget, height: int = FIELD_HEIGHT,
     if button_height:
         for b in root.findChildren(QPushButton):
             b.setMinimumHeight(button_height)
+
+
+def set_role(widget: QWidget, role: str) -> None:
+    """给标签设置语义色（muted/danger/success），跟随当前主题。
+
+    不用内联 ``color:#666``：qdarktheme 调色板里的正文色仍是黑色（文字
+    颜色由 QSS 负责），深色主题下硬编码的深灰说明文字对比度只有约 2:1。
+    语义色规则由 :func:`writerstudio.ui.theme.apply_theme` 注入，切换主题
+    时整体重建。
+    """
+    widget.setProperty("wsRole", role or "")
+    target = widget.parentWidget() or widget
+    style = target.style()
+    style.unpolish(widget)
+    style.polish(widget)
+    widget.update()
+
+
+_BUTTON_TEXTS = {
+    QDialogButtonBox.StandardButton.Ok: ("确定", "OK"),
+    QDialogButtonBox.StandardButton.Cancel: ("取消", "Cancel"),
+    QDialogButtonBox.StandardButton.Close: ("关闭", "Close"),
+    QDialogButtonBox.StandardButton.Yes: ("是", "Yes"),
+    QDialogButtonBox.StandardButton.No: ("否", "No"),
+    QDialogButtonBox.StandardButton.Save: ("保存", "Save"),
+    QDialogButtonBox.StandardButton.Discard: ("不保存", "Discard"),
+    QDialogButtonBox.StandardButton.Apply: ("应用", "Apply"),
+    QDialogButtonBox.StandardButton.Reset: ("重置", "Reset"),
+    QDialogButtonBox.StandardButton.Help: ("帮助", "Help"),
+    QDialogButtonBox.StandardButton.Open: ("打开", "Open"),
+}
+
+
+def localize_dialog_buttons(root: QWidget) -> None:
+    """把标准按钮改成与界面一致的语言（Qt 自带翻译未必随包分发）。"""
+    english = is_english()
+    for box in root.findChildren(QDialogButtonBox):
+        for role, (zh, en) in _BUTTON_TEXTS.items():
+            button = box.button(role)
+            if button is not None:
+                button.setText(en if english else zh)
+
+
+def fit_dialog_to_screen(widget: QWidget, width: int, height: int,
+                         margin_h: int = 48, margin_v: int = 72) -> None:
+    """按屏幕可用区域收敛初始尺寸，避免窗口/对话框顶出屏幕。
+
+    1366×768 这类常见笔记本屏上，1280×840 的主窗口或 800×760 的编辑
+    对话框加标题栏后会超出屏幕；这里只缩小、不放大，也不会小于布局的
+    真实最小需求。
+    """
+    screen = widget.screen() or QApplication.primaryScreen()
+    if screen is None:
+        widget.resize(width, height)
+        return
+    avail = screen.availableGeometry()
+    min_hint = widget.minimumSizeHint()
+    widget.resize(
+        max(min_hint.width(), min(width, avail.width() - margin_h)),
+        max(min_hint.height(), min(height, avail.height() - margin_v)),
+    )
+
+
+def ask_yes_no(parent: QWidget, title: str, text: str,
+               default_yes: bool = False, warning: bool = False) -> bool:
+    """是/否询问框（按钮文字跟随界面语言，不吃 Qt 翻译包是否安装）。
+
+    ``QMessageBox.question`` 的 Yes/No 在中文界面里会显示英文，除非系统
+    恰好装了 Qt 中文翻译；显式建按钮才能保证两种语言下都一致。
+    返回用户是否选了「是」（关窗/Esc 视为否）。
+    """
+    english = is_english()
+    box = QMessageBox(parent)
+    box.setWindowTitle(title)
+    box.setText(text)
+    box.setIcon(QMessageBox.Icon.Warning if warning
+               else QMessageBox.Icon.Question)
+    yes = box.addButton("Yes" if english else "是", QMessageBox.ButtonRole.YesRole)
+    no = box.addButton("No" if english else "否", QMessageBox.ButtonRole.NoRole)
+    box.setDefaultButton(yes if default_yes else no)
+    box.setEscapeButton(no)
+    box.exec()
+    return box.clickedButton() is yes
+
+
+def ask_save_discard_cancel(parent: QWidget, title: str, text: str) -> str:
+    """未保存修改的「保存 / 不保存 / 取消」三选一；返回 save/discard/cancel。"""
+    english = is_english()
+    box = QMessageBox(parent)
+    box.setWindowTitle(title)
+    box.setText(text)
+    box.setIcon(QMessageBox.Icon.Warning)
+    save = box.addButton("Save" if english else "保存",
+                         QMessageBox.ButtonRole.AcceptRole)
+    discard = box.addButton("Discard" if english else "不保存",
+                            QMessageBox.ButtonRole.DestructiveRole)
+    cancel = box.addButton("Cancel" if english else "取消",
+                           QMessageBox.ButtonRole.RejectRole)
+    box.setDefaultButton(save)
+    box.setEscapeButton(cancel)
+    box.exec()
+    clicked = box.clickedButton()
+    if clicked is save:
+        return "save"
+    if clicked is discard:
+        return "discard"
+    return "cancel"

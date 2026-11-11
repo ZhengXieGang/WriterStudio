@@ -6,16 +6,15 @@
       控件退化为纯文字，绝不因图标炸掉界面；
     * 图标只做视觉锚点，动作含义仍以菜单/工具提示文字为准。
 
-颜色跟随各平台调色板的中性前景色，保证深浅色主题下都清晰。
+颜色随主题：深色主题用白色、浅色主题用黑色；切换主题时调用方清缓存并重建
+QIcon（见 :func:`clear_cache`）。
 """
 
 from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtGui import QIcon, QPalette, QPixmap
-
-_FALLBACK_COLOR = "#3a6ea5"
+from PySide6.QtGui import QIcon, QPixmap
 
 try:
     import qtawesome as qta
@@ -63,23 +62,30 @@ ACTION_ICONS: dict[str, str] = {
 
 
 def _foreground_color() -> str:
-    """取应用调色板的前景色（无应用实例时用固定蓝灰）。"""
+    """图标前景色：深色主题白、浅色主题黑。
+
+    不能读 QPalette：qdarktheme 调色板里的 ``WindowText`` 在深色主题下
+    仍是黑色（文字颜色由 QSS 负责），图标会几乎看不见。颜色取自当前
+    主题；切换主题后由 :func:`clear_cache` + 调用方重建 QIcon。
+    """
     try:
-        from PySide6.QtWidgets import QApplication
-        app = QApplication.instance()
-        if app is not None:
-            c = app.palette().color(QPalette.ColorRole.WindowText)
-            if c.isValid():
-                return c.name()
+        from . import theme
+        if theme.current_theme() == theme.THEME_LIGHT:
+            return "#000000"
     except Exception:
         pass
-    return _FALLBACK_COLOR
+    return "#ffffff"
 
 
 #: 图标渲染档位：QIcon 里塞两档位图，工具栏/菜单/HiDPI 由 Qt 平滑缩放取用
 _ICON_SIZES = (32, 64)
 #: (名字, 颜色, 尺寸) → QPixmap（同一图标被多处取用，只渲染一次）
 _PIXMAP_CACHE: dict[tuple[str, str, int], QPixmap] = {}
+
+
+def clear_cache() -> None:
+    """清空位图缓存；切换主题后调用，让图标按新前景色重新渲染。"""
+    _PIXMAP_CACHE.clear()
 
 
 def _drop_qta_cache() -> None:

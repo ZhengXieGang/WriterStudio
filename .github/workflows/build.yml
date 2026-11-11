@@ -75,11 +75,22 @@ jobs:
               Qt 系统库供 PyInstaller 收集钩子导入 PySide6；python3/pip 供构建）
         if: runner.os == 'Linux'
         run: |
+          # 缺 libglib 时 PyInstaller 探测 Qt 路径的子进程会 ImportError，
+          # 它只在日志里留一行 WARNING 就跳过**全部** Qt 插件目录——打出来的
+          # AppImage 没有 platforms/libqxcb.so，干净系统上直接起不来
+          # （appimage.github.io 的收录测试就是这么挂的）。
+          # xcb 插件还有一组系统依赖，构建机装齐后 make_appimage 的 ldd 闭包
+          # 才能把它们一起收进包里；构建机上没有的库只会被跳过。
           apt-get update
           apt-get install -y --no-install-recommends \
             git file ca-certificates python3 python3-pip binutils \
             libpython3.10 \
-            libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1
+            libegl1 libgl1 libglib2.0-0 libxkbcommon0 libxkbcommon-x11-0 \
+            libdbus-1-3 libfontconfig1 libsm6 libice6 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-render-util0 libxcb-shape0 libxcb-xkb1 libxcb-xinerama0 \
+            libxcb-xinput0 libxcb1 libxcb-util1 libxcb-render0 libxcb-shm0 \
+            libxcb-randr0 libxcb-xfixes0 libxcb-sync1
       - uses: actions/setup-python@v5
         if: "!matrix.container"   # 容器：CPython 工具缓存要 GLIBC 2.38，22.04 只有 2.35，改用系统 python3
         with:
@@ -106,6 +117,21 @@ jobs:
           EOF
           chmod +x /tmp/appimagetool
           ${{ matrix.py }} scripts/make_appimage.py --appimagetool /tmp/appimagetool
+      - name: AppImage 完整性自检（Qt 插件确实进包，且依赖齐全）
+        if: runner.os == 'Linux'
+        run: |
+          QXCB=$(find dist/AppDir/opt/WriterStudio -path '*/Qt/plugins/platforms/libqxcb.so' | head -n 1)
+          QOFF=$(find dist/AppDir/opt/WriterStudio -path '*/Qt/plugins/platforms/libqoffscreen.so' | head -n 1)
+          if [ -z "$QXCB" ] || [ -z "$QOFF" ]; then
+            echo "ERROR: PyInstaller 没有收集 Qt 平台插件（libqxcb/libqoffscreen）" >&2
+            echo "构建日志里若出现 'failed to obtain Qt library info'，说明构建机缺 Qt 系统库" >&2
+            find dist/AppDir/opt/WriterStudio -maxdepth 3 -type d >&2
+            exit 1
+          fi
+          if ldd "$QXCB" | grep 'not found'; then
+            echo "ERROR: xcb 插件仍有未打包的依赖（干净系统上会加载失败）" >&2
+            exit 1
+          fi
       - name: Ad-hoc 签名（macOS 未经签名无法启动）
         if: runner.os == 'macOS'
         run: codesign --deep --force -s - dist/WriterStudio.app
@@ -127,16 +153,37 @@ jobs:
             dist/WriterStudioMCP.exe
           if-no-files-found: error
 
+  smoke:
+    # 干净容器里真的把 AppImage 跑起来。构建容器装了全套系统库，在那里测
+    # “自带全部依赖”永远测不出漏打包；这里只有 ubuntu:22.04 本体。
+    needs: build
+    runs-on: ubuntu-latest
+    container: "ubuntu:22.04"
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: WriterStudio-linux64
+      - name: 无桌面启动自检（Qt 平台插件 / 依赖是否真的在包里）
+        run: |
+          APP=$(find . -name 'WriterStudio-*.AppImage' | head -n 1)
+          echo "Testing $APP"
+          chmod +x "$APP"
+          APPIMAGE_EXTRACT_AND_RUN=1 QT_QPA_PLATFORM=offscreen \
+            timeout 120 "$APP" --self-check
+
   release:
     # 仅标签触发：汇总产物并发布 GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write          # 创建 Release 的唯一写权限点
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0       # 发布说明取自标签注释，需要完整标签对象
       - name: 版本核对（tag 与 pyproject 不一致仅提醒，不阻断）
         run: |
           PROJ_VER=$(python3 -c \
@@ -163,19 +210,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cat > /tmp/relnotes.md <<'EOF'
-          ## 下载
-
-          - **Windows**：`WriterStudio.exe` —— 下载后双击运行，免安装；
-            `WriterStudioMCP.exe` 为 AI 智能排版（MCP）桥，无需运行，
-            在 AI 应用的 MCP 配置里引用即可（用法见 README）
-          - **macOS**：`WriterStudio-macos.zip` —— 解压后将 WriterStudio.app 拖入「应用程序」
-          - **Linux**：`WriterStudio-x86_64.AppImage`（下载后 `chmod +x` 直接运行）
-            或 `WriterStudio-linux64.tar.gz`
-
-          `SHA256SUMS.txt` 为各文件的 SHA256 校验和。
-          EOF
-          gh release create "$GITHUB_REF_NAME" relpkg/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "WriterStudio $GITHUB_REF_NAME" \
-            --notes-file /tmp/relnotes.md
+          # 发布说明 = 标签注释：只列更新项，不写解释性文字。
+          # 标签没写注释时退回 GitHub 自动生成，避免空正文。
+          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > /tmp/relnotes.md
+          if [ -s /tmp/relnotes.md ]; then
+            gh release create "$GITHUB_REF_NAME" relpkg/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "WriterStudio $GITHUB_REF_NAME" \
+              --notes-file /tmp/relnotes.md
+          else
+            gh release create "$GITHUB_REF_NAME" relpkg/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "WriterStudio $GITHUB_REF_NAME" \
+              --generate-notes
+          fi

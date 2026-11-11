@@ -203,9 +203,8 @@ def test_main_window_send_requires_connection(qapp, monkeypatch):
 
 def test_main_window_send_job_to_fake(qapp, monkeypatch):
     """未设起点时弹窗询问；选「否」→ 直接发送（无起点停笔位）。"""
-    monkeypatch.setattr(
-        "writerstudio.ui.main_window.QMessageBox.question",
-        lambda *a, **k: QMessageBox.No)
+    monkeypatch.setattr("writerstudio.ui.main_window.ask_yes_no",
+                        lambda *a, **k: False)
     win = MainWindow()
     fake = FakeSerial()
     win.machine_panel.link.connect_backend(fake)
@@ -224,9 +223,8 @@ def test_main_window_send_job_to_fake(qapp, monkeypatch):
 
 def test_main_window_send_job_yes_moves_to_origin_first(qapp, monkeypatch):
     """未设起点选「是」：先读笔位 → 抬笔 → G0 到机械原点 → 再发作业。"""
-    monkeypatch.setattr(
-        "writerstudio.ui.main_window.QMessageBox.question",
-        lambda *a, **k: QMessageBox.Yes)
+    monkeypatch.setattr("writerstudio.ui.main_window.ask_yes_no",
+                        lambda *a, **k: True)
     win = MainWindow()
     doc = Document()
     doc.add(make_static_object([make_rect(0, 0, 10, 10)]))
@@ -733,13 +731,11 @@ def test_send_warns_when_marker_off_page(qapp, monkeypatch):
     sp.mode = MODE_REGISTERED
     warned = []
 
-    def fake_warning(*a, **k):
+    def fake_ask(*a, **k):
         warned.append(a)
-        return QMessageBox.No
+        return False
 
-    monkeypatch.setattr(
-        "writerstudio.ui.main_window.QMessageBox.warning",
-        staticmethod(fake_warning))
+    monkeypatch.setattr("writerstudio.ui.main_window.ask_yes_no", fake_ask)
     assert win._warn_stale_marker() is False
     assert warned
     # 页面内的标记不拦截
@@ -883,8 +879,8 @@ def test_firmware_label_only_shows_when_connected(qapp):
     win.close()
 
 
-def test_start_summary_copy_and_color(qapp):
-    """起点摘要：白字；不再提示拖动微调/机械原点询问。"""
+def test_start_summary_copy_follows_theme(qapp):
+    """起点摘要：不再提示拖动微调/机械原点询问；颜色交给主题（浅色下不白字白底）。"""
     from writerstudio.machine.start_point import MODE_CANVAS
     win = MainWindow()
     p = win.machine_panel
@@ -895,5 +891,5 @@ def test_start_summary_copy_and_color(qapp):
     assert "12.0" in text and "34.0" in text
     assert "可拖动" not in text
     assert "机械原点" not in text
-    assert p.start_summary.styleSheet() == "color:#fff;"
+    assert p.start_summary.styleSheet() == ""
     win.close()

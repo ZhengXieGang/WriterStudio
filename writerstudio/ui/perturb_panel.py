@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -25,8 +26,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+
+from ..i18n import tr, trf
 from ..perturb.params import PRESETS, PerturbParams
-from .style import unify_inputs
+from .icons import action_icon
+from .style import (fit_dialog_to_screen, localize_dialog_buttons, set_role,
+                    unify_inputs)
 
 _PRESET_ORDER = ["关闭", "轻微", "自然", "强烈", "手绘线条", "自定义"]
 
@@ -63,6 +68,14 @@ class PerturbPanel(QWidget):
             self._debounce.stop()
             self.paramsChanged.emit()
 
+    def refresh_icons(self) -> None:
+        """按当前主题前景色重建按钮图标（深色白 / 浅色黑）。"""
+        button = getattr(self, "reseed_btn", None)
+        if button is None:
+            return
+        ic = action_icon("reseed")
+        button.setIcon(ic if ic is not None else QIcon())
+
     # ------------------------------------------------------------------ UI
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
@@ -71,41 +84,40 @@ class PerturbPanel(QWidget):
         # 顶部：启用一行；预设 + 重摇一行。挤一行时最小宽 ~324px，
         # 超过默认停靠宽 280px，整列会被强制撑宽、画布被挤出画面外
         top = QHBoxLayout()
-        self.enable_check = QCheckBox("启用手写扰动")
+        self.enable_check = QCheckBox(tr("启用手写扰动"))
         self.enable_check.toggled.connect(self._on_changed)
         top.addWidget(self.enable_check)
         top.addStretch(1)
         outer.addLayout(top)
 
         top2 = QHBoxLayout()
-        top2.addWidget(QLabel("预设:"))
+        top2.addWidget(QLabel(tr("预设:")))
         self.preset_combo = QComboBox()
         for name in _PRESET_ORDER:
-            self.preset_combo.addItem(name)
-        self.preset_combo.currentTextChanged.connect(self._apply_preset)
+            # 显示文字翻译，但 userData 保留内部预设键（PRESETS 的键是中文）
+            self.preset_combo.addItem(tr(name), name)
+        self.preset_combo.currentIndexChanged.connect(
+            lambda _i: self._apply_preset(self.preset_combo.currentData()))
         top2.addWidget(self.preset_combo, 1)
 
-        self.reseed_btn = QPushButton("重新随机")
-        self.reseed_btn.setToolTip("更换随机种子，在保持参数不变的情况下换个手写效果")
-        from .icons import icon as _qicon
-        _dice = _qicon("reseed")
-        if _dice is not None:
-            self.reseed_btn.setIcon(_dice)
+        self.reseed_btn = QPushButton(tr("重新随机"))
+        self.reseed_btn.setToolTip(tr("更换随机种子，在保持参数不变的情况下换个手写效果"))
+        self.refresh_icons()
         self.reseed_btn.clicked.connect(self._on_reseed)
         top2.addWidget(self.reseed_btn)
         outer.addLayout(top2)
 
         self.seed_label = QLabel()
-        self.seed_label.setStyleSheet("color:#666;")
+        set_role(self.seed_label, "muted")
         outer.addWidget(self.seed_label)
 
         # 总强度（一条滑杆统一放大/缩小所有扰动）——矢量线条也靠它调强弱
         inten_row = QHBoxLayout()
-        inten_row.addWidget(QLabel("总强度"))
+        inten_row.addWidget(QLabel(tr("总强度")))
         self.intensity_slider = QSlider(Qt.Horizontal)
         self.intensity_slider.setRange(0, 300)      # 0.00 ~ 3.00
         self.intensity_slider.setToolTip(
-            "统一放大/缩小下面所有扰动量的总强度系数（1.0 = 标准）")
+            tr("统一放大/缩小下面所有扰动量的总强度系数（1.0 = 标准）"))
         self.intensity_slider.valueChanged.connect(self._on_intensity_slider)
         self.intensity_spin = QDoubleSpinBox()
         self.intensity_spin.setRange(0.0, 10.0)
@@ -126,102 +138,104 @@ class PerturbPanel(QWidget):
 
         self._spin: dict[str, QDoubleSpinBox] = {}
 
-        g_char = QGroupBox("字符级扰动")
+        g_char = QGroupBox(tr("字符级扰动"))
         f1 = QFormLayout(g_char)
-        self._add(f1, "size_sigma", "字号抖动", 0.0, 0.30, 0.005, " 比例", 3)
-        self._add(f1, "char_x_sigma", "水平位移", 0.0, 100.0, 0.1, " mm")
-        self._add(f1, "char_y_sigma", "垂直位移", 0.0, 100.0, 0.1, " mm")
-        self._add(f1, "char_rot_sigma", "字符旋转", 0.0, 20.0, 0.1, " °")
-        self._add(f1, "char_shear_sigma", "体态斜切", 0.0, 15.0, 0.1, " °")
+        self._add(f1, "size_sigma", tr("字号抖动"), 0.0, 0.30, 0.005, tr(" 比例"), 3)
+        self._add(f1, "char_x_sigma", tr("水平位移"), 0.0, 100.0, 0.1, " mm")
+        self._add(f1, "char_y_sigma", tr("垂直位移"), 0.0, 100.0, 0.1, " mm")
+        self._add(f1, "char_rot_sigma", tr("字符旋转"), 0.0, 20.0, 0.1, " °")
+        self._add(f1, "char_shear_sigma", tr("体态斜切"), 0.0, 15.0, 0.1, " °")
         self._spin["char_shear_sigma"].setToolTip(
-            "字符整体斜切（x 随 y 线性偏移），让同一字的体态/肩线各不相同；\n"
-            "旋转保持正交，产生不了这种形态变化。")
+            tr("字符整体斜切（x 随 y 线性偏移），让同一字的体态/肩线各不相同；\n"
+            "旋转保持正交，产生不了这种形态变化。"))
         vbox.addWidget(g_char)
 
-        g_line = QGroupBox("行级扰动")
+        g_line = QGroupBox(tr("行级扰动"))
         f2 = QFormLayout(g_line)
-        self._add(f2, "line_y_sigma", "行基线抖动", 0.0, 200.0, 0.1, " mm")
-        self._add(f2, "line_start_sigma", "每行首字偏移", 0.0, 200.0, 0.1, " mm")
-        self._add(f2, "line_tilt_sigma", "行尾落差", 0.0, 200.0, 0.1, " mm")
+        self._add(f2, "line_y_sigma", tr("行基线抖动"), 0.0, 200.0, 0.1, " mm")
+        self._add(f2, "line_start_sigma", tr("每行首字偏移"), 0.0, 200.0, 0.1, " mm")
+        self._add(f2, "line_tilt_sigma", tr("行尾落差"), 0.0, 200.0, 0.1, " mm")
         self._spin["line_tilt_sigma"].setToolTip(
-            "行尾相对行首的高度漂移——人写的每行都不水平，\n"
-            "写一行就会往上飘或往下沉一点。")
-        self._add(f2, "char_spacing_sigma", "字距抖动", 0.0, 100.0, 0.05, " mm")
+            tr("行尾相对行首的高度漂移——人写的每行都不水平，\n"
+            "写一行就会往上飘或往下沉一点。"))
+        self._add(f2, "char_spacing_sigma", tr("字距抖动"), 0.0, 100.0, 0.05, " mm")
         self._spin["char_spacing_sigma"].setToolTip(
-            "字距沿行平滑起伏 + 逐字节奏（均值回归，不会越排越散）。\n"
-            "逐字独立的小抖动由「字符级 → 水平位移」提供。")
-        self._add(f2, "word_gap_em", "词间距", 0.0, 2.0, 0.02, " em", 2)
+            tr("字距沿行平滑起伏 + 逐字节奏（均值回归，不会越排越散）。\n"
+            "逐字独立的小抖动由「字符级 → 水平位移」提供。"))
+        self._add(f2, "word_gap_em", tr("词间距"), 0.0, 2.0, 0.02, " em", 2)
         self._spin["word_gap_em"].setToolTip(
-            "词与词、标点之后额外留出的空隙（字号的倍数），\n"
-            "词内字距自动聚拢——词内紧、词间松。0 = 关闭分组。")
+            tr("词与词、标点之后额外留出的空隙（字号的倍数），\n"
+            "词内字距自动聚拢——词内紧、词间松。0 = 关闭分组。"))
         vbox.addWidget(g_line)
 
         # 基线起伏：行尺度的随机缓弧 + 中尺度游走（每行形状都不同、
         # 行尾不回到行首高度）。旧的固定周期正弦波一眼就是机器画的。
-        g_sine = QGroupBox("基线起伏")
+        g_sine = QGroupBox(tr("基线起伏"))
         f3 = QFormLayout(g_sine)
-        self._add(f3, "sine_amplitude", "游走振幅", 0.0, 100.0, 0.1, " mm")
+        self._add(f3, "sine_amplitude", tr("游走振幅"), 0.0, 100.0, 0.1, " mm")
         self._spin["sine_amplitude"].setToolTip(
-            "基线游走的幅度：行整体在垂直方向的漂移量。\n"
-            "每行独立随机生成，不是固定周期的波浪。")
-        self._add(f3, "sine_wavelength", "起伏尺度", 1.0, 4000.0, 1.0, " mm")
+            tr("基线游走的幅度：行整体在垂直方向的漂移量。\n"
+            "每行独立随机生成，不是固定周期的波浪。"))
+        self._add(f3, "sine_wavelength", tr("起伏尺度"), 1.0, 4000.0, 1.0, " mm")
         self._spin["sine_wavelength"].setToolTip(
-            "行内起伏的空间尺度：越大越接近整行一道缓弧，\n"
-            "越小则行内多几个缓和的起伏（仍非周期性波浪）。")
+            tr("行内起伏的空间尺度：越大越接近整行一道缓弧，\n"
+            "越小则行内多几个缓和的起伏（仍非周期性波浪）。"))
         vbox.addWidget(g_sine)
 
-        g_stroke = QGroupBox("笔画级扰动")
+        g_stroke = QGroupBox(tr("笔画级扰动"))
         f4 = QFormLayout(g_stroke)
-        self._add(f4, "stroke_x_sigma", "笔画水平位移", 0.0, 50.0, 0.01, " mm", 3)
-        self._add(f4, "stroke_y_sigma", "笔画垂直位移", 0.0, 50.0, 0.01, " mm", 3)
-        self._add(f4, "stroke_theta_sigma", "笔画旋转", 0.0, 30.0, 0.1, " °")
-        self._add(f4, "stroke_stretch_sigma", "笔画伸缩", 0.0, 0.50, 0.01, "", 3)
-        self._add(f4, "stroke_trim_mm", "末端修剪", 0.0, 10.0, 0.05, " mm")
+        self._add(f4, "stroke_x_sigma", tr("笔画水平位移"), 0.0, 50.0, 0.01, " mm", 3)
+        self._add(f4, "stroke_y_sigma", tr("笔画垂直位移"), 0.0, 50.0, 0.01, " mm", 3)
+        self._add(f4, "stroke_theta_sigma", tr("笔画旋转"), 0.0, 30.0, 0.1, " °")
+        self._add(f4, "stroke_stretch_sigma", tr("笔画伸缩"), 0.0, 0.50, 0.01, "", 3)
+        self._add(f4, "stroke_trim_mm", tr("末端修剪"), 0.0, 10.0, 0.05, " mm")
         self._spin["stroke_stretch_sigma"].setToolTip(
-            "单笔画沿自身走向随机伸缩，让笔画长短/舒展程度各不相同。")
+            tr("单笔画沿自身走向随机伸缩，让笔画长短/舒展程度各不相同。"))
         self._spin["stroke_trim_mm"].setToolTip(
-            "每条笔画两端各随机剪掉 0~该值，起收笔长短参差、更接近手写。")
+            tr("每条笔画两端各随机剪掉 0~该值，起收笔长短参差、更接近手写。"))
         vbox.addWidget(g_stroke)
 
         # 线条起伏：只作用于图形线条（矢量图/表格线/边框/签名等），
         # 不作用于文字笔画——弯折文字会让字形变形
-        g_wobble = QGroupBox("线条起伏（仅图形线条）")
+        g_wobble = QGroupBox(tr("线条起伏"))
+        g_wobble.setToolTip(tr("只作用于图形线条（矢量图/表格线/边框/签名等），"
+                            "不影响文字笔画。"))
         f6 = QFormLayout(g_wobble)
-        self._add(f6, "line_wobble", "起伏振幅", 0.0, 30.0, 0.01, " mm", 3)
-        self._add(f6, "line_wobble_wavelength", "起伏波长", 0.5, 2000.0, 0.5, " mm")
-        self._add(f6, "line_tremor", "细微颤抖", 0.0, 10.0, 0.01, " mm", 3)
+        self._add(f6, "line_wobble", tr("起伏振幅"), 0.0, 30.0, 0.01, " mm", 3)
+        self._add(f6, "line_wobble_wavelength", tr("起伏波长"), 0.5, 2000.0, 0.5, " mm")
+        self._add(f6, "line_tremor", tr("细微颤抖"), 0.0, 10.0, 0.01, " mm", 3)
         self._spin["line_wobble"].setToolTip(
-            "整条线偏离理想位置的最大幅度：弓形（整条线微微弯向一侧）、\n"
+            tr("整条线偏离理想位置的最大幅度：弓形（整条线微微弯向一侧）、\n"
             "分段换劲（长线一段一段地「瞄—画」）与多尺度噪声的合成；\n"
             "作用于 SVG/TikZ/表格线/边框等图形线条，不影响文字笔画。\n"
             "按绝对毫米给：手画 15mm 直线偏离弦线约 0.2~0.5mm，与字号无关，\n"
-            "预设已按这个量级填好（「手绘线条」预设则按对象尺寸缩放）。")
+            "预设已按这个量级填好（「手绘线条」预设则按对象尺寸缩放）。"))
         self._spin["line_wobble_wavelength"].setToolTip(
-            "起伏的尺度：大值 = 长而缓的整体弯弧，小值 = 短而密的波纹；\n"
-            "同时决定分段「换劲」的长度（约 0.55 倍）。")
+            tr("起伏的尺度：大值 = 长而缓的整体弯弧，小值 = 短而密的波纹；\n"
+            "同时决定分段「换劲」的长度（约 0.55 倍）。"))
         self._spin["line_tremor"].setToolTip(
-            "快写时的手部不稳（2~4mm 尺度的小幅波动）：中段运笔快处明显、\n"
-            "两端慢处收敛，且成段忽强忽弱；只作用于图形线条。")
+            tr("快写时的手部不稳（2~4mm 尺度的小幅波动）：中段运笔快处明显、\n"
+            "两端慢处收敛，且成段忽强忽弱；只作用于图形线条。"))
         vbox.addWidget(g_wobble)
 
-        g_misc = QGroupBox("笔锋与平滑")
+        g_misc = QGroupBox(tr("笔锋与平滑"))
         f5 = QFormLayout(g_misc)
-        self._add(f5, "flare_mm", "笔锋长度", 0.0, 5.0, 0.1, " mm")
-        self._add(f5, "smoothing", "笔画平滑", 0.0, 1.0, 0.05, "", 2)
+        self._add(f5, "flare_mm", tr("笔锋长度"), 0.0, 5.0, 0.1, " mm")
+        self._add(f5, "smoothing", tr("笔画平滑"), 0.0, 1.0, 0.05, "", 2)
         self._spin["flare_mm"].setToolTip(
-            "收笔沿出笔方向甩出渐细的尖、起笔斜切入笔，模拟毛笔出锋；\n"
-            "0.8~1.5mm 适合 15~20mm 字。只需笔锋也生效（无需启用整体扰动）。")
+            tr("收笔沿出笔方向甩出渐细的尖、起笔斜切入笔，模拟毛笔出锋；\n"
+            "0.8~1.5mm 适合 15~20mm 字。只需笔锋也生效（无需启用整体扰动）。"))
         self._spin["smoothing"].setToolTip(
-            "对扰动后的笔画做邻点平均的轻微平滑，削弱折线毛刺。")
+            tr("对扰动后的笔画做邻点平均的轻微平滑，削弱折线毛刺。"))
         vbox.addWidget(g_misc)
 
-        g_out = QGroupBox("输出质量")
+        g_out = QGroupBox(tr("输出质量"))
         f7 = QFormLayout(g_out)
-        self._add(f7, "simplify_mm", "抽稀容差", 0.0, 2.0, 0.05, " mm")
+        self._add(f7, "simplify_mm", tr("抽稀容差"), 0.0, 2.0, 0.05, " mm")
         self._spin["simplify_mm"].setToolTip(
-            "对扰动输出做 Douglas–Peucker 抽稀（与导出抽稀同类），\n"
+            tr("对扰动输出做 Douglas–Peucker 抽稀（与导出抽稀同类），\n"
             "减少微小线段让高速书写更顺滑；0=不抽稀。0.1~0.3 一般够用，\n"
-            "过大会明显失真。")
+            "过大会明显失真。"))
         vbox.addWidget(g_out)
 
         vbox.addStretch(1)
@@ -229,7 +243,9 @@ class PerturbPanel(QWidget):
         outer.addWidget(scroll, 1)
         # 与机器控制面板同规格（用户要求各板块观感一致）：
         # 高度取全局 FIELD_HEIGHT、最小宽 88px、按钮最小高 30px
-        unify_inputs(self, min_width=88, button_height=30)
+        # 80px（而非机器面板的 88px）：英文标签更长，88 时窄停靠栏会多出
+        # 一条 4px 的横向滚动条；80 仍足够显示「0.000 比例」等常用值。
+        unify_inputs(self, min_width=80, button_height=30)
 
     def _add(self, form: QFormLayout, field: str, label: str,
              lo: float, hi: float, step: float, suffix: str, decimals: int = 2) -> None:
@@ -252,7 +268,9 @@ class PerturbPanel(QWidget):
             sp.setValue(getattr(p, field))
         self.intensity_spin.setValue(p.intensity)
         self.intensity_slider.setValue(int(round(p.intensity * 100)))
-        self.preset_combo.setCurrentText(self._detect_preset(p))
+        idx = self.preset_combo.findData(self._detect_preset(p))
+        if idx >= 0:
+            self.preset_combo.setCurrentIndex(idx)
         self._loading = False
         self._update_seed_label()
         self._update_enabled_state()
@@ -301,9 +319,11 @@ class PerturbPanel(QWidget):
             return
         self._params = self._collect()
         # 手动改动参数后切换到「自定义」
-        if self.preset_combo.currentText() not in ("自定义",):
+        if self.preset_combo.currentData() != "自定义":
             self._loading = True
-            self.preset_combo.setCurrentText("自定义")
+            idx = self.preset_combo.findData("自定义")
+            if idx >= 0:
+                self.preset_combo.setCurrentIndex(idx)
             self._loading = False
         self._update_enabled_state()
         self._debounce.start()      # 防抖：停顿后统一应用（flush 可立即落盘）
@@ -339,7 +359,7 @@ class PerturbPanel(QWidget):
         self.intensity_spin.setEnabled(active)
 
     def _update_seed_label(self) -> None:
-        self.seed_label.setText(f"随机种子：{self._params.seed}")
+        self.seed_label.setText(trf('随机种子：{v0}', v0=self._params.seed))
 
     # --------------------------------------------------------------- 接口
     def params(self) -> PerturbParams:
@@ -356,11 +376,10 @@ class PerturbPanel(QWidget):
 class PerturbDialog(QDialog):
     """独立的扰动参数对话框（用于矢量/静态对象，非文本）。"""
 
-    def __init__(self, params: PerturbParams, title: str = "手写扰动",
+    def __init__(self, params: PerturbParams, title: str | None = None,
                  size_hint: float = 10.0, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle(title)
-        self.resize(430, 620)
+        self.setWindowTitle(tr(title) if title else tr("手写扰动"))
         root = QVBoxLayout(self)
         self.panel = PerturbPanel(params=params, size_hint=size_hint)
         root.addWidget(self.panel, 1)
@@ -368,6 +387,8 @@ class PerturbDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
+        localize_dialog_buttons(self)
+        fit_dialog_to_screen(self, 430, 620)
 
     def result_params(self) -> PerturbParams:
         return self.panel.params()

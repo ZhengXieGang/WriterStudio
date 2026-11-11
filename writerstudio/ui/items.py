@@ -16,7 +16,10 @@
 
 from __future__ import annotations
 
+import itertools
 import math
+import queue
+import threading
 from enum import Enum, auto
 from typing import Optional
 
@@ -40,6 +43,8 @@ from PySide6.QtWidgets import (
     QGraphicsSceneMouseEvent,
 )
 
+
+from ..i18n import tr, trf
 from ..core.document import DocumentObject
 from ..core.geometry import AffineTransform
 from ..core.reference import KIND_SVG, ReferenceItem
@@ -61,11 +66,89 @@ ROTATE_OFFSET_PX = 22  # 旋转手柄距包围盒顶部的屏幕距离(px)
 MARGIN_MM = 6.0        # 包围盒外扩(mm)，用于容纳手柄/旋转柄
 HIT_GRAB_MM = 1.6      # 线条命中区沿线的抓取宽度(mm)
 MAX_IMAGE_PX = 3000    # 参考图最大解码边长(px)，避免超大图拖慢界面
+
+# ---------------------------------------------------------------------------
+# 显示缓存的异步渲染（超密笔画）
+# ---------------------------------------------------------------------------
+# 一页文字/一张密集矢量图可能有几万个点；按当前缩放重建位图时，主线程
+# 光栅化要几百毫秒，缩放停手后会明显顿一下。这里用一条守护线程渲染
+# QImage（QPainter 画到 QImage 允许在 GUI 线程之外），结果由 CanvasView
+# 用定时器取回并换成 QPixmap；期间界面继续显示旧位图的缩放预览。
+_CACHE_JOBS: "queue.Queue" = queue.Queue()
+_CACHE_RESULTS: dict[int, tuple[Optional[QImage], float]] = {}
+_CACHE_LOCK = threading.Lock()
+_CACHE_TOKENS = itertools.count(1)
+_CACHE_THREAD: Optional[threading.Thread] = None
+
+
+def _cache_worker() -> None:
+    while True:
+        job = _CACHE_JOBS.get()
+        if job is None:
+            return
+        token, path, bbox, w, h, color, pen_width = job
+        image: Optional[QImage] = None
+        try:
+            image = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
+            image.fill(Qt.transparent)
+            p = QPainter(image)
+            p.setRenderHint(QPainter.Antialiasing, True)
+            p.scale(w / max(bbox.width(), 1e-9), h / max(bbox.height(), 1e-9))
+            p.translate(-bbox.left(), -bbox.top())
+            pen = QPen(color)
+            pen.setCosmetic(True)
+            pen.setWidthF(pen_width)
+            pen.setCapStyle(Qt.RoundCap)
+            pen.setJoinStyle(Qt.RoundJoin)
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(path)
+            p.end()
+        except Exception:
+            image = None
+        with _CACHE_LOCK:
+            _CACHE_RESULTS[token] = (image, w / max(bbox.width(), 1e-9))
+            # 对象在渲染期间被删除时没人取结果；限制留存数量，避免位图越积越多
+            while len(_CACHE_RESULTS) > 8:
+                _CACHE_RESULTS.pop(next(iter(_CACHE_RESULTS)))
+
+
+def _ensure_cache_thread() -> None:
+    global _CACHE_THREAD
+    if _CACHE_THREAD is None or not _CACHE_THREAD.is_alive():
+        _CACHE_THREAD = threading.Thread(
+            target=_cache_worker, daemon=True, name="ws-display-cache")
+        _CACHE_THREAD.start()
+
+
+def submit_display_cache(path: QPainterPath, bbox: QRectF, w: int, h: int,
+                         color: QColor, pen_width: float) -> int:
+    """提交一次位图渲染，返回取结果用的 token（守护线程，不阻塞 GUI）。"""
+    _ensure_cache_thread()
+    token = next(_CACHE_TOKENS)
+    _CACHE_JOBS.put((token, QPainterPath(path), QRectF(bbox), w, h,
+                     QColor(color), float(pen_width)))
+    return token
+
+
+def take_display_cache(token: int):
+    """取回渲染结果（QImage, ppm）；未完成/已被取走时返回 None。"""
+    with _CACHE_LOCK:
+        return _CACHE_RESULTS.pop(token, None)
+
 # 参考图位图的总像素预算：位图按 4 字节/像素常驻（3000×2250 的 A4 扫描件
 # ≈ 27 MB/张，几张就把内存吃掉一大块）。参考层只用于对位，按显示尺寸给到
 # 约 8 像素/毫米（≈200 DPI）足够看清模板线条，故再叠一个总像素上限。
 MAX_IMAGE_PIXELS = 3_500_000
 SNAP_PX = 8.0          # 缩放吸附的屏幕容差(px)，换算成页面 mm 后比较
+
+#: 显示缓存按视图分辨率 1:1 渲染。缩放后只有“缓存小于目标分辨率”才重建，
+#: 因此刷新完成后贴图永远是 1:1 或缩小，不会因放大而糊；缩放过程中的旧图
+#: 按最近邻放大（硬边、不发虚），停手 160ms 内换回精确分辨率。
+#: 注：不做超采样——1:1 与矢量绘制的抗锯齿逐像素最接近，且省 36% 内存。
+DISPLAY_CACHE_BUILD_SCALE = 1.0
+#: 拖动预览位图同样超采样；放大对象拖动时先靠它顶住，松手再按新分辨率重建。
+FAST_PREVIEW_BUILD_SCALE = 1.25
 #: SVG 参考图按「每毫米多少像素」栅格化（显示尺寸变了会重建缓存）。取
 #: 16 px/mm（≈400 DPI）照顾小幅面模板的锐度——大幅面的那份会被上面的
 #: 像素预算压回来，浪费不了内存。
@@ -135,6 +218,19 @@ def qtransform_from(affine: AffineTransform) -> QTransform:
     return QTransform(*affine.as_tuple())
 
 
+def _max_linear_scale(m11: float, m12: float,
+                      m21: float, m22: float) -> float:
+    """2×2 线性变换的最大奇异值 = 任意方向上的最大放大倍数。
+
+    非等比缩放时用 sqrt(|det|) 会低估被拉长的那一轴，缓存按该值渲染后
+    贴图仍会被放大发虚；取最大奇异值保证两个方向都不欠采样。
+    """
+    s = m11 * m11 + m12 * m12 + m21 * m21 + m22 * m22
+    d = m11 * m22 - m12 * m21
+    disc = max(0.0, s * s - 4.0 * d * d)
+    return math.sqrt(max(0.0, 0.5 * (s + math.sqrt(disc))))
+
+
 class TransformGraphicsItem(QGraphicsObject):
     """可移动/缩放/旋转的图形项基类，持有 ``model.transform``。"""
 
@@ -158,12 +254,170 @@ class TransformGraphicsItem(QGraphicsObject):
         # 松手时整批一条撤销命令（见 _begin_drag / _commit_move）。
         self._group: list[tuple[TransformGraphicsItem, AffineTransform]] = []
 
+        # ---- 显示缓存 -----------------------------------------------------
+        # 整条笔画路径每帧重新光栅化（抗锯齿 + 圆头圆角）是缩放/平移卡顿的
+        # 主因：一页文字每帧可达几十到几百毫秒。这里按“当前视图分辨率”把
+        # 内容画进位图（设备像素），静止时 1:1 贴图；缩放/平移期间直接缩放
+        # 这张旧图（只重采样一张位图，与笔画数无关）；停手后由 CanvasView
+        # 逐个对象按新分辨率重建（见 _refresh_item_caches）。
+        self._disp_pix: Optional[QPixmap] = None
+        self._disp_ppm = 0.0        # 建图时的分辨率：设备像素 / 本地单位
+        self._CACHE_MAX_PIXELS = 4_000_000
+        self._CACHE_MAX_SIDE = 4096
+
         self.setFlags(
             QGraphicsItem.ItemIsSelectable
             | QGraphicsItem.ItemSendsGeometryChanges
         )
         self.setAcceptHoverEvents(True)
         self.sync()
+
+    # ------------------------------------------------------- 显示缓存工具
+    def invalidate_display_cache(self) -> None:
+        """内容/变换变化后丢弃位图缓存；下一帧按当前分辨率重建。"""
+        if self._disp_pix is not None:
+            self._disp_pix = None
+            self.update()
+
+    def display_cache_ppm(self) -> float:
+        return self._disp_ppm
+
+    def cache_build_scale(self) -> float:
+        """显示缓存的绘制系数（默认 1:1，子类可按需放大）。"""
+        return DISPLAY_CACHE_BUILD_SCALE
+
+    def display_cache_target_ppm(self, view_ppm: float) -> float:
+        """当前视图下这张缓存应达到的分辨率（含绘制系数与像素预算封顶）。
+
+        视图用它与 ``display_cache_ppm`` 比较：小于目标说明贴图时会被放大，
+        必须重建；大于目标就是缩小贴图，画质只会更好。
+        """
+        bbox = self._local_bbox()
+        if bbox.isEmpty():
+            return 0.0
+        ppm = self.display_ppm_for(view_ppm) * self.cache_build_scale()
+        _, _, eff = self._cache_pixmap_size(bbox, ppm)
+        return eff
+
+    def display_cache_max_pixels(self) -> int:
+        return self._CACHE_MAX_PIXELS
+
+    def display_element_count(self) -> int:
+        """内容复杂度（描边元素数），用于决定是否值得异步渲染。"""
+        return 0
+
+    def display_cache_async_threshold(self) -> int:
+        """0 = 不走异步（参考图等由主线程直接重建）。"""
+        return 0
+
+    def request_display_cache_async(self, view_ppm: float) -> int:
+        """异步重建位图（只有复杂对象需要；返回取结果的 token）。"""
+        return 0
+
+    def apply_display_cache(self, image: QImage, ppm: float) -> None:
+        if image is None or image.isNull():
+            return
+        self._disp_pix = QPixmap.fromImage(image)
+        self._disp_ppm = ppm
+        if not getattr(self, "_drag_kind", None):
+            # 静态重建完成后拖动预览位图可以释放（拖拽中则保留，别打断预览）
+            if hasattr(self, "_fast_pix"):
+                self._fast_pix = None
+        self.update()
+
+    def rebuild_display_cache_now(self, view_ppm: float) -> None:
+        """立即按视图分辨率重建位图（视图的增量刷新队列调用）。"""
+        bbox = self._local_bbox()
+        if bbox.isEmpty():
+            return
+        self._build_display_cache(bbox, self.display_ppm_for(view_ppm))
+
+    def _request_display_cache_refresh(self) -> None:
+        """请观察本场景的视图在空闲时重算显示缓存。"""
+        sc = self.scene()
+        if sc is None:
+            return
+        for v in sc.views():
+            cb = getattr(v, "_schedule_cache_refresh", None)
+            if callable(cb):
+                cb()
+
+    def display_ppm_for(self, view_ppm: float) -> float:
+        """把视图分辨率（设备像素/mm）换算到本 item 的本地坐标。
+
+        取 item 变换的最大奇异值：非等比缩放时按较大的那一轴给分辨率，
+        避免另一轴贴图时被放大。
+        """
+        t = self.transform()
+        return max(1e-6, view_ppm * _max_linear_scale(
+            t.m11(), t.m12(), t.m21(), t.m22()))
+
+    def _cache_pixmap_size(self, bbox: QRectF, ppm: float):
+        """位图像素尺寸：按分辨率算，再按单边/面积预算降采样。"""
+        w = bbox.width() * ppm
+        h = bbox.height() * ppm
+        if w <= 0.0 or h <= 0.0:
+            return 0, 0, ppm
+        k = min(1.0, self._CACHE_MAX_SIDE / w, self._CACHE_MAX_SIDE / h,
+                math.sqrt(self._CACHE_MAX_PIXELS / (w * h)))
+        return max(1, int(round(w * k))), max(1, int(round(h * k))), ppm * k
+
+    @staticmethod
+    def _painter_ppm(painter: QPainter) -> float:
+        """当前画笔的 device 像素/本地单位（取线性变换的最大奇异值）。
+
+        QGraphicsItem::paint 里 ``worldTransform`` 只含 item→场景这一段，
+        视图缩放/DPR 在 device transform 里；必须用 combinedTransform。
+        用最大奇异值而不是某一条轴的缩放：对象被非等比拉伸时，两条轴
+        都要有足够分辨率，否则较长的轴会被放大发虚。
+        """
+        wt = painter.combinedTransform()
+        return max(1e-6, _max_linear_scale(
+            wt.m11(), wt.m12(), wt.m21(), wt.m22()))
+
+    def _build_display_cache(self, bbox: QRectF, ppm: float) -> None:
+        """子类实现：把内容按 ppm 画进 self._disp_pix。"""
+
+    @staticmethod
+    def _draw_pixmap_sharp(painter: QPainter, target: QRectF, pix: QPixmap,
+                           pix_ppm: float, target_ppm: float,
+                           rotated: bool = False) -> None:
+        """贴显示缓存：位图分辨率不足时关掉双线性插值。
+
+        双线性把旧位图放大 = 糊；最近邻放大虽然有点锯齿，但边缘仍然锐利，
+        且 160ms 后视图就会按新分辨率重建。位图够大（缩小贴图）时保留平滑。
+
+        轴对齐且正好 1:1 时也走最近邻：双线性会因亚像素相位把边缘摊开
+        半像素，看起来发虚；整像素贴图与矢量绘制的锐度基本一致。对象被
+        旋转时保留平滑（最近邻旋转会让字形边缘出现锯齿）。
+        """
+        painter.save()
+        threshold = 0.98 if rotated else 1.02
+        if pix_ppm < target_ppm * threshold:
+            painter.setRenderHint(QPainter.SmoothPixmapTransform, False)
+        painter.drawPixmap(target, pix, QRectF(pix.rect()))
+        painter.restore()
+
+    @staticmethod
+    def _painter_rotated(painter: QPainter) -> bool:
+        ct = painter.combinedTransform()
+        return abs(ct.m12()) > 1e-6 or abs(ct.m21()) > 1e-6
+
+    def _paint_with_display_cache(self, painter: QPainter,
+                                  bbox: QRectF) -> bool:
+        if bbox.isEmpty():
+            return False
+        # 画笔的 combinedTransform 已是“设备像素/本地单位”，不要再乘
+        # item 的线性缩放（那会把 item 缩放算两次，白吃内存）。
+        target_ppm = self._painter_ppm(painter)
+        if self._disp_pix is None:
+            self._build_display_cache(bbox, target_ppm)
+        if self._disp_pix is None or self._disp_pix.isNull():
+            return False
+        self._draw_pixmap_sharp(painter, bbox, self._disp_pix,
+                                self._disp_ppm, target_ppm,
+                                rotated=self._painter_rotated(painter))
+        return True
 
     # --------------------------------------------------------- 子类需要实现
     def _local_bbox(self) -> QRectF:
@@ -529,7 +783,7 @@ class TransformGraphicsItem(QGraphicsObject):
         if kind == 'move':
             self._commit_move()
         elif kind == 'handle' and self._pending is not None:
-            text = "旋转" if self._mode == Handle.ROTATE else "缩放"
+            text = tr('旋转') if self._mode == Handle.ROTATE else tr('缩放')
             self._commit_transform(self._pending, text)
         elif kind in ('move', 'handle') and self._pending is None:
             self.sync()   # 未产生有效变换 → 还原视图
@@ -557,8 +811,9 @@ class TransformGraphicsItem(QGraphicsObject):
             # 兼容程序化预览（没有经过 mouseMoveEvent，拿不到位移量）
             entries.append((self.model, self._pending))
         if entries:
-            text = (f"移动 {len(entries)} 个对象"
-                    if len(entries) > 1 else f"移动{self.ACTION_NOUN}")
+            text = (trf('移动 {v0} 个对象', v0=len(entries))
+                    if len(entries) > 1
+                    else trf('移动{v0}', v0=tr(self.ACTION_NOUN)))
             self.controller.set_model_transforms(entries, text)
         # 同伴没有自己的鼠标事件，预览状态由发起者统一收尾
         for it, _start in self._group:
@@ -576,7 +831,8 @@ class TransformGraphicsItem(QGraphicsObject):
         if transform is None or transform == self.model.transform:
             return
         self.controller.set_model_transform(
-            self.model, transform, f"{verb}{self.ACTION_NOUN}")
+            self.model, transform,
+            trf('{v0}{v1}', v0=tr(verb), v1=tr(self.ACTION_NOUN)))
 
     # ------------------------------------------------------------- 选择反馈
     def itemChange(self, change, value):
@@ -593,10 +849,9 @@ class ObjectGraphicsItem(TransformGraphicsItem):
 
     ACTION_NOUN = "对象"
 
-    #: 拖动/缩放预览位图的像素预算。拖动手感优先：位图只用于拖拽期间的
-    #: 快速预览，松手立即回到矢量全质量绘制，因此分辨率不够糊一点也不影响
-    #: 最终画面。
-    _FAST_PREVIEW_PIXELS = 2_000_000
+    #: 拖动/缩放预览位图的像素预算。按设备像素计，8M ≈ 32MB（仅拖拽期间
+    #: 存在）；预算主要用于防止把整页放大到几十倍时一次分配上百 MB。
+    _FAST_PREVIEW_PIXELS = 8_000_000
 
     def __init__(self, obj: DocumentObject, controller: DocumentController) -> None:
         self._path = QPainterPath()
@@ -624,7 +879,15 @@ class ObjectGraphicsItem(TransformGraphicsItem):
             self._path_rev = rev
             self.prepareGeometryChange()
             self._rebuild()
-        self.setTransform(qtransform_from(self.model.transform))
+        new_t = qtransform_from(self.model.transform)
+        if new_t != self.transform():
+            # 纯平移：位图内容不变，直接随位图框平移即可（拖动提交后不必
+            # 重建）；旋转/缩放才需要按新方向重建，否则下一帧会画出旧角度。
+            old = self.transform()
+            if ((old.m11(), old.m12(), old.m21(), old.m22())
+                    != (new_t.m11(), new_t.m12(), new_t.m21(), new_t.m22())):
+                self._disp_pix = None
+        self.setTransform(new_t)
         self.setVisible(bool(self.model.visible))
         self.update()
 
@@ -642,6 +905,8 @@ class ObjectGraphicsItem(TransformGraphicsItem):
             if s.closed:
                 path.closeSubpath()
         self._path = path
+        self._disp_pix = None       # 笔画变了，位图缓存失效
+        self._fast_pix = None       # 拖拽预览也一起作废（内容已变）
         # 命中区 = 笔迹沿线一个小抓取宽度，而不是 boundingRect——
         # boundingRect 带 6mm+ 的手柄余量，会让线条旁的空白也能抓起对象、
         # 且橡皮框选在那里起不了作用。
@@ -681,20 +946,65 @@ class ObjectGraphicsItem(TransformGraphicsItem):
         return self.boundingRect().contains(local_pos)
 
     def _paint_content(self, painter: QPainter) -> None:
-        # 拖动/缩放期间用起始时刻的位图快速预览：把整条笔画路径（文本对象
-        # 可能有上万个点）每帧重新光栅化是拖拽卡顿的主因。位图按当前视图
-        # 分辨率渲染一次，之后每帧只做一次图像变换；松手后恢复矢量绘制。
-        if self._fast_pix is not None and not self._fast_pix.isNull():
-            r = self._fast_rect
-            painter.drawPixmap(QRectF(r.left(), r.top(), r.width(), r.height()),
-                               self._fast_pix, QRectF(self._fast_pix.rect()))
+        # 缩放/旋转手柄拖动期间用起始时刻的本地位图预览（内容会随变换被
+        # 拉伸）；纯移动不改分辨率，直接用显示缓存 1:1 跟随，最清晰。
+        if (self._drag_kind == 'handle' and self._fast_pix is not None
+                and not self._fast_pix.isNull()):
+            self._draw_fast_preview(painter)
             return
-        self._paint_strokes(painter)
+        # 旋转/缩放提交后旧显示缓存已作废：先用拖动预览位图顶到新缓存
+        # 建成为止，避免下一帧在主线程同步光栅化整条笔迹。
+        if (self._disp_pix is None and self._fast_pix is not None
+                and not self._fast_pix.isNull()):
+            self._draw_fast_preview(painter)
+            return
+        bbox = self._local_bbox()
+        if not self._paint_with_display_cache(painter, bbox):
+            self._paint_strokes(painter)
 
-    def _paint_strokes(self, painter: QPainter) -> None:
+    #: 超过这个描边元素数就改由后台线程重建缓存（主线程渲染要几百毫秒）
+    _DISPLAY_CACHE_ASYNC_ELEMS = 12000
+
+    def display_element_count(self) -> int:
+        return self._path.elementCount()
+
+    def display_cache_async_threshold(self) -> int:
+        return self._DISPLAY_CACHE_ASYNC_ELEMS
+
+    def request_display_cache_async(self, view_ppm: float) -> int:
+        ppm = self.display_ppm_for(view_ppm)
+        bbox = self._local_bbox()
+        # 与同步路径一致：按视图分辨率×绘制系数渲染，笔画宽度补偿后再
+        # 缩回屏幕，保证最终线宽仍是 1.6 设备像素。
+        w, h, eff = self._cache_pixmap_size(
+            bbox, ppm * self.cache_build_scale())
+        return submit_display_cache(
+            self._path, bbox, w, h, COLOR_INK, 1.6 * eff / max(ppm, 1e-6))
+
+    def _build_display_cache(self, bbox: QRectF, ppm: float) -> None:
+        if self._path.isEmpty():
+            return
+        w, h, eff = self._cache_pixmap_size(
+            bbox, ppm * self.cache_build_scale())
+        if w <= 0 or h <= 0:
+            return
+        pix = QPixmap(w, h)
+        pix.fill(Qt.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.scale(eff, eff)
+        p.translate(-bbox.left(), -bbox.top())
+        self._paint_strokes(p, 1.6 * eff / max(ppm, 1e-6))
+        p.end()
+        self._disp_pix = pix
+        self._disp_ppm = eff
+        # 显示缓存已按新方向/分辨率重建，拖拽预览位图可以退休了
+        self._fast_pix = None
+
+    def _paint_strokes(self, painter: QPainter, width: float = 1.6) -> None:
         pen = QPen(COLOR_INK)
         pen.setCosmetic(True)
-        pen.setWidthF(1.6)
+        pen.setWidthF(width)
         pen.setCapStyle(Qt.RoundCap)
         pen.setJoinStyle(Qt.RoundJoin)
         painter.setPen(pen)
@@ -702,19 +1012,28 @@ class ObjectGraphicsItem(TransformGraphicsItem):
         painter.drawPath(self._path)
 
     def _drag_paint_hint_changed(self) -> None:
-        # 开始拖动不预建位图：单击对象也会走 _begin_drag，没必要为一次点击
-        # 光栅化整条笔迹；真正发生移动时再按需构建（见 _ensure_fast_preview）。
-        if self._drag_kind not in ('move', 'handle'):
+        if self._drag_kind == 'handle':
+            # 第一次真正拖动时按当前分辨率构建（单击不预建）
             self._fast_pix = None
             self._fast_rect = QRectF()
+        elif self._drag_kind == 'move':
+            # 纯平移不改方向/比例：不建预览位图，直接复用显示缓存 1:1 跟随
+            self._fast_pix = None
+            self._fast_rect = QRectF()
+        else:
+            # 拖动/缩放结束：位图保留到新显示缓存建成为止（旋转提交后的
+            # 第一帧也有正确方向的预览），并让视图按新分辨率重建。
+            self._request_display_cache_refresh()
         self.update()
 
     def _ensure_fast_preview(self) -> None:
+        if self._drag_kind != 'handle':
+            return
         if self._fast_pix is None:
             self._build_fast_preview()
 
     def _build_fast_preview(self) -> None:
-        """按当前视图分辨率把笔迹光栅化，供拖动/缩放期间快速绘制。"""
+        """按当前视图分辨率把笔迹光栅化，供缩放/旋转拖动期间快速绘制。"""
         self._fast_pix = None
         self._fast_rect = QRectF()
         if self._path.isEmpty():
@@ -722,26 +1041,46 @@ class ObjectGraphicsItem(TransformGraphicsItem):
         rect = self._path.boundingRect()
         if rect.width() <= 1e-6 or rect.height() <= 1e-6:
             return
-        # 每毫米多少像素 = 视图缩放 × 对象当前变换的线性缩放
-        det = abs(self.transform().determinant())
-        scale = math.sqrt(det) if det > 1e-12 else 1.0
-        ppm = max(0.2, (1.0 / self._scene_per_px()) * scale)
-        w = max(1, int(math.ceil(rect.width() * ppm)))
-        h = max(1, int(math.ceil(rect.height() * ppm)))
+        # 每毫米多少设备像素 = 视图缩放 × 设备像素比 × 对象最大线性缩放
+        t = self.transform()
+        scale = _max_linear_scale(t.m11(), t.m12(), t.m21(), t.m22())
+        dpr = 1.0
+        sc = self.scene()
+        if sc is not None and sc.views():
+            dpr = max(1.0, sc.views()[0].devicePixelRatioF())
+        target = max(0.2, (1.0 / self._scene_per_px()) * scale * dpr)
+        w = max(1, int(math.ceil(rect.width() * target
+                                  * FAST_PREVIEW_BUILD_SCALE)))
+        h = max(1, int(math.ceil(rect.height() * target
+                                  * FAST_PREVIEW_BUILD_SCALE)))
         # 像素预算：超大对象/高倍缩放时降采样，避免一次拖拽吃掉几十 MB
         k = min(1.0, (self._FAST_PREVIEW_PIXELS / float(w * h)) ** 0.5)
         w = max(1, int(w * k))
         h = max(1, int(h * k))
+        sx = w / rect.width()
+        sy = h / rect.height()
         img = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
         img.fill(Qt.transparent)
         p = QPainter(img)
         p.setRenderHint(QPainter.Antialiasing, True)
-        p.scale(w / rect.width(), h / rect.height())
+        p.scale(sx, sy)
         p.translate(-rect.left(), -rect.top())
-        self._paint_strokes(p)
+        self._paint_strokes(p, 1.6 * ((sx + sy) * 0.5) / max(target, 1e-6))
         p.end()
         self._fast_pix = QPixmap.fromImage(img)
         self._fast_rect = rect
+
+    def _draw_fast_preview(self, painter: QPainter) -> None:
+        r = self._fast_rect
+        if (self._fast_pix is None or self._fast_pix.isNull()
+                or r.width() <= 1e-9):
+            return
+        pix_ppm = self._fast_pix.width() / r.width()
+        target = self._painter_ppm(painter)
+        self._draw_pixmap_sharp(
+            painter, QRectF(r.left(), r.top(), r.width(), r.height()),
+            self._fast_pix, pix_ppm, target,
+            rotated=self._painter_rotated(painter))
 
     def boundingRect(self) -> QRectF:
         # 文本框手柄钉在框缘/框角上，可能落在墨迹包围盒之外
@@ -975,16 +1314,16 @@ class ObjectGraphicsItem(TransformGraphicsItem):
                 # 左缘手柄同时改宽度与位移：两个命令打进同一个宏，
                 # 一次撤销整步还原
                 stack = self.controller.undo_stack
-                stack.beginMacro("调整表格宽度" if self._is_markdown
-                                 else "调整文本框宽度")
+                stack.beginMacro(tr('调整表格宽度') if self._is_markdown
+                                 else tr('调整文本框宽度'))
                 if transform_changed:
                     self.controller.set_model_transform(
-                        self.model, self._pending, "调整文本框")
+                        self.model, self._pending, tr("调整文本框"))
                 if width_changed:
                     self.controller.replace_objects(
                         [(self.model, self._frame_snap,
                           snapshot_object(self.model))],
-                        "调整表格宽度" if self._is_markdown else "调整文本框宽度")
+                        tr('调整表格宽度') if self._is_markdown else tr('调整文本框宽度'))
                 stack.endMacro()
             self._pending = None
             self._frame_snap = None
@@ -1013,6 +1352,10 @@ class ReferenceGraphicsItem(TransformGraphicsItem):
         self._cache_key: Optional[tuple] = None
         self._load_error = False
         super().__init__(ref, controller)
+        # 参考图通常一张铺满页面：高倍缩放时 4M 像素的预算会不够，导致
+        # 缓存被迫降采样、每帧又被放大重采样。单张参考图放宽到 12M。
+        self._CACHE_MAX_PIXELS = 12_000_000
+        self._CACHE_MAX_SIDE = 8192
 
     @property
     def ref(self) -> ReferenceItem:
@@ -1038,6 +1381,7 @@ class ReferenceGraphicsItem(TransformGraphicsItem):
             return
         self._cache_key = key
         self._pix = None
+        self._disp_pix = None       # 源图/尺寸变了，显示缓存失效
         self._load_error = False
         if not ref.path:
             self._load_error = True
@@ -1094,6 +1438,10 @@ class ReferenceGraphicsItem(TransformGraphicsItem):
         # 大头，关掉后近似整块搬移；松手立即恢复平滑。只影响拖拽体验，
         # 静止时画质不变。
         self._set_views_smooth_pixmap(not self._drag_kind)
+        if not self._drag_kind:
+            # 位图缓存保留（新尺寸下先缩放着用），交给视图在空闲时按新
+            # 分辨率重建；不再在这里作废，避免下一帧主线程同步重建大图。
+            self._request_display_cache_refresh()
 
     def _rebuild(self) -> None:
         self._load_pixmap()
@@ -1162,15 +1510,8 @@ class ReferenceGraphicsItem(TransformGraphicsItem):
     def _paint_content(self, painter: QPainter) -> None:
         box = self._local_bbox()
         if self._pix is not None:
-            # item 本地坐标为 Y 向上，而位图是 Y 向下；直接 drawPixmap 会把图
-            # 上下颠倒。这里先把画笔翻到「位图坐标系」再绘制，使图片顶部落在
-            # 本地 y=height（视觉上方）。
-            painter.save()
-            painter.translate(box.left(), box.top() + box.height())
-            painter.scale(1.0, -1.0)
-            painter.drawPixmap(QRectF(0.0, 0.0, box.width(), box.height()),
-                               self._pix, QRectF(self._pix.rect()))
-            painter.restore()
+            if not self._paint_with_display_cache(painter, box):
+                self._paint_pix_direct(painter, box)
         else:
             painter.fillRect(box, QColor(235, 235, 240))
         # 细边框，方便看出参考图边界
@@ -1185,7 +1526,38 @@ class ReferenceGraphicsItem(TransformGraphicsItem):
             painter.setPen(QPen(COLOR_REF_BORDER))
             painter.drawText(box.adjusted(2, 2, -2, -2),
                              Qt.AlignCenter | Qt.TextWordWrap,
-                             f"参考图无法显示\n{self.model.path or '(无路径)'}")
+                             trf('参考图无法显示\n{v0}', v0=self.model.path or '(无路径)'))
+
+    def _paint_pix_direct(self, painter: QPainter, box: QRectF) -> None:
+        # item 本地坐标为 Y 向上，而位图是 Y 向下；直接 drawPixmap 会把图
+        # 上下颠倒。这里先把画笔翻到「位图坐标系」再绘制，使图片顶部落在
+        # 本地 y=height（视觉上方）。
+        painter.save()
+        painter.translate(box.left(), box.top() + box.height())
+        painter.scale(1.0, -1.0)
+        painter.drawPixmap(QRectF(0.0, 0.0, box.width(), box.height()),
+                           self._pix, QRectF(self._pix.rect()))
+        painter.restore()
+
+    def _build_display_cache(self, bbox: QRectF, ppm: float) -> None:
+        if self._pix is None or bbox.isEmpty():
+            return
+        w, h, eff = self._cache_pixmap_size(
+            bbox, ppm * self.cache_build_scale())
+        if w <= 0 or h <= 0:
+            return
+        pix = QPixmap(w, h)
+        pix.fill(Qt.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        p.scale(eff, eff)
+        p.translate(bbox.left(), bbox.top() + bbox.height())
+        p.scale(1.0, -1.0)
+        p.drawPixmap(QRectF(0.0, 0.0, bbox.width(), bbox.height()),
+                     self._pix, QRectF(self._pix.rect()))
+        p.end()
+        self._disp_pix = pix
+        self._disp_ppm = eff
 
     def mouseDoubleClickEvent(self, event: QGraphicsSceneMouseEvent) -> None:
         if event.button() == Qt.LeftButton:

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPolygonF, QTransform
 from PySide6.QtWidgets import QGraphicsScene, QGraphicsView
 
@@ -21,6 +21,7 @@ from .items import (
     COLOR_MARKER,
     ObjectGraphicsItem,
     ReferenceGraphicsItem,
+    take_display_cache,
 )
 
 COLOR_BG = QColor(96, 99, 106)
@@ -40,6 +41,18 @@ MARKER_HIT_PX = 10.0     # 笔位标记点击命中半径(px)
 MARKER_RADIUS_PX = 7.0   # 笔位标记绘制半径(px)
 ORIGIN_AXIS_PX = 34.0    # 坐标轴箭头长度(px)
 ORIGIN_RADIUS_PX = 4.0   # 原点圆圈半径(px)
+
+# ---- 缩放后的显示缓存重建 ------------------------------------------------
+# 对象在平移/缩放期间直接用按“上次静止时分辨率”渲染的位图（与笔画数
+# 无关），停手后视图再逐个对象按新分辨率重建，避免每帧重画整条路径。
+CACHE_REFRESH_IDLE_MS = 160     # 最后一次缩放/滚轮后等多久再重建
+CACHE_REFRESH_STEP_MS = 16      # 每次只重建一个对象，防止一次性卡住
+CACHE_REFRESH_RETRY_MS = 90     # 像素预算用完：歇一下再从队首继续
+CACHE_REFRESH_BUDGET_PX = 24_000_000   # 单次刷新最多分配的像素总量
+
+# 滚轮/滚动条移动期间关掉位图平滑插值：参考图缓存是整页位图，双线性
+# 重采样每帧要十几毫秒；停手 140ms 后恢复平滑（静止画质不变）。
+SMOOTH_RESTORE_IDLE_MS = 140
 
 
 class CanvasView(QGraphicsView):
@@ -106,6 +119,20 @@ class CanvasView(QGraphicsView):
         # blit 挪走时复位
         self._overlays: list[tuple, QPoint] = []
 
+        # 缩放停手后逐个对象重建显示缓存（见 _refresh_item_caches）
+        self._cache_timer = QTimer(self)
+        self._cache_timer.setSingleShot(True)
+        self._cache_timer.timeout.connect(self._refresh_item_caches)
+        self._cache_queue: list = []
+        self._smooth_timer = QTimer(self)
+        self._smooth_timer.setSingleShot(True)
+        self._smooth_timer.timeout.connect(self._restore_smooth_pixmaps)
+        # 复杂对象的位图在后台线程渲染，这里定时取回（不阻塞事件循环）
+        self._pending_cache: dict = {}
+        self._async_timer = QTimer(self)
+        self._async_timer.setInterval(30)
+        self._async_timer.timeout.connect(self._poll_async_caches)
+
         controller.documentChanged.connect(self.sync_scene)
         controller.documentReplaced.connect(self.rebuild_scene)
         self._scene.selectionChanged.connect(self._on_scene_selection)
@@ -117,6 +144,10 @@ class CanvasView(QGraphicsView):
         self._scene.clear()
         self._items.clear()
         self._ref_items.clear()
+        # 旧对象已被删除：作废排队中的缓存重建
+        self._cache_queue = []
+        self._pending_cache.clear()
+        self._async_timer.stop()
         # 参考层在底层（负 z），书写对象在上层
         for i, ref in enumerate(self.controller.doc.references):
             item = ReferenceGraphicsItem(ref, self.controller)
@@ -469,12 +500,135 @@ class CanvasView(QGraphicsView):
         factor = new_zoom / self.current_zoom()
         if abs(factor - 1.0) < 1e-9:
             return
+        self._begin_fast_rendering()
         # 以鼠标位置为锚：缩放后修正平移，使锚点 scene 坐标不变
         self.scale(factor, factor)
         new_scene = self.mapToScene(view_pos)
         delta = new_scene - old_scene
         self.translate(delta.x(), delta.y())
         self.zoomChanged.emit(self.current_zoom())
+        self._schedule_cache_refresh()
+
+    # ------------------------------------------------- 显示缓存的延迟重建
+    def _schedule_cache_refresh(self) -> None:
+        """缩放停手后再按新分辨率重建对象位图（连续滚轮期间一直顺延）。"""
+        self._cache_queue = []
+        self._cache_timer.start(CACHE_REFRESH_IDLE_MS)
+
+    # --------------------------------------------- 交互期间的快速绘制开关
+    def _begin_fast_rendering(self) -> None:
+        """滚轮/滚动条移动期间关掉位图平滑插值，停手后恢复。"""
+        hints = self.renderHints()
+        if hints & QPainter.SmoothPixmapTransform:
+            self.setRenderHints(hints & ~QPainter.SmoothPixmapTransform)
+        self._smooth_timer.start(SMOOTH_RESTORE_IDLE_MS)
+
+    def _restore_smooth_pixmaps(self) -> None:
+        # 参考图拖拽期间由 items 自己控制平滑开关，别在拖拽中途又打开
+        if any(getattr(it, "_drag_kind", None) for it in self._scene.items()):
+            self._smooth_timer.start(SMOOTH_RESTORE_IDLE_MS)
+            return
+        self.setRenderHints(self.renderHints() | QPainter.SmoothPixmapTransform)
+        self.viewport().update()
+
+    def _refresh_item_caches(self) -> None:
+        """把可见对象按当前缩放分辨率重渲染；一次一个，避免一次性卡住。
+
+        缩放/平移期间对象用的是旧分辨率的位图（直接缩放贴图，成本与笔画数
+        无关）。这里按“缓存目标分辨率”（含绘制系数与像素预算封顶）
+        判断：只有缓存小于目标时才重建——即贴图时绝不会被放大；缓存大于
+        目标属于缩小贴图，画质只会更好，不必重建。
+        """
+        view_ppm = self.current_zoom() * max(1.0, self.devicePixelRatioF())
+        rect = self.mapToScene(self.viewport().rect()).boundingRect()
+        queue = []
+        for it in self._scene.items():
+            if not isinstance(it, (ObjectGraphicsItem, ReferenceGraphicsItem)):
+                continue
+            if not it.isVisible():
+                continue
+            target = it.display_cache_target_ppm(view_ppm)
+            if target <= 0.0:
+                continue
+            cached = it.display_cache_ppm()
+            if cached > target * 2.5:
+                # 缩小太多：旧图太大，重建一张小的释放内存（保留旧图到
+                # 新图建成为止，不在下一帧主线程同步重建）
+                if it.sceneBoundingRect().intersects(rect):
+                    queue.append(it)
+                continue
+            if cached > 0.0 and cached >= target * 0.999:
+                continue        # 已经是目标分辨率（或更好）
+            if it.sceneBoundingRect().intersects(rect):
+                queue.append(it)
+        self._cache_queue = queue
+        self._refresh_one_cache(CACHE_REFRESH_BUDGET_PX)
+
+    def _refresh_one_cache(self, budget: int) -> None:
+        processed = 0
+        while self._cache_queue:
+            it = self._cache_queue.pop(0)
+            if it.scene() is not self._scene or not it.isVisible():
+                continue
+            view_ppm = self.current_zoom() * max(1.0, self.devicePixelRatioF())
+            # 超密对象：交给后台线程渲染，主线程不冻结（旧位图先顶着）
+            thr = it.display_cache_async_threshold()
+            if thr > 0 and it.display_element_count() >= thr:
+                if it not in self._pending_cache:
+                    self._pending_cache[it] = it.request_display_cache_async(view_ppm)
+                    self._async_timer.start()
+                continue
+            bbox = it.sceneBoundingRect()
+            ppm = it.display_ppm_for(view_ppm)
+            est = max(1.0, bbox.width() * ppm) * max(1.0, bbox.height() * ppm)
+            est = min(est, float(it.display_cache_max_pixels()))
+            if budget - est < 0 and processed > 0:
+                # 本次预算用完：剩下的对象保持旧位图（按最近邻贴图仍清晰），
+                # 稍后从队首继续，避免它们永久停在旧分辨率。
+                if self._cache_queue:
+                    QTimer.singleShot(CACHE_REFRESH_RETRY_MS,
+                                      self._refresh_item_caches)
+                return
+            # 无论预算多小，每轮至少重建一个，保证队列一定收敛
+            processed += 1
+            it.rebuild_display_cache_now(view_ppm)
+            QTimer.singleShot(
+                CACHE_REFRESH_STEP_MS,
+                lambda b=int(budget - est): self._refresh_one_cache(b))
+            return
+
+    def _poll_async_caches(self) -> None:
+        """取回后台渲染的位图；期间又缩放过/对象已删除的结果直接丢弃。"""
+        if not self._pending_cache:
+            self._async_timer.stop()
+            return
+        view_ppm = self.current_zoom() * max(1.0, self.devicePixelRatioF())
+        done = []
+        for it, token in list(self._pending_cache.items()):
+            try:
+                alive = it.scene() is self._scene
+            except RuntimeError:
+                alive = False
+            if not alive:
+                done.append(it)
+                continue
+            result = take_display_cache(token)
+            if result is None:
+                continue        # 还在渲染
+            done.append(it)
+            image, ppm = result
+            target = it.display_cache_target_ppm(view_ppm)
+            if image is None or ppm < target * 0.75:
+                # 渲染期间又放大/渲染失败：结果作废，稍后按新分辨率重来。
+                # 只有“明显不够清晰”才作废；比目标更大（小对象像素取整）
+                # 直接采用，避免来回重渲染。
+                self._schedule_cache_refresh()
+                continue
+            it.apply_display_cache(image, ppm)
+        for it in done:
+            self._pending_cache.pop(it, None)
+        if not self._pending_cache:
+            self._async_timer.stop()
 
     def zoom_in(self) -> None:
         self._zoom_at(self.viewport().rect().center(), 1.25)
@@ -493,6 +647,7 @@ class CanvasView(QGraphicsView):
         self.setTransform(QTransform().scale(z, -z))
         self.centerOn(page.width / 2.0, page.height / 2.0)
         self.zoomChanged.emit(self.current_zoom())
+        self._schedule_cache_refresh()
 
     def zoom_100(self) -> None:
         # 1mm = 3.78px（约 96dpi），便于直观预览实际尺寸
@@ -501,6 +656,7 @@ class CanvasView(QGraphicsView):
         page = self.controller.doc.page
         self.centerOn(page.width / 2.0, page.height / 2.0)
         self.zoomChanged.emit(self.current_zoom())
+        self._schedule_cache_refresh()
 
     def selection_bbox(self) -> Optional[QRectF]:
         """当前选中项（书写对象 + 参考图）在页面坐标下的包围矩形。"""
@@ -525,6 +681,7 @@ class CanvasView(QGraphicsView):
         self.setTransform(QTransform().scale(z, -z))
         self.centerOn(rect.center())
         self.zoomChanged.emit(self.current_zoom())
+        self._schedule_cache_refresh()
         return True
 
     # ------------------------------------------------------------- 起点拾取
@@ -546,6 +703,10 @@ class CanvasView(QGraphicsView):
     def scrollContentsBy(self, dx: int, dy: int) -> None:
         super().scrollContentsBy(dx, dy)
         if dx or dy:
+            self._begin_fast_rendering()
+            # 平移会露出之前离屏、还停在旧分辨率的对象：停手后补刷一次，
+            # 避免它们一直以低分辨率（或放大糊）显示。
+            self._schedule_cache_refresh()
             # CacheBackground 的缓存在滚动条滚动时不会重建：平移后网格/
             # 纸张会"冻"在旧位置、与场景错位（物件正常移动，笔画编辑的
             # 局部重绘预览也会被错位背景糊住——表现为"笔画拖不动"）。

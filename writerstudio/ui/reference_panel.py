@@ -27,6 +27,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+
+from ..i18n import tr, trf
 from ..core.geometry import AffineTransform, BBox
 from ..core.reference import KIND_IMAGE, KIND_SVG, REFERENCE_KINDS, ReferenceItem
 from .controller import DocumentController
@@ -49,7 +51,7 @@ class ReferencePanel(QDockWidget):
 
     def __init__(self, controller: DocumentController,
                  parent: Optional[QWidget] = None) -> None:
-        super().__init__("参考层", parent)
+        super().__init__(tr("参考层"), parent)
         self.controller = controller
         self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         self._loading = False
@@ -67,7 +69,7 @@ class ReferencePanel(QDockWidget):
 
         # 透明度
         row = QHBoxLayout()
-        row.addWidget(QLabel("透明度"))
+        row.addWidget(QLabel(tr("透明度")))
         self.opacity = QSlider(Qt.Horizontal)
         self.opacity.setRange(5, 100)
         self.opacity.setValue(45)
@@ -79,7 +81,7 @@ class ReferencePanel(QDockWidget):
 
         # 旋转角度（精确对齐扫描件）
         arow = QHBoxLayout()
-        arow.addWidget(QLabel("旋转"))
+        arow.addWidget(QLabel(tr("旋转")))
         self.angle_spin = QDoubleSpinBox()
         self.angle_spin.setRange(-180.0, 180.0)
         self.angle_spin.setDecimals(2)
@@ -89,38 +91,38 @@ class ReferencePanel(QDockWidget):
         self.angle_spin.editingFinished.connect(self._on_angle)
         self.angle_spin.valueChanged.connect(self._on_angle)
         arow.addWidget(self.angle_spin, 1)
-        reset = QPushButton("归零")
+        reset = QPushButton(tr("归零"))
         reset.clicked.connect(lambda: self.angle_spin.setValue(0.0))
         arow.addWidget(reset)
         root.addLayout(arow)
 
-        self.lock_check = QCheckBox("锁定（不可拖动/缩放）")
+        self.lock_check = QCheckBox(tr("锁定（不可拖动/缩放）"))
         self.lock_check.toggled.connect(self._on_lock)
         root.addWidget(self.lock_check)
 
-        self.snap_resize_check = QCheckBox("缩放时吸附纸张边缘")
+        self.snap_resize_check = QCheckBox(tr("缩放时吸附纸张边缘"))
         self.snap_resize_check.setToolTip(
-            "拖动参考图手柄缩放时，被拖动的边/角靠近纸张边缘或页边距线\n"
-            "会自动吸附上去；按住 Shift 等比缩放时不吸附。")
+            tr("拖动参考图手柄缩放时，被拖动的边/角靠近纸张边缘或页边距线\n"
+            "会自动吸附上去；按住 Shift 等比缩放时不吸附。"))
         self.snap_resize_check.toggled.connect(self._on_snap_resize)
         root.addWidget(self.snap_resize_check)
 
         # 操作按钮
         grid = QHBoxLayout()
-        add_img = QPushButton("添加图片…")
+        add_img = QPushButton(tr("添加图片…"))
         add_img.clicked.connect(self.addImageRequested.emit)
-        add_svg = QPushButton("添加 SVG…")
+        add_svg = QPushButton(tr("添加 SVG…"))
         add_svg.clicked.connect(self.addSvgRequested.emit)
         grid.addWidget(add_img)
         grid.addWidget(add_svg)
         root.addLayout(grid)
 
         grid2 = QHBoxLayout()
-        fit = QPushButton("适应页边距")
+        fit = QPushButton(tr("适应页边距"))
         fit.clicked.connect(lambda: self._fit("fit"))
-        center = QPushButton("页面居中")
+        center = QPushButton(tr("页面居中"))
         center.clicked.connect(lambda: self._fit("center"))
-        rm = QPushButton("删除")
+        rm = QPushButton(tr("删除"))
         rm.clicked.connect(self._delete)
         grid2.addWidget(fit)
         grid2.addWidget(center)
@@ -128,17 +130,17 @@ class ReferencePanel(QDockWidget):
         root.addLayout(grid2)
 
         grid3 = QHBoxLayout()
-        snap_tl = QPushButton("贴左上角")
+        snap_tl = QPushButton(tr("贴左上角"))
         snap_tl.clicked.connect(lambda: self._snap("top-left"))
-        snap_c = QPushButton("贴页中心")
+        snap_c = QPushButton(tr("贴页中心"))
         snap_c.clicked.connect(lambda: self._snap("center"))
         grid3.addWidget(snap_tl)
         grid3.addWidget(snap_c)
         root.addLayout(grid3)
 
-        original = QPushButton("原尺寸贴页（模板 1:1）")
-        original.setToolTip("恢复到文件原始物理尺寸，并把左上角对齐页面原点，"
-                            "用于按实际尺寸绘制的对齐模板")
+        original = QPushButton(tr("原尺寸贴页"))
+        original.setToolTip(tr("恢复到文件原始物理尺寸，并把左上角对齐页面原点，"
+                            "用于按实际尺寸绘制的对齐模板"))
         original.clicked.connect(self._place_natural)
         root.addWidget(original)
 
@@ -184,8 +186,10 @@ class ReferencePanel(QDockWidget):
         self.list.clear()
         for ref in self.controller.doc.references:
             size = f"{ref.width_mm:.0f}×{ref.height_mm:.0f}mm"
-            item = QListWidgetItem(
-                f"{ref.name}  [{REFERENCE_KINDS.get(ref.kind, ref.kind)}]  {size}")
+            label = (f"{ref.name}  "
+                     f"[{tr(REFERENCE_KINDS.get(ref.kind, ref.kind))}]  {size}")
+            item = QListWidgetItem(label)
+            item.setToolTip(label)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Checked if ref.visible else Qt.Unchecked)
             item.setData(Qt.UserRole, ref.id)
@@ -247,7 +251,7 @@ class ReferencePanel(QDockWidget):
             # 绕图自身中心旋转
             local_c = ref.center_local()
             new_t = ref.transform @ AffineTransform.rotate_about(d, local_c)
-            self.controller.edit_reference(ref, "旋转参考图",
+            self.controller.edit_reference(ref, tr("旋转参考图"),
                                            {"transform": new_t})
 
     def _snap(self, kind: str) -> None:
@@ -282,7 +286,7 @@ class ReferencePanel(QDockWidget):
         want = item.checkState() == Qt.Checked
         if want != ref.visible:
             self.controller.edit_reference(
-                ref, "显示参考图" if want else "隐藏参考图", {"visible": want})
+                ref, tr('显示参考图') if want else tr('隐藏参考图'), {"visible": want})
 
     def _on_opacity(self, value: int) -> None:
         if self._loading:
@@ -298,7 +302,7 @@ class ReferencePanel(QDockWidget):
             return
         for ref in self.selected_refs():
             self.controller.edit_reference(
-                ref, "锁定参考图" if checked else "解锁参考图",
+                ref, tr('锁定参考图') if checked else tr('解锁参考图'),
                 {"locked": bool(checked)})
 
     def _on_snap_resize(self, checked: bool) -> None:
@@ -306,7 +310,7 @@ class ReferencePanel(QDockWidget):
             return
         for ref in self.selected_refs():
             self.controller.edit_reference(
-                ref, "缩放吸附纸张边缘" if checked else "关闭缩放吸附",
+                ref, tr('缩放吸附纸张边缘') if checked else tr('关闭缩放吸附'),
                 {"snap_to_page": bool(checked)})
 
     # --------------------------------------------------------------- 操作
@@ -318,7 +322,7 @@ class ReferencePanel(QDockWidget):
         box = page.margin_bbox() if align == "fit" else page.bbox()
         for ref in refs:
             changes = _fit_values(ref, box)
-            self.controller.edit_reference(ref, _ALIGN_LABELS[align], changes)
+            self.controller.edit_reference(ref, tr(_ALIGN_LABELS[align]), changes)
 
     def _delete(self) -> None:
         refs = self.selected_refs()
@@ -333,7 +337,7 @@ class ReferencePanel(QDockWidget):
         for ref in refs:
             w, h = ref.natural_size()
             self.controller.edit_reference(
-                ref, "原尺寸贴页",
+                ref, tr("原尺寸贴页"),
                 {"width_mm": w, "height_mm": h,
                  "transform": AffineTransform.identity()})
         self.controller.notify()
@@ -362,7 +366,7 @@ def _fit_values(ref: ReferenceItem, box: BBox, margin: float = 2.0) -> dict:
 
 
 def guess_reference_name(path: str) -> str:
-    return f"参考图：{Path(path).name}"
+    return trf('参考图：{v0}', v0=Path(path).name)
 
 
 def make_reference_from_file(path: str, *, kind: Optional[str] = None) -> ReferenceItem:

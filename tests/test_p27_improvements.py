@@ -44,7 +44,6 @@ def _win(qapp):
 def test_builtin_font_remove_hides_and_restores(qapp, monkeypatch):
     """内置字体「移除」= 记住隐藏（文件保留），可在「已隐藏…」恢复。"""
     from PySide6.QtCore import Qt
-    from PySide6.QtWidgets import QMessageBox
 
     win = _win(qapp)
     fp = win.font_panel
@@ -53,9 +52,8 @@ def test_builtin_font_remove_hides_and_restores(qapp, monkeypatch):
     if builtin is None:
         pytest.skip("无内置字体")
     assert builtin.path.exists()
-    monkeypatch.setattr(
-        "writerstudio.ui.font_panel.QMessageBox.question",
-        lambda *a, **k: QMessageBox.Yes)
+    monkeypatch.setattr("writerstudio.ui.font_panel.ask_yes_no",
+                        lambda *a, **k: True)
     fp.manager.hide(builtin.name, False)
     fp.refresh()
     fp.list.setCurrentRow(
@@ -73,7 +71,6 @@ def test_builtin_font_remove_hides_and_restores(qapp, monkeypatch):
 def test_user_font_remove_deletes_copy(qapp, monkeypatch, tmp_path):
     """用户字体「移除」仍删除字库中的副本并注销条目。"""
     from PySide6.QtCore import Qt
-    from PySide6.QtWidgets import QMessageBox
 
     win = _win(qapp)
     fp = win.font_panel
@@ -84,9 +81,8 @@ def test_user_font_remove_deletes_copy(qapp, monkeypatch, tmp_path):
     except Exception:
         pytest.skip("stroke-json 导入失败")
     copy_path = entry.path                # 字库中的副本
-    monkeypatch.setattr(
-        "writerstudio.ui.font_panel.QMessageBox.question",
-        lambda *a, **k: QMessageBox.Yes)
+    monkeypatch.setattr("writerstudio.ui.font_panel.ask_yes_no",
+                        lambda *a, **k: True)
     fp.refresh()
     fp.list.setCurrentRow(
         next(i for i in range(fp.list.count())

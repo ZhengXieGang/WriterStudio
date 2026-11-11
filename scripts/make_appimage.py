@@ -29,10 +29,12 @@ _BLACKLIST = re.compile(
 _DESKTOP = """[Desktop Entry]
 Type=Application
 Name=WriterStudio
-Comment=ESP32 GRBL 写字机软件：多字体、手写扰动、Markdown/LaTeX
+Comment=ESP32 GRBL plotter software: multi-font handwriting, Markdown/LaTeX, TikZ
+Comment[zh_CN]=ESP32 GRBL 写字机软件：多字体手写、Markdown/LaTeX、TikZ
 Exec=WriterStudio
 Icon=writerstudio
-Categories=Graphics;Office;
+Categories=Graphics;
+Keywords=plotter;handwriting;GRBL;TikZ;LaTeX;
 Terminal=false
 """
 

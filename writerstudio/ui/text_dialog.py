@@ -18,21 +18,26 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QScrollArea,
     QTabWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
+
+from ..i18n import tr, trf
 from ..fonts.builder import TextSpec
 from ..fonts.manager import FontManager
 from .perturb_panel import PerturbPanel
-from .style import spin, unify_inputs
+from .style import (fit_dialog_to_screen, localize_dialog_buttons,
+                    set_role, spin, unify_inputs)
 
 
 class TextEditDialog(QDialog):
@@ -41,14 +46,11 @@ class TextEditDialog(QDialog):
     def __init__(self, spec: TextSpec, manager: FontManager,
                  parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("文本编辑")
+        self.setWindowTitle(tr("文本编辑"))
         # 布局是「上：文本内容；中：字体链 + 排版参数（横向双栏）」。
-        # 默认尺寸必须 ≥ 内容真实最小需求（见 _build_ui 末尾的 setMinimumSize）：
-        # 显式 setMinimumSize 会覆盖 Qt 的 minimumSizeHint 自动保护，
-        # 若默认高度低于真实需求，挤压全部落在文本框和字体列表上
-        # （字体列表只剩一项、文本框只剩两三行）。
-        self.resize(800, 760)
-        self.setMinimumSize(760, 620)
+        # 最小宽 780：英文双栏内容实测最小约 722px，加上滚动条/边距仍不会
+        # 横向挤压；高度下限 560，更矮的屏幕由内容页自身滚动兜底。
+        self.setMinimumSize(780, 560)
         self.manager = manager
         self._spec = spec.clone()
         # 在 _build_ui 之前初始化：构建控件时会触发预览刷新，需要这些字段存在
@@ -68,21 +70,29 @@ class TextEditDialog(QDialog):
 
         # ===== 页签 1：内容与排版 =====
         content = QWidget()
-        self.tabs.addTab(content, "内容 / 排版")
+        # 内容页整体可滚动：窗口被屏幕高度限制时，文字框仍至少保留 10 行，
+        # 其余参数往下滚，而不是把文字框压成两三行。
+        content_scroll = QScrollArea()
+        content_scroll.setWidgetResizable(True)
+        content_scroll.setFrameShape(QFrame.NoFrame)
+        # 内容页最小宽约 510px，而对话框最小宽 760：横向永远不会溢出，
+        # 关掉横向滚动条避免首次布局时闪出一条无用的横条。
+        content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        content_scroll.setWidget(content)
+        self.tabs.addTab(content_scroll, tr("内容 / 排版"))
         croot = QVBoxLayout(content)
 
         # 文本内容
-        croot.addWidget(QLabel("文本内容（支持多行）："))
+        croot.addWidget(QLabel(tr("文本内容：")))
         self.text_edit = QTextEdit()
         self.text_edit.setAcceptRichText(False)
         f = QFont("monospace")
         f.setStyleHint(QFont.Monospace)
         self.text_edit.setFont(f)
-        # 最小 6 行：布局挤压时文本框不能被压成两三行的细条
-        # （此前默认高度低于内容真实需求，挤压全落在文本框和字体列表上）
-        self.text_edit.setMinimumHeight(140)
+        # 至少 12 行：编辑长文本时不必在一个小窗口里来回滚
+        self.text_edit.setMinimumHeight(240)
         self.text_edit.textChanged.connect(self._update_preview)
-        croot.addWidget(self.text_edit, 1)
+        croot.addWidget(self.text_edit, 3)
 
         # 中间：字体链 + 排版参数。给 mid 拉伸权重：否则额外高度全被
         # 上面的文本框吃掉，字体链列表被压到只剩一两项可显示
@@ -91,7 +101,7 @@ class TextEditDialog(QDialog):
 
         # 字体回退链
         chain_box = QVBoxLayout()
-        chain_box.addWidget(QLabel("字体（按顺序回退；多种字体可混用）："))
+        chain_box.addWidget(QLabel(tr("字体（按顺序回退）：")))
         self.chain_list = QListWidget()
         self.chain_list.setSelectionMode(QAbstractItemView.SingleSelection)
         self.chain_list.setMinimumHeight(100)   # 至少可见 4~5 项
@@ -103,16 +113,16 @@ class TextEditDialog(QDialog):
         for e in self.manager.visible_entries():
             self.font_combo.addItem(f"{e.display_name}  [{e.kind}]", e.name)
         ch_btns.addWidget(self.font_combo, 1)
-        add_btn = QPushButton("添加")
+        add_btn = QPushButton(tr("添加"))
         add_btn.clicked.connect(self._add_font)
         ch_btns.addWidget(add_btn)
         chain_box.addLayout(ch_btns)
 
-        up_btn = QPushButton("上移")
+        up_btn = QPushButton(tr("上移"))
         up_btn.clicked.connect(lambda: self._move_font(-1))
-        down_btn = QPushButton("下移")
+        down_btn = QPushButton(tr("下移"))
         down_btn.clicked.connect(lambda: self._move_font(1))
-        del_btn = QPushButton("移除")
+        del_btn = QPushButton(tr("移除"))
         del_btn.clicked.connect(self._remove_font)
         row = QHBoxLayout()
         row.addWidget(up_btn)
@@ -122,39 +132,41 @@ class TextEditDialog(QDialog):
 
         # 选中字体的权重（仅在「按权重随机」时生效）
         wrow = QHBoxLayout()
-        wrow.addWidget(QLabel("选中字体权重"))
+        wrow.addWidget(QLabel(tr("选中字体权重")))
         self.weight_spin = QDoubleSpinBox()
         self.weight_spin.setRange(0.0, 100.0)
         self.weight_spin.setSingleStep(0.1)
         self.weight_spin.setDecimals(2)
         self.weight_spin.setValue(1.0)
-        self.weight_spin.setToolTip("越大越常被选中（0 = 不参与随机）")
+        self.weight_spin.setToolTip(tr("越大越常被选中（0 = 不参与随机）"))
         self.weight_spin.valueChanged.connect(self._on_weight_changed)
         wrow.addWidget(self.weight_spin, 1)
-        reset_btn = QPushButton("恢复 1.0")
+        reset_btn = QPushButton(tr("恢复 1.0"))
         reset_btn.clicked.connect(lambda: self.weight_spin.setValue(1.0))
         wrow.addWidget(reset_btn)
         chain_box.addLayout(wrow)
 
-        self.random_check = QCheckBox("按权重在多种字体间随机选用（模拟不同字体混写）")
+        self.random_check = QCheckBox(tr("按权重随机选用字体"))
+        self.random_check.setToolTip(
+            tr("在字体链中按权重随机选用（模拟不同字体混写）"))
         self.random_check.toggled.connect(self._update_preview)
         chain_box.addWidget(self.random_check)
 
         fbrow = QHBoxLayout()
-        fbrow.addWidget(QLabel("兜底字体"))
+        fbrow.addWidget(QLabel(tr("兜底字体")))
         self.fallback_combo = QComboBox()
         self.fallback_combo.setToolTip(
-            "链中所有字体都缺某个字时，用它补上；\n"
-            "（链内字体本身已互相兜底，这里只是最后一道保险）")
-        self.fallback_combo.addItem("（无）", "")
+            tr("链中所有字体都缺某个字时，用它补上；\n"
+            "（链内字体本身已互相兜底，这里只是最后一道保险）"))
+        self.fallback_combo.addItem(tr("（无）"), "")
         for e in self.manager.visible_entries():
             self.fallback_combo.addItem(f"{e.display_name}  [{e.kind}]", e.name)
         self.fallback_combo.currentIndexChanged.connect(self._update_preview)
         fbrow.addWidget(self.fallback_combo, 1)
-        self.reseed_font_btn = QPushButton("重摇字体")
-        self.reseed_font_btn.setToolTip("换一个种子，重新随机分配各字使用哪款字体")
-        from .icons import icon as _qicon
-        _shf = _qicon("reshuffle_font")
+        self.reseed_font_btn = QPushButton(tr("重摇字体"))
+        self.reseed_font_btn.setToolTip(tr("换一个种子，重新随机分配各字使用哪款字体"))
+        from .icons import action_icon
+        _shf = action_icon("reshuffle_font")
         if _shf is not None:
             self.reseed_font_btn.setIcon(_shf)
         self.reseed_font_btn.clicked.connect(self._reseed_fonts)
@@ -162,23 +174,26 @@ class TextEditDialog(QDialog):
         chain_box.addLayout(fbrow)
 
         # 逐字符字体覆盖：为指定字符单独设置另一套字体（如个别符号）
-        chain_box.addWidget(QLabel("字符字体覆盖（选中内容字符 → 指定字体）："))
+        ov_label = QLabel(tr("字符字体覆盖："))
+        ov_label.setToolTip(tr("在文本内容中选中字符，再设为上方下拉的当前字体；"
+                            "每行一条「字符 → 字体」覆盖。"))
+        chain_box.addWidget(ov_label)
         self.ov_list = QListWidget()
         # 固定高度：只设 setMaximumHeight 会与 QListWidget 自带的
         # minimumSizeHint(~87px) 冲突（min>max，布局未定义行为）
         self.ov_list.setFixedHeight(56)
-        self.ov_list.setToolTip("每行一条「字符 → 字体」覆盖；选中后可清除")
+        self.ov_list.setToolTip(tr("每行一条「字符 → 字体」覆盖；选中后可清除"))
         chain_box.addWidget(self.ov_list)
         ovrow = QHBoxLayout()
-        ovrow.addWidget(QLabel("缩放"))
+        ovrow.addWidget(QLabel(tr("缩放")))
         self.ov_scale_spin = spin(0.1, 3.0, 1.0, " ×", step=0.05)
         ovrow.addWidget(self.ov_scale_spin)
-        set_ov_btn = QPushButton("设为所选字符字体")
-        set_ov_btn.setToolTip("先在「文本内容」里选中字符，再点此把它们设为"
-                              "上方下拉当前字体（覆盖回退链与随机挑选）")
+        set_ov_btn = QPushButton(tr("设为所选字符字体"))
+        set_ov_btn.setToolTip(tr("先在「文本内容」里选中字符，再点此把它们设为"
+                              "上方下拉当前字体（覆盖回退链与随机挑选）"))
         set_ov_btn.clicked.connect(self._apply_char_override)
         ovrow.addWidget(set_ov_btn, 1)
-        clr_ov_btn = QPushButton("清除覆盖")
+        clr_ov_btn = QPushButton(tr("清除覆盖"))
         clr_ov_btn.clicked.connect(self._clear_selected_override)
         ovrow.addWidget(clr_ov_btn)
         chain_box.addLayout(ovrow)
@@ -186,58 +201,58 @@ class TextEditDialog(QDialog):
 
         # 排版参数
         param_box = QVBoxLayout()
-        param_box.addWidget(QLabel("排版参数："))
+        param_box.addWidget(QLabel(tr("排版参数：")))
         form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
         self.size_spin = spin(0.5, 500.0, 10.0, " mm")
         self.size_spin.valueChanged.connect(self._update_preview)
-        form.addRow("字号", self.size_spin)
+        form.addRow(tr("字号"), self.size_spin)
 
         self.ls_spin = spin(0.5, 5.0, 1.4, " ×", step=0.05)
         self.ls_spin.valueChanged.connect(self._update_preview)
-        form.addRow("行距", self.ls_spin)
+        form.addRow(tr("行距"), self.ls_spin)
 
         self.cs_spin = spin(-20.0, 50.0, 0.0, " mm", step=0.1)
         self.cs_spin.valueChanged.connect(self._update_preview)
-        form.addRow("字距", self.cs_spin)
+        form.addRow(tr("字距"), self.cs_spin)
 
         self.fw_spin = spin(0.0, 2000.0, 0.0, " mm", step=5.0)
         self.fw_spin.setToolTip(
-            "文本框宽度：大于 0 时按该宽度自动换行（0 = 不限宽）。\n"
-            "也可以之后在画布上直接拖动文本框右缘的手柄调整。")
+            tr("文本框宽度：大于 0 时按该宽度自动换行（0 = 不限宽）。\n"
+            "也可以之后在画布上直接拖动文本框右缘的手柄调整。"))
         self.fw_spin.valueChanged.connect(self._update_preview)
-        form.addRow("文本框宽度", self.fw_spin)
+        form.addRow(tr("文本框宽度"), self.fw_spin)
 
         self.align_combo = QComboBox()
-        self.align_combo.addItem("左对齐", "left")
-        self.align_combo.addItem("居中", "center")
-        self.align_combo.addItem("右对齐", "right")
+        self.align_combo.addItem(tr("左对齐"), "left")
+        self.align_combo.addItem(tr("居中"), "center")
+        self.align_combo.addItem(tr("右对齐"), "right")
         self.align_combo.currentIndexChanged.connect(self._update_preview)
-        form.addRow("对齐", self.align_combo)
+        form.addRow(tr("对齐"), self.align_combo)
 
         self.dir_combo = QComboBox()
-        self.dir_combo.addItem("横向", "h")
-        self.dir_combo.addItem("竖排·右到左", "v-rl")
-        self.dir_combo.addItem("竖排·左到右", "v-lr")
+        self.dir_combo.addItem(tr("横排"), "h")
+        self.dir_combo.addItem(tr("竖排·右到左"), "v-rl")
+        self.dir_combo.addItem(tr("竖排·左到右"), "v-lr")
         self.dir_combo.currentIndexChanged.connect(self._update_preview)
-        form.addRow("书写方向", self.dir_combo)
+        form.addRow(tr("书写方向"), self.dir_combo)
 
         self.ws_spin = spin(0.0, 400.0, 100.0, " %", step=5.0)
         self.ws_spin.setDecimals(0)
-        self.ws_spin.setToolTip("空格宽度百分比（100=字体默认步距）")
+        self.ws_spin.setToolTip(tr("空格宽度百分比（100=字体默认步距）"))
         self.ws_spin.valueChanged.connect(self._update_preview)
-        form.addRow("词距", self.ws_spin)
+        form.addRow(tr("词距"), self.ws_spin)
 
         self.wsr_spin = spin(0.0, 100.0, 0.0, " %", step=5.0)
         self.wsr_spin.setDecimals(0)
-        self.wsr_spin.setToolTip("空格宽度随机幅度（±%），模拟手写时词距忽大忽小")
+        self.wsr_spin.setToolTip(tr("空格宽度随机幅度（±%），模拟手写时词距忽大忽小"))
         self.wsr_spin.valueChanged.connect(self._update_preview)
-        form.addRow("词距随机", self.wsr_spin)
+        form.addRow(tr("词距随机"), self.wsr_spin)
 
         param_box.addLayout(form)
-        self.preview_label = QLabel("—")
+        self.preview_label = QLabel(tr("—"))
         self.preview_label.setWordWrap(True)
-        self.preview_label.setStyleSheet("color:#666;")
+        set_role(self.preview_label, "muted")
         param_box.addWidget(self.preview_label)
         param_box.addStretch(1)
         mid.addLayout(param_box, 2)
@@ -246,14 +261,17 @@ class TextEditDialog(QDialog):
         self.perturb_panel = PerturbPanel(params=self._spec.perturb, size_hint=10.0)
         self.perturb_panel.paramsChanged.connect(self._update_preview)
         self.perturb_panel.set_size_hint(self.size_spin.value())
-        self.tabs.addTab(self.perturb_panel, "手写扰动")
+        self.tabs.addTab(self.perturb_panel, tr("手写扰动"))
 
         # 按钮
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
+        localize_dialog_buttons(self)
         unify_inputs(self)
+        # 默认给文字框更宽裕的高度；小屏由屏幕可用区域收敛，内容页可滚动。
+        fit_dialog_to_screen(self, 800, 820)
 
     # ------------------------------------------------------------- 数据装载
     def _load_spec(self, spec: TextSpec) -> None:
@@ -330,8 +348,8 @@ class TextEditDialog(QDialog):
         sel = self.text_edit.textCursor().selectedText()
         if not sel:
             from PySide6.QtWidgets import QMessageBox
-            QMessageBox.information(self, "提示",
-                                    "请先在「文本内容」中选中要设置字体的字符。")
+            QMessageBox.information(self, tr("提示"),
+                                    tr("请先在「文本内容」中选中要设置字体的字符。"))
             return
         scale = self.ov_scale_spin.value()
         for ch in set(sel.replace("\u2029", "")):
@@ -354,7 +372,7 @@ class TextEditDialog(QDialog):
             entry = self.manager.get_entry(str(ov.get("font", "")))
             label = entry.display_name if entry else str(ov.get("font", "?"))
             shown = ch if ch.strip() else repr(ch)
-            item = QListWidgetItem(f"「{shown}」→ {label} ×{ov.get('scale', 1.0):g}")
+            item = QListWidgetItem(trf('「{v0}」→ {v1} ×{v2:g}', v0=shown, v1=label, v2=ov.get('scale', 1.0)))
             item.setData(Qt.UserRole, ch)
             self.ov_list.addItem(item)
 
@@ -416,7 +434,7 @@ class TextEditDialog(QDialog):
         from ..fonts import resolve_fonts, render_text_strokes
         fonts = resolve_fonts(spec, self.manager)
         if not fonts:
-            self.preview_label.setText("未选择有效字体")
+            self.preview_label.setText(tr("未选择有效字体"))
             return
         if self.perturb_panel.isVisible() or spec.perturb.is_active():
             # 尺寸提示随字号更新
@@ -425,32 +443,30 @@ class TextEditDialog(QDialog):
         from ..core.geometry import BBox
         box = BBox.from_points(p for s in strokes for p in s.points)
         if box.is_empty:
-            self.preview_label.setText("（无内容）")
+            self.preview_label.setText(tr("（无内容）"))
             return
         # 统计各字体承担的字数
         usage: dict[str, int] = {}
         for c in lay.chars:
             usage[c.font_name] = usage.get(c.font_name, 0) + 1
-        parts = "，".join(f"{k} {v}字" for k, v in usage.items())
+        parts = tr("，").join(trf('{v0} {v1}字', v0=k, v1=v) for k, v in usage.items())
         notes = []
         if pr is not None:
-            notes.append("含手写扰动")
+            notes.append(tr("含手写扰动"))
         if spec.random_fonts:
-            notes.append("字体按权重随机")
+            notes.append(tr("字体按权重随机"))
         if spec.char_overrides:
-            notes.append(f"字符覆盖 {len(spec.char_overrides)} 项")
+            notes.append(trf('字符覆盖 {v0} 项', v0=len(spec.char_overrides)))
         if spec.fallback_font:
-            notes.append(f"兜底：{spec.fallback_font}")
+            notes.append(trf('兜底：{v0}', v0=spec.fallback_font))
         missing = list(getattr(lay, "missing", []) or [])
         miss_line = ""
         if missing:
-            miss_line = ("\n缺字未绘制：" + "".join(missing[:20])
-                         + (f" 等 {len(missing)} 个" if len(missing) > 20 else ""))
-        note_txt = f"（{'，'.join(notes)}）" if notes else ""
+            miss_line = (tr("\n缺字未绘制：") + "".join(missing[:20])
+                         + (trf(' 等 {v0} 个', v0=len(missing)) if len(missing) > 20 else ""))
+        note_txt = trf('（{v0}）', v0=tr('，').join(notes)) if notes else ""
         self.preview_label.setText(
-            f"尺寸：{box.width:.1f} × {box.height:.1f} mm {note_txt}\n"
-            f"{len(lay.lines)} 行，{len(lay.chars)} 字\n"
-            f"字体使用：{parts or '—'}{miss_line}"
+            trf('尺寸：{v0:.1f} × {v1:.1f} mm {v2}\n{v3} 行，{v4} 字\n字体使用：{v5}{v6}', v0=box.width, v1=box.height, v2=note_txt, v3=len(lay.lines), v4=len(lay.chars), v5=parts or '—', v6=miss_line)
         )
 
     def result_spec(self) -> TextSpec:

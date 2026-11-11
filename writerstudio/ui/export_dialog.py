@@ -7,6 +7,9 @@ PNG 的 DPI 决定位图像素尺寸（页面物理尺寸固定不变），对�
 
 from __future__ import annotations
 
+from ..i18n import tr, trf
+from .style import set_role
+
 from typing import Optional
 
 from PySide6.QtCore import Qt
@@ -44,7 +47,7 @@ class ExportOptionsDialog(QDialog):
         self._page = page
         self._fmt = fmt
         is_png = fmt == "png"
-        self.setWindowTitle("导出为 PNG" if is_png else "导出为 SVG")
+        self.setWindowTitle(tr('导出为 PNG') if is_png else tr('导出为 SVG'))
         self.setMinimumWidth(460)
 
         root = QVBoxLayout(self)
@@ -52,7 +55,7 @@ class ExportOptionsDialog(QDialog):
         self.dpi_spin: Optional[QSpinBox] = None
         if is_png:
             row = QHBoxLayout()
-            row.addWidget(QLabel("分辨率", self))
+            row.addWidget(QLabel(tr("分辨率"), self))
             spin = QSpinBox(self)
             spin.setRange(36, 1200)
             spin.setSingleStep(10)
@@ -61,7 +64,7 @@ class ExportOptionsDialog(QDialog):
             row.addWidget(spin, 1)
             for v in PRESET_DPIS:
                 btn = QPushButton(str(v), self)
-                btn.setToolTip(f"设为 {v} DPI")
+                btn.setToolTip(trf('设为 {v0} DPI', v0=v))
                 btn.clicked.connect(lambda _=False, v=v: spin.setValue(v))
                 row.addWidget(btn)
             root.addLayout(row)
@@ -72,15 +75,15 @@ class ExportOptionsDialog(QDialog):
         self._size_label.setWordWrap(True)
         root.addWidget(self._size_label)
 
-        self.transparent_check = QCheckBox("透明背景（不输出白色底色）", self)
+        self.transparent_check = QCheckBox(tr("透明背景（不输出白色底色）"), self)
         self.transparent_check.setChecked(bool(transparent))
         root.addWidget(self.transparent_check)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
             | QDialogButtonBox.StandardButton.Cancel, self)
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("导出…")
-        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText(tr("导出…"))
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(tr("取消"))
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
@@ -102,19 +105,17 @@ class ExportOptionsDialog(QDialog):
 
     def _refresh(self) -> None:
         if self._fmt != "png":
-            self._size_label.setStyleSheet("")
+            set_role(self._size_label, "muted")
             self._size_label.setText(
-                f"输出尺寸：{self._page.width:g} × "
-                f"{self._page.height:g} mm（矢量图，1 单位 = 1 mm）")
+                trf('输出尺寸：{v0:g} × {v1:g} mm（矢量图，1 单位 = 1 mm）', v0=self._page.width, v1=self._page.height))
             return
         w, h = pixel_size(self._page, self.dpi())
-        text = (f"输出尺寸：{w} × {h} 像素"
-                f"（页面 {self._page.width:g} × {self._page.height:g} mm）")
+        text = (trf('输出尺寸：{v0} × {v1} 像素（页面 {v2:g} × {v3:g} mm）', v0=w, v1=h, v2=self._page.width, v3=self._page.height))
         if w * h > _LARGE_PIXELS:
-            self._size_label.setStyleSheet("color: #c0392b;")
-            text += "\n尺寸很大，导出会占用较多内存与时间"
+            set_role(self._size_label, "danger")
+            text += "\n" + tr("尺寸很大，导出会占用较多内存与时间")
         else:
-            self._size_label.setStyleSheet("")
+            set_role(self._size_label, "muted")
         self._size_label.setText(text)
 
     @classmethod

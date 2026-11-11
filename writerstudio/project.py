@@ -54,6 +54,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
+from .i18n import tr, trf
 from .core.document import Document, DocumentObject, PageSpec, SourceSpec
 from .core.geometry import AffineTransform
 from .core.reference import ReferenceItem
@@ -408,10 +409,11 @@ def apply_document_data(doc: Document, data: dict) -> None:
 
 def project_from_data(data: dict) -> ProjectData:
     if data.get("format") != FORMAT_ID:
-        raise ValueError("不是 WriterStudio 项目文件")
+        raise ValueError(tr("不是 WriterStudio 项目文件"))
     ver = int(data.get("version", 0))
     if ver > FORMAT_VERSION:
-        raise ValueError(f"项目版本 {ver} 高于本程序支持的 {FORMAT_VERSION}")
+        raise ValueError(trf("项目版本 {v0} 高于本程序支持的 {v1}",
+                                 v0=ver, v1=FORMAT_VERSION))
 
     # 新格式文档在 "doc" 键下；旧格式 page/objects/references 在顶层
     doc_d = data.get("doc")

@@ -19,6 +19,7 @@ from typing import Iterable, Optional, Sequence
 from ..core.document import Document, DocumentObject
 from ..core.geometry import rdp_simplify
 from ..core.strokes import Stroke
+from ..i18n import trf
 from .config import GCodeConfig, PEN_Z, page_to_machine
 from .path_optimizer import order_for_writing
 from .profile import motion_time, suggested_feed
@@ -370,7 +371,7 @@ def format_duration(seconds: float) -> str:
     m, s = divmod(int(round(seconds)), 60)
     h, m = divmod(m, 60)
     if h:
-        return f"{h}小时{m}分"
+        return trf('{v0}小时{v1}分', v0=h, v1=m)
     if m:
-        return f"{m}分{s}秒"
-    return f"{s}秒"
+        return trf('{v0}分{v1}秒', v0=m, v1=s)
+    return trf('{v0}秒', v0=s)

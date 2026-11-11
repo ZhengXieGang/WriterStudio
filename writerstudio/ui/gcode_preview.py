@@ -16,8 +16,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+
+from ..i18n import tr, trf
 from ..core.strokes import Stroke
 from ..machine.gcode_gen import GCodeResult, format_duration
+from .style import fit_dialog_to_screen, localize_dialog_buttons
 
 
 class GCodePreview(QWidget):
@@ -83,7 +86,7 @@ class GCodePreview(QWidget):
         box = self._content_rect()
         if box.is_empty:
             p.setPen(QColor(120, 120, 120))
-            p.drawText(self.rect(), Qt.AlignCenter, "无路径")
+            p.drawText(self.rect(), Qt.AlignCenter, tr("无路径"))
             return
 
         w = max(1e-6, box.width)
@@ -127,7 +130,7 @@ class GCodePreviewDialog(QDialog):
                  travels: Optional[list[tuple]] = None,
                  parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("G-code 预览")
+        self.setWindowTitle(tr("G-code 预览"))
         self.resize(900, 620)
 
         root = QVBoxLayout(self)
@@ -148,16 +151,12 @@ class GCodePreviewDialog(QDialog):
         split.setSizes([520, 380])
 
         info_text = (
-            f"共 {len(result.lines)} 行　|　笔画 {result.stroke_count} 条　|　"
-            f"绘制 {result.draw_length:.1f} mm　|　空程 {result.travel_length:.1f} mm　|　"
-            f"预计 {format_duration(result.estimated_seconds)}")
+            trf('共 {v0} 行\u3000|\u3000笔画 {v1} 条\u3000|\u3000绘制 {v2:.1f} mm\u3000|\u3000空程 {v3:.1f} mm\u3000|\u3000预计 {v4}', v0=len(result.lines), v1=result.stroke_count, v2=result.draw_length, v3=result.travel_length, v4=format_duration(result.estimated_seconds)))
         if getattr(result, "suggested_draw_feed", 0.0) > 0:
             # 加速度感知估算发现「设置的进给跑不出来」：短笔画受加速度
             # 限制峰速有物理上限，给一条可达速度的建议（只建议不代改）
             info_text += (
-                f"\n提示：当前书写速度按本机加速度跑不满，"
-                f"一半笔画实际可达约 {result.suggested_draw_feed:.0f} mm/min"
-                f"（耗时估算已按真实速度模型计算）")
+                trf('\n提示：当前书写速度按本机加速度跑不满，一半笔画实际可达约 {v0:.0f} mm/min（耗时估算已按真实速度模型计算）', v0=result.suggested_draw_feed))
         info = QLabel(info_text)
         info.setWordWrap(True)
         root.addWidget(info)
@@ -166,3 +165,5 @@ class GCodePreviewDialog(QDialog):
         buttons.rejected.connect(self.reject)
         buttons.accepted.connect(self.accept)
         root.addWidget(buttons)
+        localize_dialog_buttons(self)
+        fit_dialog_to_screen(self, 900, 620)

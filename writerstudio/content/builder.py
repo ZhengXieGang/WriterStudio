@@ -22,6 +22,7 @@ from ..core.geometry import BBox
 from ..core.strokes import Stroke
 from ..fonts.manager import FontManager
 from ..fonts.model import FontFamily
+from ..i18n import tr, trf
 from ..perturb.params import PerturbParams
 from ..perturb.engine import perturb_strokes, wobble_strokes
 from .equation import render_equation
@@ -250,7 +251,7 @@ def make_latex_object(source: str, target_width_mm: Optional[float] = None,
     fp = _render_fingerprint(SOURCE_LATEX, data, None)
     strokes = _apply_object_perturb(raw, p)
     obj = DocumentObject(
-        name=name or "LaTeX 文档",
+        name=name or tr("LaTeX 文档"),
         source=SourceSpec(SOURCE_LATEX, {**data, "perturb": p.to_data()}),
         local_strokes=strokes,
     )
@@ -327,7 +328,7 @@ def make_svg_object(path: str | Path, target_width_mm: Optional[float] = None,
     box = BBox.from_points(pts for s in strokes for pts in s.points)
     _normalize_to_origin(strokes, box)
     obj = DocumentObject(
-        name=name or f"SVG：{Path(path).stem}",
+        name=name or trf("SVG：{v0}", v0=Path(path).stem),
         source=SourceSpec(SOURCE_SVG, {**data, "perturb": p.to_data()}),
         local_strokes=strokes,
     )
@@ -470,18 +471,18 @@ def _md_name(source: str) -> str:
     for line in source.splitlines():
         line = line.strip().lstrip("#").strip()
         if line:
-            return f"Markdown：{line[:12]}"
-    return "Markdown"
+            return trf("Markdown：{v0}", v0=line[:12])
+    return tr("Markdown")
 
 
 def _eq_name(latex: str) -> str:
     t = latex.strip()
-    return f"公式：{t[:16]}" if t else "公式"
+    return trf("公式：{v0}", v0=t[:16]) if t else tr("公式")
 
 
 def _tikz_name(source: str) -> str:
     for line in source.splitlines():
         s = line.strip()
         if s and not s.startswith("%"):
-            return f"TikZ：{s[:12]}"
-    return "TikZ 图形"
+            return trf("TikZ：{v0}", v0=s[:12])
+    return tr("TikZ 图形")

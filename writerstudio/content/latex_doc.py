@@ -23,6 +23,7 @@ from typing import Optional, Sequence
 
 from ..core.geometry import BBox
 from ..core.strokes import Stroke
+from ..i18n import tr
 from .svg_import import import_svg
 from .svg_import import _PT_TO_PX
 
@@ -145,15 +146,15 @@ def latex_toolchain_available() -> bool:
 def missing_engine_message(needs_xetex: bool) -> str:
     """引擎不可用时的可操作提示（区分 pdf 与 xe/lua 需求）。"""
     if not needs_xetex:
-        return ("未找到可用的 LaTeX 引擎。若已安装 xelatex/pdflatex，"
-                "通常是缺少格式文件 latex.ltx 或基础字体 —— 请安装 "
-                "texlive-latex 与 texlive-fontsrecommended。"
-                "也可改用内置 mathtext 公式模式（无需 TeX）。")
-    return ("该文档使用了 XeTeX 专属字体语法（如 \\font\\xx=\"字体名\"、"
-            "fontspec/xeCJK），须用 xelatex 或 lualatex 编译，但当前没有"
-            "可用者：系统 xelatex 多半因缺少基础字体（Latin Modern）无法启动。"
-            "请安装 texlive-fontsrecommended（中文还需 texlive-langchinese、"
-            "fontspec/xeCJK），再重试。")
+        return tr("未找到可用的 LaTeX 引擎。若已安装 xelatex/pdflatex，"
+                  "通常是缺少格式文件 latex.ltx 或基础字体 —— 请安装 "
+                  "texlive-latex 与 texlive-fontsrecommended。"
+                  "也可改用内置 mathtext 公式模式（无需 TeX）。")
+    return tr("该文档使用了 XeTeX 专属字体语法（如 \\font\\xx=\"字体名\"、"
+              "fontspec/xeCJK），须用 xelatex 或 lualatex 编译，但当前没有"
+              "可用者：系统 xelatex 多半因缺少基础字体（Latin Modern）无法启动。"
+              "请安装 texlive-fontsrecommended（中文还需 texlive-langchinese、"
+              "fontspec/xeCJK），再重试。")
 
 
 def toolchain_report() -> dict:
@@ -164,15 +165,15 @@ def toolchain_report() -> dict:
     notes: list[str] = []
     if engine is None:
         if any(shutil.which(e) for e in ENGINES):
-            notes.append("已安装 LaTeX 引擎但缺少格式文件或基础字体，"
-                         "请安装 texlive-latex 与 texlive-fontsrecommended")
+            notes.append(tr("已安装 LaTeX 引擎但缺少格式文件或基础字体，"
+                            "请安装 texlive-latex 与 texlive-fontsrecommended"))
         else:
-            notes.append("未安装 LaTeX 引擎，请安装 texlive（xelatex/pdflatex）")
+            notes.append(tr("未安装 LaTeX 引擎，请安装 texlive（xelatex/pdflatex）"))
     elif xetex is None:
-        notes.append("缺少可用的 xelatex/lualatex（含 XeTeX 字体语法的文档"
-                     "无法编译），请安装 texlive-fontsrecommended")
+        notes.append(tr("缺少可用的 xelatex/lualatex（含 XeTeX 字体语法的文档"
+                        "无法编译），请安装 texlive-fontsrecommended"))
     if converter is None:
-        notes.append("缺少 PDF→SVG 转换器，请安装 poppler（pdftocairo）或 dvisvgm")
+        notes.append(tr("缺少 PDF→SVG 转换器，请安装 poppler（pdftocairo）或 dvisvgm"))
     return {"engine": engine, "xetex_engine": xetex, "converter": converter,
             "ok": not notes, "notes": notes}
 

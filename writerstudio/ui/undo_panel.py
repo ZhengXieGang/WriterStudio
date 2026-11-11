@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from ..i18n import tr, trf
+
 from typing import Optional
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QDockWidget,
     QListWidget,
@@ -13,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from .controller import DocumentController
+from .theme import semantic_color
 
 
 class UndoPanel(QDockWidget):
@@ -20,7 +24,7 @@ class UndoPanel(QDockWidget):
 
     def __init__(self, controller: DocumentController,
                  parent: Optional[QWidget] = None) -> None:
-        super().__init__("历史", parent)
+        super().__init__(tr("历史"), parent)
         self.controller = controller
         self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
 
@@ -48,18 +52,21 @@ class UndoPanel(QDockWidget):
         total = stack.count()
 
         # 初始状态（可点击回到起点）
-        init = QListWidgetItem("初始状态")
+        init = QListWidgetItem(tr("初始状态"))
         init.setData(Qt.UserRole, 0)
-        init.setForeground(Qt.gray)
+        init.setForeground(QColor(semantic_color("muted")))
         self.list.addItem(init)
 
         for i in range(total):
             cmd = stack.command(i)
-            text = cmd.text() if cmd is not None else f"步骤 {i + 1}"
+            text = cmd.text() if cmd is not None else trf('步骤 {v0}', v0=i + 1)
             done = i < idx
-            item = QListWidgetItem(f"{i + 1}. {text}")
+            label = f"{i + 1}. {text}"
+            item = QListWidgetItem(label)
             item.setData(Qt.UserRole, i + 1)
-            item.setForeground(Qt.white if done else Qt.gray)
+            item.setToolTip(label)
+            item.setForeground(QColor(
+                semantic_color("text") if done else semantic_color("muted")))
             self.list.addItem(item)
 
         self.list.setCurrentRow(idx)   # 0 = 初始状态，i+1 = 第 i 步之后

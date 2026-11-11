@@ -40,7 +40,24 @@ def test_content_dialog_builds_all_pages(qapp):
     win.close()
 
 
-def test_content_dialog_equation_payload(qapp):
+def test_content_dialog_fits_laptop_screen(qapp):
+    """默认尺寸必须在 768 高的笔记本屏内；内容超高时由页内滚动区承接。"""
+    from PySide6.QtWidgets import QScrollArea
+
+    win = MainWindow()
+    dlg = ContentDialog(win.font_manager, initial_kind=KIND_MARKDOWN)
+    try:
+        dlg.show()
+        qapp.processEvents()
+        assert dlg.minimumSizeHint().height() <= 700
+        assert dlg.height() <= 740
+        # 编辑区至少 10 行，不再被压成三四行
+        assert dlg.md_edit.height() >= 230
+        # 每个类型页都套了滚动区，窗口变矮时仍能滚动到全部控件
+        assert len(dlg.findChildren(QScrollArea)) >= 5
+    finally:
+        dlg.close()
+        win.close()
     win = MainWindow()
     dlg = ContentDialog(win.font_manager, initial_kind=KIND_EQUATION)
     dlg.eq_edit.setPlainText(r"\frac{a}{b}")

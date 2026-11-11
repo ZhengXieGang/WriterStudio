@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QPointF, QStandardPaths, QSize, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QPolygonF
+from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -41,11 +41,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+
+from ..i18n import tr, trf
 from ..core.memory import trim_memory
 from ..fonts.manager import FontManager
 from ..fonts.preview import SAMPLE_CHARS, load_preview
 from . import filedialog
-from .style import unify_inputs
+from .icons import action_icon
+from .style import (ask_yes_no, localize_dialog_buttons, set_role,
+                    unify_inputs)
+from .theme import semantic_color
 
 _KIND_LABEL = {
     "hershey": "Hershey 单线",
@@ -300,13 +305,15 @@ class FontPanel(QDockWidget):
     pinHideChanged = Signal()      # 置顶/隐藏变化（主窗口负责持久化）
 
     def __init__(self, manager: FontManager, parent: Optional[QWidget] = None) -> None:
-        super().__init__("字体库", parent)
+        super().__init__(tr("字体库"), parent)
         self.manager = manager
         self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         self._worker: Optional[_FontInfoWorker] = None
         self._counts: dict[str, int] = {}     # name → 字形数（-1 表示加载失败）
         self._thumbs: dict[str, QImage] = {}  # name → 轻量缩略图（阶段 1 产出）
         self._kind_filter = ""
+        # 带图标的按钮 → 动作键；切主题时按新前景色重建（见 refresh_icons）
+        self._icon_buttons: list[tuple[QPushButton, str]] = []
         # 延迟启动加载（窗口快速关闭时不再白跑）
         self._load_timer = QTimer(self)
         self._load_timer.setSingleShot(True)
@@ -324,21 +331,21 @@ class FontPanel(QDockWidget):
         # 搜索 + 类型过滤
         filt = QHBoxLayout()
         self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("搜索字体名…")
+        self.search_edit.setPlaceholderText(tr("搜索字体名…"))
         self.search_edit.setClearButtonEnabled(True)
         self.search_edit.textChanged.connect(lambda _: self._populate())
         filt.addWidget(self.search_edit, 1)
         self.kind_combo = QComboBox()
-        self.kind_combo.addItem("全部类型", "")
+        self.kind_combo.addItem(tr("全部类型"), "")
         for key, label in _KIND_LABEL.items():
-            self.kind_combo.addItem(label, key)
+            self.kind_combo.addItem(tr(label), key)
         self.kind_combo.currentIndexChanged.connect(self._on_kind_filter)
         filt.addWidget(self.kind_combo)
         layout.addLayout(filt)
 
-        self.info = QLabel("—")
+        self.info = QLabel(tr("—"))
         self.info.setWordWrap(True)
-        self.info.setStyleSheet("color:#666;")
+        set_role(self.info, "muted")
         layout.addWidget(self.info)
 
         self.list = QListWidget()
@@ -348,51 +355,38 @@ class FontPanel(QDockWidget):
         self.list.currentItemChanged.connect(self._on_current)
         layout.addWidget(self.list, 1)
 
-        from .icons import icon as _qicon
         btns = QHBoxLayout()
-        imp = QPushButton("导入字体…")
-        _ic = _qicon("import_font")
-        if _ic is not None:
-            imp.setIcon(_ic)
+        imp = QPushButton(tr("导入字体…"))
+        self._attach_icon(imp, "import_font")
         imp.clicked.connect(self._import)
-        addir = QPushButton("添加字体目录…")
-        addir.setToolTip("扫描一个外部字体目录")
-        _ic = _qicon("add_dir")
-        if _ic is not None:
-            addir.setIcon(_ic)
+        addir = QPushButton(tr("添加字体目录…"))
+        addir.setToolTip(tr("扫描一个外部字体目录"))
+        self._attach_icon(addir, "add_dir")
         addir.clicked.connect(self._add_dir)
         btns.addWidget(imp)
         btns.addWidget(addir)
         layout.addLayout(btns)
 
         btns2 = QHBoxLayout()
-        self.pin_btn = QPushButton("置顶")
-        self.pin_btn.setToolTip("把常用字体排到列表/下拉的最前面，再次点击取消置顶")
-        _ic = _qicon("pin")
-        if _ic is not None:
-            self.pin_btn.setIcon(_ic)
+        self.pin_btn = QPushButton(tr("置顶"))
+        self.pin_btn.setToolTip(tr("把常用字体排到列表/下拉的最前面，再次点击取消置顶"))
+        self._attach_icon(self.pin_btn, "pin")
         self.pin_btn.clicked.connect(self._toggle_pin)
-        hide_btn = QPushButton("隐藏")
-        hide_btn.setToolTip("在字体库与各下拉列表中隐藏该字体（文件保留在原处）")
-        _ic = _qicon("hide")
-        if _ic is not None:
-            hide_btn.setIcon(_ic)
+        hide_btn = QPushButton(tr("隐藏"))
+        hide_btn.setToolTip(tr("在字体库与各下拉列表中隐藏该字体（文件保留在原处）"))
+        self._attach_icon(hide_btn, "hide")
         hide_btn.clicked.connect(self._hide_current)
-        hidden_btn = QPushButton("已隐藏…")
-        hidden_btn.setToolTip("查看并恢复已隐藏的字体")
+        hidden_btn = QPushButton(tr("已隐藏…"))
+        hidden_btn.setToolTip(tr("查看并恢复已隐藏的字体"))
         hidden_btn.clicked.connect(self._show_hidden_dialog)
-        rm = QPushButton("移除")
-        rm.setToolTip("从字体库移除该字体；用户字体删除文件，\n"
-                      "内置字体仅从列表移除（文件保留，可在「已隐藏…」恢复）")
-        _ic = _qicon("delete")
-        if _ic is not None:
-            rm.setIcon(_ic)
+        rm = QPushButton(tr("移除"))
+        rm.setToolTip(tr("从字体库移除该字体；用户字体删除文件，\n"
+                      "内置字体仅从列表移除（文件保留，可在「已隐藏…」恢复）"))
+        self._attach_icon(rm, "delete")
         rm.clicked.connect(self._remove)
-        reload_btn = QPushButton("重新扫描")
+        reload_btn = QPushButton(tr("重新扫描"))
         reload_btn.clicked.connect(self._rescan)
-        _ic = _qicon("rescan")
-        if _ic is not None:
-            reload_btn.setIcon(_ic)
+        self._attach_icon(reload_btn, "rescan")
         # 五个按钮分两行：挤一行时面板最小宽被撑到 ~450px，远超默认
         # 停靠宽 280px——Qt 会强制把整列撑宽，画布被挤出画面外
         btns2.addWidget(self.pin_btn)
@@ -412,6 +406,19 @@ class FontPanel(QDockWidget):
         # 每次打开主窗口都拉起一轮全字库解析（测试/启动都更快）。
         self._populate()
         unify_inputs(self)
+
+    def _attach_icon(self, button: QPushButton, key: str) -> None:
+        """给按钮挂图标并登记动作键，供切主题时重建（refresh_icons）。"""
+        self._icon_buttons.append((button, key))
+        ic = action_icon(key)
+        if ic is not None:
+            button.setIcon(ic)
+
+    def refresh_icons(self) -> None:
+        """按当前主题前景色重建面板按钮图标（深色白 / 浅色黑）。"""
+        for button, key in self._icon_buttons:
+            ic = action_icon(key)
+            button.setIcon(ic if ic is not None else QIcon())
 
     # --------------------------------------------------------------- 显示/隐藏
     def showEvent(self, event) -> None:
@@ -565,15 +572,17 @@ class FontPanel(QDockWidget):
         self._thumbs[name] = img
 
     def _fill_item(self, item: QListWidgetItem, entry, count, font) -> None:
-        kind = _KIND_LABEL.get(entry.kind, entry.kind)
+        kind = tr(_KIND_LABEL.get(entry.kind, entry.kind))
         if count is None:
-            meta = "…" if font is None else f"{font.coverage()} 字"
+            meta = tr('…') if font is None else trf('{v0} 字', v0=font.coverage())
         elif count < 0:
-            meta = "加载失败"
+            meta = tr("加载失败")
         else:
-            meta = f"{count} 字"
-        pin_tag = "[置顶] " if self.manager.is_pinned(entry.name) else ""
+            meta = trf('{v0} 字', v0=count)
+        pin_tag = tr('[置顶] ') if self.manager.is_pinned(entry.name) else ""
         item.setText(f"{pin_tag}{entry.display_name}\n{kind} · {meta}")
+        # 列表窄时第二行会被省略号截断；悬停给出完整信息（含路径）
+        item.setToolTip(f"{entry.display_name}\n{kind} · {meta}\n{entry.path}")
         # 缩略图：优先用阶段 1 的轻量图（搜索/过滤重建列表时也秒显），
         # 没有才当场渲染（字体已全量加载的场合）
         img = self._thumbs.get(entry.name)
@@ -585,7 +594,7 @@ class FontPanel(QDockWidget):
                 item.setIcon(thumb)
                 self._remember_thumb(entry.name, thumb.toImage())
         if count is not None and count < 0:
-            item.setForeground(QColor(170, 60, 60))
+            item.setForeground(QColor(semantic_color("danger")))
 
     def _on_preview_ready(self, name: str, img) -> None:
         """阶段 1：轻量缩略图就绪 → 立即回填该行（不必等全量解析）。"""
@@ -616,22 +625,22 @@ class FontPanel(QDockWidget):
     def _update_info(self, item: Optional[QListWidgetItem]) -> None:
         total = len(self.manager.entries())
         if item is None:
-            self.info.setText(f"共 {total} 款字体")
+            self.info.setText(trf('共 {v0} 款字体', v0=total))
             return
         name = item.data(Qt.UserRole)
         entry = self.manager.get_entry(name)
         if entry is None:
             return
-        kind = _KIND_LABEL.get(entry.kind, entry.kind)
+        kind = tr(_KIND_LABEL.get(entry.kind, entry.kind))
         count = self._counts.get(name)
         if count is None:
-            glyph_line = "字形：加载中…"
+            glyph_line = tr("字形：加载中…")
         elif count < 0:
-            glyph_line = "字形：无法加载"
+            glyph_line = tr("字形：无法加载")
         else:
-            glyph_line = f"字形：{count} 个"
+            glyph_line = trf('字形：{v0} 个', v0=count)
         loaded = entry.family
-        em = f"\nem：{loaded.units_per_em:g}" if loaded is not None else ""
+        em = trf('\nem：{v0:g}', v0=loaded.units_per_em) if loaded is not None else ""
         self.info.setText(f"{entry.display_name}  [{kind}]\n{glyph_line}{em}")
 
     # --------------------------------------------------------------- 列表交互
@@ -643,12 +652,12 @@ class FontPanel(QDockWidget):
     def _update_pin_button(self, item: Optional[QListWidgetItem]) -> None:
         if item is None:
             self.pin_btn.setEnabled(False)
-            self.pin_btn.setText("置顶")
+            self.pin_btn.setText(tr("置顶"))
             return
         self.pin_btn.setEnabled(True)
         self.pin_btn.setText(
-            "取消置顶" if self.manager.is_pinned(item.data(Qt.UserRole))
-            else "置顶")
+            tr('取消置顶') if self.manager.is_pinned(item.data(Qt.UserRole))
+            else tr('置顶'))
 
     def _toggle_pin(self) -> None:
         item = self.list.currentItem()
@@ -668,11 +677,9 @@ class FontPanel(QDockWidget):
         entry = self.manager.get_entry(name)
         if entry is None:
             return
-        if QMessageBox.question(
-                self, "隐藏字体",
-                f"在字体库与各下拉列表中隐藏「{entry.display_name}」？\n\n"
-                "文件保留在原处，可随时在「已隐藏…」中恢复显示。"
-                ) == QMessageBox.Yes:
+        if ask_yes_no(
+                self, tr("隐藏字体"),
+                trf('在字体库与各下拉列表中隐藏「{v0}」？\n\n文件保留在原处，可随时在「已隐藏…」中恢复显示。', v0=entry.display_name)):
             self.manager.hide(name, True)
             self.refresh()
             self.pinHideChanged.emit()
@@ -680,10 +687,10 @@ class FontPanel(QDockWidget):
     def _show_hidden_dialog(self) -> None:
         names = self.manager.hidden_names()
         dlg = QDialog(self)
-        dlg.setWindowTitle("已隐藏的字体")
+        dlg.setWindowTitle(tr("已隐藏的字体"))
         v = QVBoxLayout(dlg)
-        tip = QLabel("以下字体在界面中隐藏（文件未删除）。选中后点「恢复显示」，"
-                     "可多选。")
+        tip = QLabel(tr("以下字体在界面中隐藏（文件未删除）。选中后点「恢复显示」，"
+                     "可多选。"))
         tip.setWordWrap(True)
         v.addWidget(tip)
         lst = QListWidget()
@@ -694,7 +701,7 @@ class FontPanel(QDockWidget):
         lst.setMinimumSize(280, 220)
         v.addWidget(lst, 1)
         btns = QDialogButtonBox()
-        ok = btns.addButton("恢复显示", QDialogButtonBox.AcceptRole)
+        ok = btns.addButton(tr("恢复显示"), QDialogButtonBox.AcceptRole)
         btns.addButton(QDialogButtonBox.Cancel)
         ok.setEnabled(False)
         lst.itemSelectionChanged.connect(
@@ -702,6 +709,7 @@ class FontPanel(QDockWidget):
         btns.accepted.connect(dlg.accept)
         btns.rejected.connect(dlg.reject)
         v.addWidget(btns)
+        localize_dialog_buttons(dlg)
         if dlg.exec() == QDialog.Accepted:
             restored = [names[lst.row(i)] for i in lst.selectedIndexes()]
             for n in restored:
@@ -713,8 +721,8 @@ class FontPanel(QDockWidget):
     # --------------------------------------------------------------- 操作
     def _import(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "导入字体", filedialog.start_dir(),
-            "字体文件 (*.gfont *.jhf *.json *.ttf *.otf *.ttc *.woff *.woff2);;所有文件 (*)",
+            self, tr("导入字体"), filedialog.start_dir(),
+            tr("字体文件 (*.gfont *.jhf *.json *.ttf *.otf *.ttc *.woff *.woff2);;所有文件 (*)"),
         )
         if not paths:
             return
@@ -728,24 +736,24 @@ class FontPanel(QDockWidget):
         filedialog.remember(paths[0])
         self.refresh()
         if fail:
-            QMessageBox.warning(self, "部分导入失败", "\n".join(fail[:10]))
+            QMessageBox.warning(self, tr("部分导入失败"), "\n".join(fail[:10]))
 
     def _add_dir(self) -> None:
         d = QFileDialog.getExistingDirectory(
-            self, "选择字体目录",
+            self, tr("选择字体目录"),
             filedialog.start_dir())
         if not d:
             return
         try:
             n = self.manager.add_search_dir(d)
         except Exception as exc:
-            QMessageBox.warning(self, "添加失败", str(exc))
+            QMessageBox.warning(self, tr("添加失败"), str(exc))
             return
         filedialog.remember(d)
         self.searchDirAdded.emit(d)
         self.refresh()
-        QMessageBox.information(self, "已添加字体目录",
-                                f"从\n{d}\n发现 {n} 款字体。")
+        QMessageBox.information(self, tr("已添加字体目录"),
+                                trf('从\n{v0}\n发现 {v1} 款字体。', v0=d, v1=n))
 
     def _remove(self) -> None:
         item = self.list.currentItem()
@@ -762,18 +770,14 @@ class FontPanel(QDockWidget):
         if not is_user:
             # 内置字体打包在程序目录里，文件不删：从列表移除 = 记住隐藏，
             # 「重新扫描」/「已隐藏…」都能恢复显示
-            if QMessageBox.question(
-                    self, "移除内置字体",
-                    f"从字体库移除内置字体「{entry.display_name}」？\n\n"
-                    "文件保留在程序目录中，可随时在「已隐藏…」里恢复显示。"
-                    ) == QMessageBox.Yes:
+            if ask_yes_no(
+                    self, tr("移除内置字体"),
+                    trf('从字体库移除内置字体「{v0}」？\n\n文件保留在程序目录中，可随时在「已隐藏…」里恢复显示。', v0=entry.display_name)):
                 self.manager.hide(name, True)
                 self.refresh()
                 self.pinHideChanged.emit()
             return
-        if QMessageBox.question(self, "移除字体",
-                                f"确定移除字体「{entry.display_name}」？\n"
-                                "将同时删除字体库中的文件。"
-                                ) == QMessageBox.Yes:
+        if ask_yes_no(self, tr("移除字体"),
+                      trf('确定移除字体「{v0}」？\n将同时删除字体库中的文件。', v0=entry.display_name)):
             self.manager.remove(name)
             self.refresh()

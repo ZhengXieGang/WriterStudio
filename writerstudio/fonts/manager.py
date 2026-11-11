@@ -20,6 +20,7 @@ from .gfont import (
     parse_gfont,
 )
 from .hershey import parse_hershey_jhf
+from ..i18n import trf
 from .model import (
     KIND_GCODE,
     KIND_HERSHEY,
@@ -240,7 +241,7 @@ class FontManager:
     def require(self, name: str) -> FontFamily:
         entry = self._entries.get(name)
         if entry is None:
-            raise KeyError(f"未找到字体：{name}")
+            raise KeyError(trf("未找到字体：{v0}", v0=name))
         return entry.load()
 
     # ----------------------------------------------------------- 置顶/隐藏
@@ -292,7 +293,7 @@ class FontManager:
             raise FileNotFoundError(src)
         kind = kind or _infer_kind(src)
         if kind is None:
-            raise ValueError(f"无法识别字体类型：{src.name}")
+            raise ValueError(trf("无法识别字体类型：{v0}", v0=src.name))
 
         dest_dir = self.user_dir / _dir_for(kind)
         dest_dir.mkdir(parents=True, exist_ok=True)

@@ -13,6 +13,7 @@ from typing import Any, Optional
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QUndoCommand, QUndoStack
 
+from ..i18n import tr, trf
 from ..core.document import Document, DocumentObject, PageSpec
 from ..core.geometry import AffineTransform
 from ..core.reference import ReferenceItem
@@ -74,7 +75,7 @@ class TransformCommand(_DocCommand):
 
     def __init__(self, controller: "DocumentController", obj,
                  new_transform: AffineTransform, text: str = "变换对象") -> None:
-        super().__init__(controller, f"{text}：{obj.name}")
+        super().__init__(controller, trf('{v0}：{v1}', v0=tr(text), v1=obj.name))
         self._obj = obj
         self._old = obj.transform
         self._new = new_transform
@@ -91,7 +92,7 @@ class TransformCommand(_DocCommand):
 class AddReferenceCommand(_DocCommand):
     def __init__(self, controller: "DocumentController", ref: ReferenceItem,
                  index: Optional[int] = None) -> None:
-        super().__init__(controller, f"添加参考图：{ref.name}")
+        super().__init__(controller, trf('添加参考图：{v0}', v0=ref.name))
         self._ref = ref
         self._index = index
 
@@ -106,7 +107,7 @@ class AddReferenceCommand(_DocCommand):
 
 class RemoveReferenceCommand(_DocCommand):
     def __init__(self, controller: "DocumentController", ref: ReferenceItem) -> None:
-        super().__init__(controller, f"删除参考图：{ref.name}")
+        super().__init__(controller, trf('删除参考图：{v0}', v0=ref.name))
         self._ref = ref
         self._index = controller.doc.references.index(ref)
 
@@ -124,7 +125,7 @@ class ReferenceEditCommand(_DocCommand):
 
     def __init__(self, controller: "DocumentController", ref: ReferenceItem,
                  text: str, changes: dict) -> None:
-        super().__init__(controller, f"{text}：{ref.name}")
+        super().__init__(controller, trf('{v0}：{v1}', v0=tr(text), v1=ref.name))
         self._ref = ref
         self._changes = dict(changes)
         self._old = {k: getattr(ref, k) for k in self._changes}
@@ -156,7 +157,7 @@ class ObjectStateCommand(_DocCommand):
     def __init__(self, controller: "DocumentController",
                  entries: list[tuple[DocumentObject, _ObjectState, _ObjectState]],
                  text: str, merge_key: Optional[str] = None) -> None:
-        super().__init__(controller, text)
+        super().__init__(controller, tr(text))
         self._entries = list(entries)
         self._merge_key = merge_key
 
@@ -192,7 +193,7 @@ class ObjectFlagCommand(_DocCommand):
 
     def __init__(self, controller: "DocumentController", obj: DocumentObject,
                  text: str, changes: dict) -> None:
-        super().__init__(controller, f"{text}：{obj.name}")
+        super().__init__(controller, trf('{v0}：{v1}', v0=tr(text), v1=obj.name))
         self._obj = obj
         self._changes = dict(changes)
         self._old = {k: getattr(obj, k) for k in self._changes}
@@ -213,7 +214,7 @@ class PageCommand(_DocCommand):
 
     def __init__(self, controller: "DocumentController",
                  old: PageSpec, new: PageSpec, text: str = "页面设置") -> None:
-        super().__init__(controller, text)
+        super().__init__(controller, tr(text))
         self._old = old
         self._new = new
 
@@ -235,7 +236,7 @@ class PageCommand(_DocCommand):
 class AddObjectCommand(_DocCommand):
     def __init__(self, controller: "DocumentController", obj: DocumentObject,
                  index: Optional[int] = None) -> None:
-        super().__init__(controller, f"添加对象：{obj.name}")
+        super().__init__(controller, trf('添加对象：{v0}', v0=obj.name))
         self._obj = obj
         self._index = index
 
@@ -250,7 +251,7 @@ class AddObjectCommand(_DocCommand):
 
 class RemoveObjectCommand(_DocCommand):
     def __init__(self, controller: "DocumentController", obj: DocumentObject) -> None:
-        super().__init__(controller, f"删除对象：{obj.name}")
+        super().__init__(controller, trf('删除对象：{v0}', v0=obj.name))
         self._obj = obj
         self._index = controller.doc.index_of(obj)
 
@@ -267,7 +268,7 @@ class MoveZCommand(_DocCommand):
     """调整图层顺序。"""
 
     def __init__(self, controller: "DocumentController", obj: DocumentObject, delta: int) -> None:
-        super().__init__(controller, f"{'上移' if delta > 0 else '下移'}：{obj.name}")
+        super().__init__(controller, trf('{v0}：{v1}', v0=tr('上移') if delta > 0 else tr('下移'), v1=obj.name))
         self._obj = obj
         self._delta = delta
 
@@ -291,7 +292,7 @@ class RestoreSnapshotCommand(_DocCommand):
     def __init__(self, controller: "DocumentController",
                  before: dict, after: dict, pool: SnapshotPool,
                  text: str) -> None:
-        super().__init__(controller, text)
+        super().__init__(controller, tr(text))
         self.before = before
         self.after = after
         self._pool = pool
@@ -483,7 +484,7 @@ class DocumentController(QObject):
                 after = entries[i + 1] if i + 1 < len(entries) else final
                 stack.push(RestoreSnapshotCommand(
                     self, e, after, stack.pool,
-                    str(e.get("text") or f"步骤 {i + 1}")))
+                    str(e.get("text") or trf('步骤 {v0}', v0=i + 1))))
         except Exception:
             ok = False
         finally:
@@ -515,7 +516,7 @@ class DocumentController(QObject):
     def remove_objects(self, objs: list[DocumentObject]) -> None:
         if not objs:
             return
-        self.undo_stack.beginMacro(f"删除 {len(objs)} 个对象")
+        self.undo_stack.beginMacro(trf('删除 {v0} 个对象', v0=len(objs)))
         for o in objs:
             self.undo_stack.push(RemoveObjectCommand(self, o))
         self.undo_stack.endMacro()
@@ -562,7 +563,7 @@ class DocumentController(QObject):
     def remove_references(self, refs: list[ReferenceItem]) -> None:
         if not refs:
             return
-        self.undo_stack.beginMacro(f"删除 {len(refs)} 个参考图")
+        self.undo_stack.beginMacro(trf('删除 {v0} 个参考图', v0=len(refs)))
         for r in refs:
             self.undo_stack.push(RemoveReferenceCommand(self, r))
         self.undo_stack.endMacro()

@@ -74,10 +74,8 @@ def test_offer_recovery_restores_content(win, monkeypatch):
     win2.confirm_on_close = False
     # 恢复询问是真·模态框，测试里必须替它作答，否则整个测试进程卡在
     # 事件循环里等点击（曾把全量测试挂在 85% 一直不动）
-    from PySide6.QtWidgets import QMessageBox
-    monkeypatch.setattr(QMessageBox, "question",
-                        staticmethod(lambda *a, **k:
-                                     QMessageBox.StandardButton.Yes))
+    monkeypatch.setattr("writerstudio.ui.main_window.ask_yes_no",
+                        lambda *a, **k: True)
     try:
         assert recovery.exists()
         assert win2.maybe_offer_recovery() is True
@@ -90,7 +88,6 @@ def test_offer_recovery_restores_content(win, monkeypatch):
 
 
 def test_offer_recovery_can_decline(win, monkeypatch):
-    from PySide6.QtWidgets import QMessageBox
     AiTools(win).call("add_text", {"text": "AB", "size": 8.0,
                                    "font_names": ["futural"]})
     win._autosave_recovery()
@@ -99,9 +96,8 @@ def test_offer_recovery_can_decline(win, monkeypatch):
     st.set(K_AI_ENABLED, False)
     win2 = MainWindow(st)
     win2.confirm_on_close = False
-    monkeypatch.setattr(QMessageBox, "question",
-                        staticmethod(lambda *a, **k:
-                                     QMessageBox.StandardButton.No))
+    monkeypatch.setattr("writerstudio.ui.main_window.ask_yes_no",
+                        lambda *a, **k: False)
     try:
         assert win2.maybe_offer_recovery() is False
         assert not recovery.exists()          # 拒绝即丢弃快照

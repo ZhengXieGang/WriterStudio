@@ -157,7 +157,24 @@ def test_text_dialog_opens_without_squeeze(qapp):
     qapp.processEvents()
     # 无溢出：显示尺寸 ≥ 布局最小需求
     assert dlg.geometry().height() >= dlg.minimumSizeHint().height()
-    # 关键控件可用：字体链至少可见 4 项，文本框至少 6 行
+    # 关键控件可用：字体链至少可见 4 项，文本框至少 10 行
     assert dlg.chain_list.height() >= 100
-    assert dlg.text_edit.height() >= 140
+    assert dlg.text_edit.height() >= 230
     dlg.close()
+
+
+def test_text_dialog_accepts_extreme_content(qapp):
+    """边界内容：空文本、单字符、数千字都不得抛异常且原样返回。"""
+    from writerstudio.fonts.builder import TextSpec
+    from writerstudio.fonts.manager import FontManager
+    from writerstudio.ui.text_dialog import TextEditDialog
+
+    dlg = TextEditDialog(TextSpec(text="测试", font_names=["futural"]),
+                         FontManager())
+    try:
+        for text in ("", "A", "很长的文字" * 1000):
+            dlg.text_edit.setPlainText(text)
+            dlg._update_preview()
+            assert dlg.result_spec().text == text
+    finally:
+        dlg.close()

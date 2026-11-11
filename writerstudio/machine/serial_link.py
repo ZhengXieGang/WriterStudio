@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Optional, Protocol
 
+from ..i18n import tr, trf
 from . import grbl
 from .profile import MachineProfile
 
@@ -229,7 +230,7 @@ class GrblLink:
                 self._pump()
             except Exception as exc:
                 if not self._stop.is_set():
-                    self._emit("line", f"串口错误：{exc}")
+                    self._emit("line", trf("串口错误：{v0}", v0=exc))
                     # 读线程死亡后必须完整收尾（关串口、复位状态），
                     # 否则 connected 仍为 True 而链接已不可用
                     self.disconnect()
@@ -362,7 +363,7 @@ class GrblLink:
     def _write_raw(self, data: bytes) -> None:
         ser = self._serial
         if ser is None:
-            raise ConnectionError("未连接")
+            raise ConnectionError(tr("未连接"))
         ser.write(data)
 
     def send_line(self, line: str) -> None:
