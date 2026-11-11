@@ -453,6 +453,10 @@ class MachinePanel(QWidget):
         self._update_marker_button()
         self._update_start_summary()
         self._normalize_field_sizes()
+        # 窄停靠区（英文文案 / 不同平台字体更宽）里让表单行整体换行，
+        # 而不是把内容撑出横向滚动条；300px 正常宽度下不会触发换行。
+        for form in self.findChildren(QFormLayout):
+            form.setRowWrapPolicy(QFormLayout.WrapLongRows)
 
     def _normalize_field_sizes(self) -> None:
         """统一输入框/下拉框的宽高（连接/抬落笔/作业各组混排参差）。

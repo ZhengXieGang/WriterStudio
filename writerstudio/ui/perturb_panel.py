@@ -251,6 +251,9 @@ class PerturbPanel(QWidget):
              lo: float, hi: float, step: float, suffix: str, decimals: int = 2) -> None:
         # 面板变宽时输入框跟着伸展，而不是挤在左侧一小块
         form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        # 窄停靠区（英文长标签 / 不同平台字体更宽）里整行换行，
+        # 不撑出横向滚动条；正常宽度下不触发。
+        form.setRowWrapPolicy(QFormLayout.WrapLongRows)
         sp = QDoubleSpinBox()
         sp.setRange(lo, hi)
         sp.setSingleStep(step)
