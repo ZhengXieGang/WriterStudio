@@ -10,10 +10,20 @@
 
 from __future__ import annotations
 
+import time
 from typing import Callable, Optional
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPolygonF, QTransform
+from PySide6.QtGui import (
+    QColor,
+    QImage,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+    QPolygonF,
+    QTransform,
+)
 from PySide6.QtWidgets import QGraphicsScene, QGraphicsView
 
 from .controller import DocumentController
@@ -45,10 +55,9 @@ ORIGIN_RADIUS_PX = 4.0   # 原点圆圈半径(px)
 # ---- 缩放后的显示缓存重建 ------------------------------------------------
 # 对象在平移/缩放期间直接用按“上次静止时分辨率”渲染的位图（与笔画数
 # 无关），停手后视图再逐个对象按新分辨率重建，避免每帧重画整条路径。
-CACHE_REFRESH_IDLE_MS = 160     # 最后一次缩放/滚轮后等多久再重建
-CACHE_REFRESH_STEP_MS = 16      # 每次只重建一个对象，防止一次性卡住
-CACHE_REFRESH_RETRY_MS = 90     # 像素预算用完：歇一下再从队首继续
-CACHE_REFRESH_BUDGET_PX = 24_000_000   # 单次刷新最多分配的像素总量
+CACHE_REFRESH_IDLE_MS = 80      # 最后一次缩放/滚轮后等多久再重建
+CACHE_REFRESH_SLICE_MS = 8      # 每轮最多占用 GUI 线程多久（之后让出事件循环）
+CACHE_REFRESH_STEP_MS = 0       # 让出后立即继续（0=下一轮事件循环）
 
 # 滚轮/滚动条移动期间关掉位图平滑插值：参考图缓存是整页位图，双线性
 # 重采样每帧要十几毫秒；停手 140ms 后恢复平滑（静止画质不变）。
@@ -124,10 +133,17 @@ class CanvasView(QGraphicsView):
         self._cache_timer.setSingleShot(True)
         self._cache_timer.timeout.connect(self._refresh_item_caches)
         self._cache_queue: list = []
+        # 暂存本轮新位图，全部对象都渲染完后再一次性替换。这样缩放后不会
+        # 出现「先刷新的对象细、后刷新的对象粗」的中间态：画面上要么全是
+        # 旧图（按同一比例缩放），要么全换成新图。
+        self._cache_batch: dict = {}
+        #: 每次缩放/平移/文档变化都 +1；旧批次的结果按代作废
+        self._cache_gen = 0
         self._smooth_timer = QTimer(self)
         self._smooth_timer.setSingleShot(True)
         self._smooth_timer.timeout.connect(self._restore_smooth_pixmaps)
         # 复杂对象的位图在后台线程渲染，这里定时取回（不阻塞事件循环）
+        # item -> (token, generation)
         self._pending_cache: dict = {}
         self._async_timer = QTimer(self)
         self._async_timer.setInterval(30)
@@ -144,9 +160,12 @@ class CanvasView(QGraphicsView):
         self._scene.clear()
         self._items.clear()
         self._ref_items.clear()
-        # 旧对象已被删除：作废排队中的缓存重建
+        # 旧对象已被删除：作废排队中的缓存重建与已暂存的新位图
+        self._cache_gen += 1
         self._cache_queue = []
+        self._cache_batch.clear()
         self._pending_cache.clear()
+        self._cache_timer.stop()
         self._async_timer.stop()
         # 参考层在底层（负 z），书写对象在上层
         for i, ref in enumerate(self.controller.doc.references):
@@ -511,8 +530,16 @@ class CanvasView(QGraphicsView):
 
     # ------------------------------------------------- 显示缓存的延迟重建
     def _schedule_cache_refresh(self) -> None:
-        """缩放停手后再按新分辨率重建对象位图（连续滚轮期间一直顺延）。"""
+        """缩放/平移停手后再按新分辨率重建对象位图。
+
+        连续滚轮期间不断顺延；新的缩放会作废旧批次（已暂存的新位图一起
+        丢弃），画面上继续显示同一批旧缓存，不会出现新旧混排。
+        """
+        self._cache_gen += 1
         self._cache_queue = []
+        self._cache_batch.clear()
+        self._pending_cache.clear()
+        self._async_timer.stop()
         self._cache_timer.start(CACHE_REFRESH_IDLE_MS)
 
     # --------------------------------------------- 交互期间的快速绘制开关
@@ -528,17 +555,35 @@ class CanvasView(QGraphicsView):
         if any(getattr(it, "_drag_kind", None) for it in self._scene.items()):
             self._smooth_timer.start(SMOOTH_RESTORE_IDLE_MS)
             return
+        # 缓存整轮刷新还没提交：旧位图仍在按最近邻放大。此时恢复双线性
+        # 会让同一批旧图突然变糊/变浅；等提交后再恢复，画面只变一次。
+        if (self._cache_timer.isActive() or self._cache_queue
+                or self._pending_cache or self._cache_batch):
+            self._smooth_timer.start(SMOOTH_RESTORE_IDLE_MS)
+            return
         self.setRenderHints(self.renderHints() | QPainter.SmoothPixmapTransform)
         self.viewport().update()
 
     def _refresh_item_caches(self) -> None:
-        """把可见对象按当前缩放分辨率重渲染；一次一个，避免一次性卡住。
+        """开始一轮可见对象的缓存重建（每次缩放/平移停手后调用一次）。
 
-        缩放/平移期间对象用的是旧分辨率的位图（直接缩放贴图，成本与笔画数
-        无关）。这里按“缓存目标分辨率”（含绘制系数与像素预算封顶）
-        判断：只有缓存小于目标时才重建——即贴图时绝不会被放大；缓存大于
-        目标属于缩小贴图，画质只会更好，不必重建。
+        重建按“8ms 时间片、让出事件循环”进行，但新位图先暂存在
+        ``_cache_batch`` 里，等整轮对象都完成后 :meth:`_commit_cache_batch`
+        一次性替换。这样缩放后不会出现半屏细线、半屏粗线的中间态；在
+        提交之前画面继续使用同一批旧缓存，缩放比例一致，粗细也一致。
+
+        缓存分辨率必须与当前视图一致：放大方向要重建（否则位图被放大
+        发虚），缩小方向同样要重建（位图里的线宽按建图分辨率烘焙，缩小
+        贴图会让线宽和颜色一起变浅）。
         """
+        # 新一轮：旧批次的暂存结果和异步任务全部作废（旧缓存不受影响）
+        self._cache_gen += 1
+        gen = self._cache_gen
+        self._cache_queue = []
+        self._cache_batch.clear()
+        self._pending_cache.clear()
+        self._async_timer.stop()
+
         view_ppm = self.current_zoom() * max(1.0, self.devicePixelRatioF())
         rect = self.mapToScene(self.viewport().rect()).boundingRect()
         queue = []
@@ -551,21 +596,58 @@ class CanvasView(QGraphicsView):
             if target <= 0.0:
                 continue
             cached = it.display_cache_ppm()
-            if cached > target * 2.5:
-                # 缩小太多：旧图太大，重建一张小的释放内存（保留旧图到
-                # 新图建成为止，不在下一帧主线程同步重建）
-                if it.sceneBoundingRect().intersects(rect):
-                    queue.append(it)
+            # 缓存分辨率必须和当前视图一致（±2%），**缩小方向也要重建**：
+            # 位图里的线宽是按建图时的分辨率画的，缩小贴图会让线宽跟着
+            # 变细（1.6px → 1.6×新缩放/旧缩放），颜色也变浅；保留大图
+            # 只省一次重建，却让不同对象长期粗细不一。
+            if cached > 0.0 and abs(cached - target) <= target * 0.02:
                 continue
-            if cached > 0.0 and cached >= target * 0.999:
-                continue        # 已经是目标分辨率（或更好）
             if it.sceneBoundingRect().intersects(rect):
                 queue.append(it)
         self._cache_queue = queue
-        self._refresh_one_cache(CACHE_REFRESH_BUDGET_PX)
+        if not queue:
+            return
+        self._refresh_one_cache(gen)
 
-    def _refresh_one_cache(self, budget: int) -> None:
-        processed = 0
+    @staticmethod
+    def _restore_item_cache(it, old_pix, old_ppm,
+                            old_fast=None, old_fast_rect=None) -> None:
+        """恢复 item 的旧缓存（暂存期间画面仍用旧图）。"""
+        it._disp_pix = old_pix
+        it._disp_ppm = old_ppm
+        if hasattr(it, "_fast_pix"):
+            it._fast_pix = old_fast
+            it._fast_rect = old_fast_rect
+
+    def _stage_sync_cache(self, it, view_ppm: float):
+        """同步渲染一张新位图但不替换旧缓存。
+
+        返回 ``(pixmap, ppm, old_pix)``；旧位图对象身份用于提交时确认
+        对象期间没有被改内容/变换（否则丢弃这张过期的新图）。
+        """
+        old_pix, old_ppm = it._disp_pix, it._disp_ppm
+        old_fast = getattr(it, "_fast_pix", None)
+        old_fast_rect = getattr(it, "_fast_rect", None)
+        # 清空后再建，才能分辨“对象为空/建图失败”与“建出了新图”
+        it._disp_pix = None
+        it._disp_ppm = 0.0
+        try:
+            it.rebuild_display_cache_now(view_ppm)
+            new_pix, new_ppm = it._disp_pix, it._disp_ppm
+        finally:
+            self._restore_item_cache(
+                it, old_pix, old_ppm, old_fast, old_fast_rect)
+        return new_pix, new_ppm, old_pix
+
+    def _refresh_one_cache(self, gen: int) -> None:
+        """在 8ms 时间片内尽量多建几个对象，然后让出事件循环。
+
+        一页上百个小对象时，若每轮只建一个，要等十几轮才提交；这里按
+        时间片批处理，既不让 GUI 长时间卡住，也能在 ~0.1s 级别完成整轮。
+        """
+        if gen != self._cache_gen:
+            return
+        start = time.monotonic()
         while self._cache_queue:
             it = self._cache_queue.pop(0)
             if it.scene() is not self._scene or not it.isVisible():
@@ -575,36 +657,77 @@ class CanvasView(QGraphicsView):
             thr = it.display_cache_async_threshold()
             if thr > 0 and it.display_element_count() >= thr:
                 if it not in self._pending_cache:
-                    self._pending_cache[it] = it.request_display_cache_async(view_ppm)
+                    self._pending_cache[it] = (
+                        it.request_display_cache_async(view_ppm), gen,
+                        it._disp_pix)
                     self._async_timer.start()
                 continue
-            bbox = it.sceneBoundingRect()
-            ppm = it.display_ppm_for(view_ppm)
-            est = max(1.0, bbox.width() * ppm) * max(1.0, bbox.height() * ppm)
-            est = min(est, float(it.display_cache_max_pixels()))
-            if budget - est < 0 and processed > 0:
-                # 本次预算用完：剩下的对象保持旧位图（按最近邻贴图仍清晰），
-                # 稍后从队首继续，避免它们永久停在旧分辨率。
-                if self._cache_queue:
-                    QTimer.singleShot(CACHE_REFRESH_RETRY_MS,
-                                      self._refresh_item_caches)
-                return
-            # 无论预算多小，每轮至少重建一个，保证队列一定收敛
-            processed += 1
-            it.rebuild_display_cache_now(view_ppm)
+            new_pix, new_ppm, old_pix = self._stage_sync_cache(it, view_ppm)
+            if new_pix is not None:
+                self._cache_batch[it] = (new_pix, new_ppm, old_pix)
+            if time.monotonic() - start >= CACHE_REFRESH_SLICE_MS:
+                break
+        if self._cache_queue:
             QTimer.singleShot(
                 CACHE_REFRESH_STEP_MS,
-                lambda b=int(budget - est): self._refresh_one_cache(b))
+                lambda: self._refresh_one_cache(gen))
+        elif not self._pending_cache:
+            self._commit_cache_batch(gen)
+
+    def _commit_cache_batch(self, gen: int) -> None:
+        """整轮缓存都就绪后一次性替换；代已变化则丢弃整批。"""
+        if gen != self._cache_gen or not self._cache_batch:
             return
+        view_ppm = self.current_zoom() * max(1.0, self.devicePixelRatioF())
+        batch = self._cache_batch
+        # 提交前再确认一遍：批处理期间若视图分辨率又变了（但没有走
+        # _schedule_cache_refresh），整批作废重来，绝不提交新旧混排。
+        for it in batch:
+            try:
+                alive = it.scene() is self._scene
+            except RuntimeError:
+                alive = False
+            if not alive:
+                continue
+            target = it.display_cache_target_ppm(view_ppm)
+            if target > 0.0 and abs(batch[it][1] - target) > target * 0.02:
+                self._cache_batch = {}
+                self._schedule_cache_refresh()
+                return
+        self._cache_batch = {}
+        for it, (value, ppm, old_pix) in batch.items():
+            try:
+                if it.scene() is not self._scene:
+                    continue
+                # 批处理期间对象改了内容/变换：旧缓存已被替换或作废，
+                # 这张按旧内容渲染的新图不能再用
+                if it._disp_pix is not old_pix:
+                    continue
+            except RuntimeError:
+                continue
+            if isinstance(value, QImage):
+                value = QPixmap.fromImage(value)
+            if value is None or value.isNull():
+                continue
+            it._disp_pix = value
+            it._disp_ppm = ppm
+            if hasattr(it, "_fast_pix") and not getattr(it, "_drag_kind", None):
+                it._fast_pix = None
+        # 全部换完只重绘一次：避免逐个对象刷新时看到粗细不一的中间态
+        self.viewport().update()
 
     def _poll_async_caches(self) -> None:
         """取回后台渲染的位图；期间又缩放过/对象已删除的结果直接丢弃。"""
         if not self._pending_cache:
             self._async_timer.stop()
+            if not self._cache_queue:
+                self._commit_cache_batch(self._cache_gen)
             return
-        view_ppm = self.current_zoom() * max(1.0, self.devicePixelRatioF())
         done = []
-        for it, token in list(self._pending_cache.items()):
+        for it, (token, gen, old_pix) in list(self._pending_cache.items()):
+            if gen != self._cache_gen:
+                done.append(it)
+                continue
             try:
                 alive = it.scene() is self._scene
             except RuntimeError:
@@ -617,18 +740,19 @@ class CanvasView(QGraphicsView):
                 continue        # 还在渲染
             done.append(it)
             image, ppm = result
-            target = it.display_cache_target_ppm(view_ppm)
-            if image is None or ppm < target * 0.75:
-                # 渲染期间又放大/渲染失败：结果作废，稍后按新分辨率重来。
-                # 只有“明显不够清晰”才作废；比目标更大（小对象像素取整）
-                # 直接采用，避免来回重渲染。
-                self._schedule_cache_refresh()
+            if image is None or image.isNull():
                 continue
-            it.apply_display_cache(image, ppm)
+            # 渲染期间对象缓存被作废/重建：结果已过期
+            if it._disp_pix is not old_pix:
+                continue
+            # 本轮代未变：结果就是当前视图要的分辨率，先暂存不替换
+            self._cache_batch[it] = (image, ppm, old_pix)
         for it in done:
             self._pending_cache.pop(it, None)
         if not self._pending_cache:
             self._async_timer.stop()
+            if not self._cache_queue:
+                self._commit_cache_batch(self._cache_gen)
 
     def zoom_in(self) -> None:
         self._zoom_at(self.viewport().rect().center(), 1.25)

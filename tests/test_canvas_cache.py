@@ -138,6 +138,70 @@ def test_zoom_reuses_old_bitmap_then_refreshes(qapp):
         v.close()
 
 
+def test_multi_object_refresh_is_atomic(qapp, monkeypatch):
+    """一轮刷新完成前所有对象保持旧缓存，完成后一起换新。
+
+    回归：逐个对象立即替换会让先刷新的对象变细、后刷新的仍粗，缩放后
+    出现半屏粗半屏细的中间态。
+    """
+    from writerstudio.ui import canvas as canvas_mod
+    # 每轮只处理一个对象，便于观察“部分完成”时的画面状态
+    monkeypatch.setattr(canvas_mod, "CACHE_REFRESH_SLICE_MS", 0)
+
+    doc = Document(page=PageSpec(width=297.0, height=210.0, margin=10.0))
+    for k in range(4):
+        doc.add(make_static_object(
+            [make_rect(100.0 + k * 20.0, 90.0, 15.0, 10.0)], name=f"m{k}"))
+    v = _view(doc)
+    try:
+        v._refresh_item_caches()
+        _pump(0.2)
+        items = _visible_items(v)
+        assert len(items) >= 3
+        old = {it: it.display_cache_ppm() for it in items}
+        v._zoom_at(v.viewport().rect().center(), 2.0)
+        v._cache_timer.stop()          # 手动控制批次，排除自动计时器干扰
+        v._refresh_item_caches()
+        # 队列尚未处理完：所有对象必须仍显示旧缓存
+        assert all(it.display_cache_ppm() == old[it] for it in items)
+        assert v._cache_batch, "新位图应先暂存，不能立刻替换旧缓存"
+        _pump(0.3)
+        view_ppm = v.current_zoom() * max(1.0, v.devicePixelRatioF())
+        for it in items:
+            assert it.display_cache_ppm() == pytest.approx(
+                it.display_cache_target_ppm(view_ppm))
+    finally:
+        v.close()
+
+
+def test_staged_cache_discarded_if_content_changes(qapp, monkeypatch):
+    """批处理期间对象内容变了：按旧内容渲染的暂存图不能提交。"""
+    from writerstudio.ui import canvas as canvas_mod
+    monkeypatch.setattr(canvas_mod, "CACHE_REFRESH_SLICE_MS", 0)
+
+    doc = Document(page=PageSpec(width=297.0, height=210.0, margin=10.0))
+    for k in range(3):
+        doc.add(make_static_object(
+            [make_rect(100.0 + k * 20.0, 90.0, 15.0, 10.0)], name=f"c{k}"))
+    v = _view(doc)
+    try:
+        v._refresh_item_caches()
+        _pump(0.2)
+        v._zoom_at(v.viewport().rect().center(), 2.0)
+        v._cache_timer.stop()
+        v._refresh_item_caches()
+        assert v._cache_batch
+        it = next(iter(v._cache_batch))
+        it.model.local_strokes = [make_rect(0.0, 0.0, 5.0, 5.0)]
+        it.sync()
+        assert it._disp_pix is None
+        v._commit_cache_batch(v._cache_gen)
+        # 暂存的旧内容位图必须被丢弃，不能把缓存又填回去
+        assert it._disp_pix is None
+    finally:
+        v.close()
+
+
 def test_content_change_invalidates_cache(qapp):
     doc = _simple_doc()
     v = _view(doc)
@@ -243,18 +307,24 @@ def _visible_items(v):
             and it.sceneBoundingRect().intersects(rect)]
 
 
-def test_zoom_out_reuses_larger_cache(qapp):
+def test_zoom_out_rebuilds_cache_keeps_stroke_width(qapp):
+    """缩小后也必须按新分辨率重建缓存。
+
+    位图里的线宽按建图分辨率烘焙；直接缩小旧位图会让线宽跟着变细、
+    颜色变浅。旧实现为省一次重建保留大图，导致不同对象粗细长期不一致。
+    """
     v = _view(_simple_doc())
     try:
         v._refresh_item_caches()
         v.viewport().repaint()
         it = _item(v)
-        old_pix, old_ppm = it._disp_pix, it.display_cache_ppm()
+        old_pix = it._disp_pix
         v._zoom_at(v.viewport().rect().center(), 1.0 / 1.8)
         v._refresh_item_caches()
-        # 缩小后旧位图分辨率更高：直接缩小贴图即可，不重建
-        assert it._disp_pix is old_pix
-        assert it.display_cache_ppm() == old_ppm
+        view_ppm = v.current_zoom() * max(1.0, v.devicePixelRatioF())
+        target = it.display_cache_target_ppm(view_ppm)
+        assert it._disp_pix is not old_pix
+        assert it.display_cache_ppm() == pytest.approx(target)
     finally:
         v.close()
 
@@ -340,7 +410,7 @@ def test_handle_drag_preview_supersamples(qapp):
         v.close()
 
 
-def test_refresh_queue_converges_with_tiny_budget(qapp, monkeypatch):
+def test_refresh_queue_converges_with_zero_time_slice(qapp, monkeypatch):
     doc = Document(page=PageSpec(width=297.0, height=210.0, margin=10.0))
     for k in range(5):
         doc.add(make_static_object([make_rect(0.0, k * 20.0, 80.0, 10.0)],
@@ -348,7 +418,7 @@ def test_refresh_queue_converges_with_tiny_budget(qapp, monkeypatch):
     v = _view(doc)
     try:
         from writerstudio.ui import canvas as canvas_mod
-        monkeypatch.setattr(canvas_mod, "CACHE_REFRESH_BUDGET_PX", 1)
+        monkeypatch.setattr(canvas_mod, "CACHE_REFRESH_SLICE_MS", 0)
         for it in _visible_items(v):
             it._disp_ppm = 0.0        # 全部标记为过期
         v._refresh_item_caches()
