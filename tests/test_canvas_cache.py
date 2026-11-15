@@ -91,6 +91,48 @@ def test_cache_is_built_at_view_resolution(qapp):
         v.close()
 
 
+def test_cache_bitmap_includes_stroke_margin(qapp):
+    """位图必须包住描边外缘：严格贴几何包围盒会把对象边缘削掉一点。"""
+    v = _view(_simple_doc())
+    try:
+        v._refresh_item_caches()
+        v.viewport().repaint()
+        it = _item(v)
+        bbox = it._local_bbox()
+        rect = it._disp_rect
+        ppm = it.display_cache_ppm()
+        assert not rect.isEmpty()
+        assert rect.left() < bbox.left() and rect.right() > bbox.right()
+        assert rect.top() < bbox.top() and rect.bottom() > bbox.bottom()
+        # 几何边缘外 0.5 像素处仍应有描边；旧实现这里已被裁成透明
+        img = it._disp_pix.toImage()
+        x = int((bbox.left() - 0.5 / ppm - rect.left()) * ppm)
+        y = int((bbox.center().y() - rect.top()) * ppm)
+        assert 0 <= x < img.width() and 0 <= y < img.height()
+        assert img.pixelColor(x, y).alpha() > 0
+    finally:
+        v.close()
+
+
+def test_fast_preview_bitmap_includes_stroke_margin(qapp):
+    """拖动预览位图同样要留描边余量（拖动时边缘不能被削）。"""
+    v = _view(_simple_doc())
+    try:
+        v._refresh_item_caches()
+        v.viewport().repaint()
+        it = _item(v)
+        it._drag_kind = "handle"
+        it._drag_paint_hint_changed()
+        it._ensure_fast_preview()
+        bbox = it._local_bbox()
+        assert it._fast_rect.left() < bbox.left()
+        assert it._fast_rect.right() > bbox.right()
+        assert it._fast_rect.top() < bbox.top()
+        assert it._fast_rect.bottom() > bbox.bottom()
+    finally:
+        v.close()
+
+
 def test_cached_item_is_not_rebuilt_every_frame(qapp):
     v = _view(_simple_doc())
     try:
@@ -263,9 +305,9 @@ def test_dense_object_renders_cache_off_main_thread(qapp):
             result = items_mod.take_display_cache(token)
             time.sleep(0.005)
         assert result is not None
-        image, ppm = result
+        image, ppm, rect = result
         assert isinstance(image, QImage) and not image.isNull()
-        it.apply_display_cache(image, ppm)
+        it.apply_display_cache(image, ppm, rect)
         assert it._disp_pix is not None
         assert it.display_cache_ppm() == pytest.approx(ppm)
     finally:

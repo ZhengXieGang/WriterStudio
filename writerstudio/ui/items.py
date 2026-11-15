@@ -75,7 +75,7 @@ MAX_IMAGE_PX = 3000    # 参考图最大解码边长(px)，避免超大图拖慢
 # QImage（QPainter 画到 QImage 允许在 GUI 线程之外），结果由 CanvasView
 # 用定时器取回并换成 QPixmap；期间界面继续显示旧位图的缩放预览。
 _CACHE_JOBS: "queue.Queue" = queue.Queue()
-_CACHE_RESULTS: dict[int, tuple[Optional[QImage], float]] = {}
+_CACHE_RESULTS: dict[int, tuple[Optional[QImage], float, "QRectF"]] = {}
 _CACHE_LOCK = threading.Lock()
 _CACHE_TOKENS = itertools.count(1)
 _CACHE_THREAD: Optional[threading.Thread] = None
@@ -107,7 +107,8 @@ def _cache_worker() -> None:
         except Exception:
             image = None
         with _CACHE_LOCK:
-            _CACHE_RESULTS[token] = (image, w / max(bbox.width(), 1e-9))
+            _CACHE_RESULTS[token] = (image, w / max(bbox.width(), 1e-9),
+                                     QRectF(bbox))
             # 对象在渲染期间被删除时没人取结果；限制留存数量，避免位图越积越多
             while len(_CACHE_RESULTS) > 8:
                 _CACHE_RESULTS.pop(next(iter(_CACHE_RESULTS)))
@@ -132,7 +133,7 @@ def submit_display_cache(path: QPainterPath, bbox: QRectF, w: int, h: int,
 
 
 def take_display_cache(token: int):
-    """取回渲染结果（QImage, ppm）；未完成/已被取走时返回 None。"""
+    """取回渲染结果 ``(QImage, ppm, 覆盖矩形)``；未完成/已取走返回 None。"""
     with _CACHE_LOCK:
         return _CACHE_RESULTS.pop(token, None)
 
@@ -262,6 +263,8 @@ class TransformGraphicsItem(QGraphicsObject):
         # 逐个对象按新分辨率重建（见 _refresh_item_caches）。
         self._disp_pix: Optional[QPixmap] = None
         self._disp_ppm = 0.0        # 建图时的分辨率：设备像素 / 本地单位
+        # 位图覆盖的本地矩形（通常比几何包围盒四周多留描边/抗锯齿余量）
+        self._disp_rect = QRectF()
         self._CACHE_MAX_PIXELS = 4_000_000
         self._CACHE_MAX_SIDE = 4096
 
@@ -277,6 +280,7 @@ class TransformGraphicsItem(QGraphicsObject):
         """内容/变换变化后丢弃位图缓存；下一帧按当前分辨率重建。"""
         if self._disp_pix is not None:
             self._disp_pix = None
+            self._disp_rect = QRectF()
             self.update()
 
     def display_cache_ppm(self) -> float:
@@ -296,8 +300,24 @@ class TransformGraphicsItem(QGraphicsObject):
         if bbox.isEmpty():
             return 0.0
         ppm = self.display_ppm_for(view_ppm) * self.cache_build_scale()
-        _, _, eff = self._cache_pixmap_size(bbox, ppm)
+        _, _, eff = self._cache_pixmap_size(
+            self._cache_bbox(bbox, ppm), ppm)
         return eff
+
+    def _cache_padding(self, ppm: float) -> float:
+        """位图四周预留的本地单位余量（描边/抗锯齿会伸出几何包围盒）。
+
+        基类内容（参考图）恰好铺满包围盒，无需余量；带描边的对象覆盖本
+        方法，否则位图严格按几何包围盒裁切时，最外缘的半个笔宽会被切掉。
+        """
+        return 0.0
+
+    def _cache_bbox(self, bbox: QRectF, ppm: float) -> QRectF:
+        """位图实际覆盖的本地矩形 = 几何包围盒 + 描边余量。"""
+        pad = self._cache_padding(ppm)
+        if pad <= 0.0:
+            return bbox
+        return bbox.adjusted(-pad, -pad, pad, pad)
 
     def display_cache_max_pixels(self) -> int:
         return self._CACHE_MAX_PIXELS
@@ -314,11 +334,13 @@ class TransformGraphicsItem(QGraphicsObject):
         """异步重建位图（只有复杂对象需要；返回取结果的 token）。"""
         return 0
 
-    def apply_display_cache(self, image: QImage, ppm: float) -> None:
+    def apply_display_cache(self, image: QImage, ppm: float,
+                            rect: Optional[QRectF] = None) -> None:
         if image is None or image.isNull():
             return
         self._disp_pix = QPixmap.fromImage(image)
         self._disp_ppm = ppm
+        self._disp_rect = QRectF(rect) if rect is not None else QRectF()
         if not getattr(self, "_drag_kind", None):
             # 静态重建完成后拖动预览位图可以释放（拖拽中则保留，别打断预览）
             if hasattr(self, "_fast_pix"):
@@ -414,7 +436,10 @@ class TransformGraphicsItem(QGraphicsObject):
             self._build_display_cache(bbox, target_ppm)
         if self._disp_pix is None or self._disp_pix.isNull():
             return False
-        self._draw_pixmap_sharp(painter, bbox, self._disp_pix,
+        # 位图覆盖的是含描边余量的矩形；仍按几何包围盒贴图会把内容整体
+        # 缩小一个边距的量（线条变细、位置内缩）。
+        target = self._disp_rect if not self._disp_rect.isEmpty() else bbox
+        self._draw_pixmap_sharp(painter, target, self._disp_pix,
                                 self._disp_ppm, target_ppm,
                                 rotated=self._painter_rotated(painter))
         return True
@@ -887,6 +912,7 @@ class ObjectGraphicsItem(TransformGraphicsItem):
             if ((old.m11(), old.m12(), old.m21(), old.m22())
                     != (new_t.m11(), new_t.m12(), new_t.m21(), new_t.m22())):
                 self._disp_pix = None
+                self._disp_rect = QRectF()
         self.setTransform(new_t)
         self.setVisible(bool(self.model.visible))
         self.update()
@@ -906,6 +932,7 @@ class ObjectGraphicsItem(TransformGraphicsItem):
                 path.closeSubpath()
         self._path = path
         self._disp_pix = None       # 笔画变了，位图缓存失效
+        self._disp_rect = QRectF()
         self._fast_pix = None       # 拖拽预览也一起作废（内容已变）
         # 命中区 = 笔迹沿线一个小抓取宽度，而不是 boundingRect——
         # boundingRect 带 6mm+ 的手柄余量，会让线条旁的空白也能抓起对象、
@@ -965,6 +992,12 @@ class ObjectGraphicsItem(TransformGraphicsItem):
     #: 超过这个描边元素数就改由后台线程重建缓存（主线程渲染要几百毫秒）
     _DISPLAY_CACHE_ASYNC_ELEMS = 12000
 
+    def _cache_padding(self, ppm: float) -> float:
+        # 圆头描边以路径为中心向两侧各伸半个笔宽（约 0.8 设备像素），
+        # 抗锯齿还会再摊开约 1 像素。位图若严格贴着几何包围盒，对象最
+        # 外缘就会像被削掉一点；留 2 像素（本地单位）足够覆盖两者。
+        return 2.0 / max(ppm, 1e-6)
+
     def display_element_count(self) -> int:
         return self._path.elementCount()
 
@@ -973,7 +1006,9 @@ class ObjectGraphicsItem(TransformGraphicsItem):
 
     def request_display_cache_async(self, view_ppm: float) -> int:
         ppm = self.display_ppm_for(view_ppm)
-        bbox = self._local_bbox()
+        # 与同步路径一致：位图比几何包围盒四周多留描边余量，否则最外缘
+        # 的半个笔宽会被裁掉（对象边缘像被削掉一点）。
+        bbox = self._cache_bbox(self._local_bbox(), ppm)
         # 与同步路径一致：按视图分辨率×绘制系数渲染，笔画宽度补偿后再
         # 缩回屏幕，保证最终线宽仍是 1.6 设备像素。
         w, h, eff = self._cache_pixmap_size(
@@ -984,6 +1019,7 @@ class ObjectGraphicsItem(TransformGraphicsItem):
     def _build_display_cache(self, bbox: QRectF, ppm: float) -> None:
         if self._path.isEmpty():
             return
+        bbox = self._cache_bbox(bbox, ppm)
         w, h, eff = self._cache_pixmap_size(
             bbox, ppm * self.cache_build_scale())
         if w <= 0 or h <= 0:
@@ -998,6 +1034,7 @@ class ObjectGraphicsItem(TransformGraphicsItem):
         p.end()
         self._disp_pix = pix
         self._disp_ppm = eff
+        self._disp_rect = QRectF(bbox)
         # 显示缓存已按新方向/分辨率重建，拖拽预览位图可以退休了
         self._fast_pix = None
 
@@ -1049,6 +1086,10 @@ class ObjectGraphicsItem(TransformGraphicsItem):
         if sc is not None and sc.views():
             dpr = max(1.0, sc.views()[0].devicePixelRatioF())
         target = max(0.2, (1.0 / self._scene_per_px()) * scale * dpr)
+        # 与显示缓存同理：描边会伸出几何包围盒，预览位图四周留 2 像素，
+        # 否则拖动过程中对象外缘会被削掉一点。
+        pad = 2.0 / max(target, 1e-6)
+        rect = rect.adjusted(-pad, -pad, pad, pad)
         w = max(1, int(math.ceil(rect.width() * target
                                   * FAST_PREVIEW_BUILD_SCALE)))
         h = max(1, int(math.ceil(rect.height() * target
@@ -1203,10 +1244,17 @@ class ObjectGraphicsItem(TransformGraphicsItem):
     _LEFT_HANDLES = (Handle.L, Handle.TL, Handle.BL)
     _TEXT_MIN_W = 5.0
     _TEXT_MAX_W = 2000.0
+    #: 表格四角手柄：自由缩放（可分别拉伸宽/高），与左右缘的「改列宽并
+    #: 重排」互补——前者摆版面，后者调表格内容排版。
+    _TABLE_CORNER_HANDLES = (Handle.TL, Handle.TR, Handle.BL, Handle.BR)
 
     def _visible_handles(self) -> list[Handle]:
         fh = self._frame_handles()
         if fh:
+            if self._is_markdown:
+                # 表格：左右缘改列宽（重排），四角自由缩放。鼠标按下时
+                # 左右缘走 frame 拖动，四角落到普通手柄缩放路径。
+                return list(fh) + list(self._TABLE_CORNER_HANDLES)
             return list(fh)
         return super()._visible_handles()
 
@@ -1382,6 +1430,7 @@ class ReferenceGraphicsItem(TransformGraphicsItem):
         self._cache_key = key
         self._pix = None
         self._disp_pix = None       # 源图/尺寸变了，显示缓存失效
+        self._disp_rect = QRectF()
         self._load_error = False
         if not ref.path:
             self._load_error = True
@@ -1558,6 +1607,7 @@ class ReferenceGraphicsItem(TransformGraphicsItem):
         p.end()
         self._disp_pix = pix
         self._disp_ppm = eff
+        self._disp_rect = QRectF(bbox)
 
     def mouseDoubleClickEvent(self, event: QGraphicsSceneMouseEvent) -> None:
         if event.button() == Qt.LeftButton:

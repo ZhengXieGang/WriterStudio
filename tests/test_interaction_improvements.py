@@ -737,6 +737,38 @@ def test_history_panel_is_compact_top_right_dock(qapp):
     w.close()
 
 
+def test_markdown_table_has_corner_scale_and_side_reflow(qapp):
+    """表格：左右缘改列宽（重排），四角自由缩放（可单独拉宽/拉高）。"""
+    from writerstudio.content.builder import make_markdown_object
+    from writerstudio.ui.items import Handle
+
+    w = _win(qapp)
+    obj = make_markdown_object(
+        "| 项目 | 数量 |\n|---|---|\n| 铅笔 | 12 |\n", w.font_manager)
+    w.controller.add_object(obj)
+    w.canvas.sync_scene()
+    w.canvas.select_object(obj)
+    qapp.processEvents()
+    it = w.canvas._items[obj.id]
+
+    handles = it._visible_handles()
+    assert Handle.L in handles and Handle.R in handles   # 改列宽
+    for h in (Handle.TL, Handle.TR, Handle.BL, Handle.BR):
+        assert h in handles                              # 自由缩放
+
+    # 四角拖动只拉宽、不动高 → 非等比缩放（旧行为只能改表格宽度）
+    pos = it.mapToScene(it._handle_positions()[Handle.TR])
+    it._begin_drag("handle", Handle.TR, _RealEv(it, pos.x(), pos.y()))
+    it.mouseMoveEvent(_RealEv(it, pos.x() + 20.0, pos.y()))
+    assert it._pending is not None
+    assert it._pending.a > 1.05                  # 横向放大
+    assert it._pending.d == pytest.approx(1.0, abs=0.02)   # 纵向不变
+
+    # 左右缘仍走 frame 拖动（改表格宽度并重排），不是整体缩放
+    assert Handle.R in it._frame_handles()
+    w.close()
+
+
 def test_history_panel_uses_theme_text_colors(qapp):
     """已完成步骤用主题正文色、未完成用次要色（浅色主题下也不再白字白底）。"""
     from PySide6.QtGui import QColor, QUndoCommand

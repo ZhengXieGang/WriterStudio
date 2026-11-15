@@ -612,11 +612,12 @@ class CanvasView(QGraphicsView):
         self._refresh_one_cache(gen)
 
     @staticmethod
-    def _restore_item_cache(it, old_pix, old_ppm,
+    def _restore_item_cache(it, old_pix, old_ppm, old_rect=None,
                             old_fast=None, old_fast_rect=None) -> None:
         """恢复 item 的旧缓存（暂存期间画面仍用旧图）。"""
         it._disp_pix = old_pix
         it._disp_ppm = old_ppm
+        it._disp_rect = old_rect if old_rect is not None else QRectF()
         if hasattr(it, "_fast_pix"):
             it._fast_pix = old_fast
             it._fast_rect = old_fast_rect
@@ -624,22 +625,25 @@ class CanvasView(QGraphicsView):
     def _stage_sync_cache(self, it, view_ppm: float):
         """同步渲染一张新位图但不替换旧缓存。
 
-        返回 ``(pixmap, ppm, old_pix)``；旧位图对象身份用于提交时确认
-        对象期间没有被改内容/变换（否则丢弃这张过期的新图）。
+        返回 ``(pixmap, ppm, rect, old_pix)``；旧位图对象身份用于提交时
+        确认对象期间没有被改内容/变换（否则丢弃这张过期的新图）。
         """
         old_pix, old_ppm = it._disp_pix, it._disp_ppm
+        old_rect = it._disp_rect
         old_fast = getattr(it, "_fast_pix", None)
         old_fast_rect = getattr(it, "_fast_rect", None)
         # 清空后再建，才能分辨“对象为空/建图失败”与“建出了新图”
         it._disp_pix = None
         it._disp_ppm = 0.0
+        it._disp_rect = QRectF()
         try:
             it.rebuild_display_cache_now(view_ppm)
-            new_pix, new_ppm = it._disp_pix, it._disp_ppm
+            new_pix, new_ppm, new_rect = (
+                it._disp_pix, it._disp_ppm, it._disp_rect)
         finally:
             self._restore_item_cache(
-                it, old_pix, old_ppm, old_fast, old_fast_rect)
-        return new_pix, new_ppm, old_pix
+                it, old_pix, old_ppm, old_rect, old_fast, old_fast_rect)
+        return new_pix, new_ppm, new_rect, old_pix
 
     def _refresh_one_cache(self, gen: int) -> None:
         """在 8ms 时间片内尽量多建几个对象，然后让出事件循环。
@@ -664,9 +668,10 @@ class CanvasView(QGraphicsView):
                         it._disp_pix)
                     self._async_timer.start()
                 continue
-            new_pix, new_ppm, old_pix = self._stage_sync_cache(it, view_ppm)
+            new_pix, new_ppm, new_rect, old_pix = \
+                self._stage_sync_cache(it, view_ppm)
             if new_pix is not None:
-                self._cache_batch[it] = (new_pix, new_ppm, old_pix)
+                self._cache_batch[it] = (new_pix, new_ppm, new_rect, old_pix)
             if time.monotonic() - start >= CACHE_REFRESH_SLICE_MS:
                 break
         if self._cache_queue:
@@ -697,7 +702,7 @@ class CanvasView(QGraphicsView):
                 self._schedule_cache_refresh()
                 return
         self._cache_batch = {}
-        for it, (value, ppm, old_pix) in batch.items():
+        for it, (value, ppm, rect, old_pix) in batch.items():
             try:
                 if it.scene() is not self._scene:
                     continue
@@ -713,6 +718,7 @@ class CanvasView(QGraphicsView):
                 continue
             it._disp_pix = value
             it._disp_ppm = ppm
+            it._disp_rect = rect if rect is not None else QRectF()
             if hasattr(it, "_fast_pix") and not getattr(it, "_drag_kind", None):
                 it._fast_pix = None
         # 全部换完只重绘一次：避免逐个对象刷新时看到粗细不一的中间态
@@ -741,14 +747,14 @@ class CanvasView(QGraphicsView):
             if result is None:
                 continue        # 还在渲染
             done.append(it)
-            image, ppm = result
+            image, ppm, rect = result
             if image is None or image.isNull():
                 continue
             # 渲染期间对象缓存被作废/重建：结果已过期
             if it._disp_pix is not old_pix:
                 continue
             # 本轮代未变：结果就是当前视图要的分辨率，先暂存不替换
-            self._cache_batch[it] = (image, ppm, old_pix)
+            self._cache_batch[it] = (image, ppm, rect, old_pix)
         for it in done:
             self._pending_cache.pop(it, None)
         if not self._pending_cache:
