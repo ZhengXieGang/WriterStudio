@@ -893,3 +893,196 @@ def test_start_summary_copy_follows_theme(qapp):
     assert "机械原点" not in text
     assert p.start_summary.styleSheet() == ""
     win.close()
+
+
+# ===================================================== Issue #3 抬/落笔测试按钮
+def test_pen_test_and_pen_up_buttons_and_auto_lift(qapp):
+    """「落笔测试」「抬笔」按钮位于手动控制卡片内，发绝对 G90 Z 指令并自动抬回。"""
+    from PySide6.QtWidgets import QGroupBox
+    from writerstudio.machine.serial_link import State
+    from writerstudio.settings import Settings, _MemoryBackend
+
+    win = MainWindow(settings=Settings(_MemoryBackend()))
+    win.confirm_on_close = False
+    p = win.machine_panel
+    try:
+        # 1) 不再保留多余的「深度微调」控件；「落笔测试」「抬笔」放在「手动控制 (Jog)」卡片内
+        assert not hasattr(p, "_pen_nudge_box")
+        assert not hasattr(p, "pen_z_minus_btn")
+        assert not hasattr(p, "pen_z_plus_btn")
+        for btn in (p.pen_test_btn, p.pen_up_btn):
+            grp = btn.parentWidget()
+            while grp is not None and not isinstance(grp, QGroupBox):
+                grp = grp.parentWidget()
+            assert grp is not None and grp.title() == "手动控制 (Jog)"
+
+        p.pen_mode.setCurrentIndex(p.pen_mode.findData("z"))
+        p.pen_down_z.setValue(-3.0)
+        p.pen_up_z.setValue(0.0)
+        p.pen_z_feed.setValue(3000.0)
+
+        # 2) 未连接时不抛异常也不发指令
+        assert p.pen_test() == []
+        assert p.pen_up_now() == []
+
+        # 3) 连接后：点「落笔测试」发送 G1 G90 Z-3 F3000，到期自动发抬笔
+        fake = FakeSerial()
+        p.link._greeting = False
+        p.link.connect_backend(fake)
+        qapp.processEvents()
+        p.PEN_TEST_HOLD_MS = 60
+        p.pen_test_btn.click()
+        assert fake.out_lines[-1] == "G1 G90 Z-3 F3000"
+        assert p._pen_test_timer.isActive()
+        end = time.time() + 1.0
+        while time.time() < end and p._pen_test_timer.isActive():
+            qapp.processEvents()
+            time.sleep(0.01)
+        qapp.processEvents()
+        assert fake.out_lines[-1] == "G1 G90 Z0 F3000"
+
+        # 4) 落笔测试保压期间点「抬笔」：立即抬起并取消定时器
+        fake.out_lines.clear()
+        p.PEN_TEST_HOLD_MS = 5000
+        p.pen_test_btn.click()
+        assert p._pen_test_timer.isActive()
+        p.pen_up_btn.click()
+        assert not p._pen_test_timer.isActive()
+        assert fake.out_lines == ["G1 G90 Z-3 F3000", "G1 G90 Z0 F3000"]
+
+        # 5) 报警或运行中拦截手动抬/落笔测试
+        fake.out_lines.clear()
+        p.link.state = State.ALARM
+        assert p.pen_test() == []
+        assert p.pen_up_now() == []
+        assert fake.out_lines == []
+
+        p.link.state = State.RUNNING
+        assert p.pen_test() == []
+        assert p.pen_up_now() == []
+        assert fake.out_lines == []
+
+        p.link.state = State.IDLE
+        p.link.disconnect()
+    finally:
+        win.close()
+
+
+# ===================================================== Issue #4 坐标轴实时生效
+def test_axis_options_take_effect_immediately_without_restart(qapp, tmp_path):
+    """勾选对调/反转后无需重启：底层配置、预览/导出/发送/AI 导出立即切换映射。"""
+    import re
+    from writerstudio.ai.tools import AiTools
+    from writerstudio.core.document import PageSpec
+    from writerstudio.core.strokes import Stroke
+    from writerstudio.project import save_project
+    from writerstudio.settings import K_AI_ENABLED, Settings, _MemoryBackend
+
+    def g1_range(lines):
+        xs, ys = [], []
+        for ln in lines:
+            if ln.startswith("G1 ") and "X" in ln and "Y" in ln:
+                mx = re.search(r"X(-?\d+(?:\.\d+)?)", ln)
+                my = re.search(r"Y(-?\d+(?:\.\d+)?)", ln)
+                if mx and my:
+                    xs.append(float(mx.group(1)))
+                    ys.append(float(my.group(1)))
+        return (round(min(xs), 1), round(max(xs), 1),
+                round(min(ys), 1), round(max(ys), 1))
+
+    # 构造带 A4 横版内容 + 表格框角标定的项目（初始三项全 False）
+    proj_path = tmp_path / "axis_live.wsproj"
+    st1 = Settings(_MemoryBackend())
+    st1.set(K_AI_ENABLED, False)
+    w1 = MainWindow(settings=st1)
+    w1.confirm_on_close = False
+    try:
+        doc = Document(page=PageSpec(297.0, 210.0, 10.0))
+        doc.add(make_static_object([Stroke([(38.4, 76.7), (233.6, 151.9)])]))
+        w1.controller.set_document(doc)
+        w1.machine_panel.start_point.pen_marker = w1._page_to_machine((20.0, 120.0))
+        w1.machine_panel.set_start_point(MODE_REGISTERED, 0.0, 0.0)
+        w1._on_machine_config_changed()
+        save_project(proj_path, w1._collect_project())
+    finally:
+        w1.close()
+
+    # 打开项目 → 勾选三项 → 不重启直接生成、发送、AI 导出
+    st2 = Settings(_MemoryBackend())
+    st2.set(K_AI_ENABLED, False)
+    w2 = MainWindow(settings=st2)
+    w2.confirm_on_close = False
+    try:
+        assert w2._load_project_path(str(proj_path))
+        before = g1_range(w2._build_gcode().lines)
+        assert before[0] > 0 and before[1] > 200  # X 跨度沿横排展开
+
+        # 勾选对调 X/Y + 反转 X + 反转 Y
+        w2.machine_panel.swap_xy_check.click()
+        w2.machine_panel.invert_x_check.click()
+        w2.machine_panel.invert_y_check.click()
+        qapp.processEvents()
+
+        # 底层 self.config 与 current_config 同步更新（无陈旧快照）
+        assert (w2.machine_panel.config.swap_xy,
+                w2.machine_panel.config.invert_x,
+                w2.machine_panel.config.invert_y) == (True, True, True)
+
+        # 未重启直接生成与 AI 导出必须立刻应用新映射（原 X 落到负 Y，原 Y 落到负 X）
+        after = g1_range(w2._build_gcode().lines)
+        assert after != before
+        assert after == pytest.approx((-before[3], -before[2],
+                                       -before[1], -before[0]), abs=0.2)
+
+        gcode_path = tmp_path / "ai_live.gcode"
+        AiTools(w2).call("export_gcode", {"path": str(gcode_path)})
+        assert g1_range(gcode_path.read_text(encoding="utf-8").splitlines()) == after
+
+        # 发送路径同样立即应用新映射
+        fake = FakeSerial(initial_pos=(0.0, 0.0, 0.0))
+        w2.machine_panel.link._greeting = False
+        w2.machine_panel.link.connect_backend(fake)
+        w2._send_job()
+        end = time.time() + 3.0
+        while time.time() < end and (
+                w2.machine_panel.link.progress()[1] == 0
+                or w2.machine_panel.link.progress()[0]
+                < w2.machine_panel.link.progress()[1]):
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert g1_range(fake.out_lines) == after
+        w2.machine_panel.link.disconnect()
+
+        # 保存后重启软件再次打开，导出结果与未重启时一致
+        save_project(proj_path, w2._collect_project())
+    finally:
+        w2.close()
+
+    st3 = Settings(_MemoryBackend())
+    st3.set(K_AI_ENABLED, False)
+    w3 = MainWindow(settings=st3)
+    w3.confirm_on_close = False
+    try:
+        assert w3._load_project_path(str(proj_path))
+        assert g1_range(w3._build_gcode().lines) == after
+    finally:
+        w3.close()
+
+
+def test_axis_change_without_marker_marks_dirty_and_invalidates_pending_origin(qapp):
+    """无起点标记时修改轴选项也标脏文档，且等待原点回报时按最新轴配置现场生成。"""
+    from writerstudio.settings import K_AI_ENABLED, Settings, _MemoryBackend
+
+    st = Settings(_MemoryBackend())
+    st.set(K_AI_ENABLED, False)
+    win = MainWindow(settings=st)
+    win.confirm_on_close = False
+    try:
+        assert not win._dirty
+        win._origin_job_pending = True
+        win.machine_panel.swap_xy_check.click()
+        qapp.processEvents()
+        assert win._dirty is True
+        assert win._origin_job_pending is False
+    finally:
+        win.close()

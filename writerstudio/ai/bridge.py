@@ -95,6 +95,8 @@ WriterStudio 写字机排版服务：通过工具直接在用户打开的 Writer
 * 套打/对齐扫描件：add_reference_image 加底图（不参与输出），再用
   render_preview(include_references=true) 目视核对；参考图管理见
   list_references / update_reference / remove_reference。
+* 真机标定辅助（需软件已连接串口）：pen_test 单次落笔/抬笔标定深度，
+  set_start_origin 将当前笔位设为写字起点或按页面参考点（如表格框角）校准。
 * TikZ 报错先跑 check_tex：它会指出缺哪个宏包或哪个 texmf 路径没找到
   （隔离 HOME/TEXMFHOME 的常见坑）。
 * 对象 id（形如 obj-0042）在 list_objects 的返回里，update/move/remove 都用它。
@@ -447,6 +449,38 @@ def _build_server(port: int):
         写字机由用户在软件界面操作。"""
         return json.dumps(rpc("export_gcode", {"path": path}),
                           ensure_ascii=False)
+
+    # ---------------------------------------------------------- 机器标定
+    @mcp.tool()
+    def pen_test(action: str = "tap",
+                 z: Optional[float] = None,
+                 hold_ms: int = 1500,
+                 apply_z: bool = False) -> str:
+        """单次落笔/抬笔测试（需已在软件中连接串口，用于标定落笔深度）。
+
+        action: tap（落笔停顿 hold_ms 后自动抬回）/ down（保持落笔）/ up（立即抬笔）；
+        z: 可选临时测试深度(mm，仅 Z 轴笔控生效)；
+        hold_ms: tap 模式的保持时长(100~10000 ms，默认 1500)；
+        apply_z: 为 true 且指定了 z 时，同时把该值写入面板「落笔 Z」参数。"""
+        return json.dumps(rpc("pen_test", {
+            "action": action, "z": z, "hold_ms": hold_ms, "apply_z": apply_z,
+        }), ensure_ascii=False)
+
+    @mcp.tool()
+    def set_start_origin(mode: str = "canvas",
+                         page_x: Optional[float] = None,
+                         page_y: Optional[float] = None,
+                         clear: bool = False) -> str:
+        """把机器当前笔位设为写字起点（或清除起点标记）。
+
+        mode: canvas（把内容包围盒左下角对齐当前笔位）/
+              register（笔位校准：把页面参考点与当前笔位绑定，适合套打填表）；
+        page_x/page_y: mode=register 时可选指定页面参考点(mm，左上原点 y 向下，
+              如表格框角)，省略则复用画布上已有起点标记；
+        clear: 为 true 时清除当前起点标记。"""
+        return json.dumps(rpc("set_start_origin", {
+            "mode": mode, "page_x": page_x, "page_y": page_y, "clear": clear,
+        }), ensure_ascii=False)
 
     # ---------------------------------------------------------- 参考图层
     @mcp.tool()

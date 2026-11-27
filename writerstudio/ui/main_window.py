@@ -144,7 +144,7 @@ class MainWindow(QMainWindow):
         self.confirm_on_close = True  # 关闭前是否询问未保存修改（测试/自动化可关）
         self._pen_read_pending = False   # 「读取当前笔位」等待状态回报
         self._pen_register_pending = False   # 「以当前笔位校准标记」等待状态回报
-        self._origin_job_pending = None  # 「以机械原点为起点」待发送的作业
+        self._origin_job_pending = False  # 「以机械原点为起点」等待状态回报后再现场生成作业
         # 未保存内容的定期快照（意外终止后可恢复；_mark_clean 会清掉）
         self._recovery_armed = False      # 本次会话是否已建立过快照
         # 当前项目文件在打开/上次保存时的磁盘指纹：保存前比对，被别的
@@ -2423,8 +2423,12 @@ class MainWindow(QMainWindow):
         self._axis_state = new_opts
         if old_opts is None or old_opts == new_opts:
             return
+        # 轴映射变更后使挂起的旧发送请求失效，并在初始化完成后标脏项目
+        self._origin_job_pending = False
         sp = self.machine_panel.start_point
         if sp.pen_marker is None:
+            if self._loaded_ready:
+                self._mark_dirty()
             return
         page = self.controller.doc.page
         h = page.height
@@ -2818,6 +2822,7 @@ class MainWindow(QMainWindow):
         # 断开串口：不主动断的话读线程是 daemon、串口不会关闭，
         # 作业还在控制器缓冲里就会继续写
         try:
+            self.machine_panel.cancel_pen_test()
             self.machine_panel.link.disconnect()
         except Exception:
             pass
@@ -3059,17 +3064,18 @@ class MainWindow(QMainWindow):
             return
         if not self._warn_bounds():
             return
+        self.machine_panel.cancel_pen_test()
         self.global_perturb.flush()
-        result = self._build_gcode(optimize=True)
         if self._start_machine_xy() is None:
             if ask_yes_no(
                     self, tr("写字起点"),
                     tr("当前还没有设置起点，是否以机械原点作为起点？"),
                     default_yes=True):
-                # 先读取笔的坐标，把笔移动到机械原点，再开始写
-                self._send_job_from_origin(result)
+                # 先读取笔的坐标，把笔移动到机械原点，再现场按最新配置生成并开始写
+                self._send_job_from_origin()
                 return
             # 否：不设起点，笔从当前位置直接开始（作业首条 G0 会移到首笔）
+        result = self._build_gcode(optimize=True)
         self._dispatch_job(result)
 
     def _dispatch_job(self, result) -> None:
@@ -3081,26 +3087,27 @@ class MainWindow(QMainWindow):
         self.machine_panel.add_draw_length(result.draw_length)  # 笔寿命累计
         self.machine_panel.set_progress(trf('发送中：0%（0/{v0} 行）', v0=len(result.lines)))
 
-    def _send_job_from_origin(self, result) -> None:
-        """以机械原点为起点发送：先读笔位，再移到原点，然后开始作业。"""
+    def _send_job_from_origin(self) -> None:
+        """以机械原点为起点发送：先读笔位，再移到原点，然后按最新配置生成并发送作业。"""
         link = self.machine_panel.link
         pos = self._read_machine_pos()
         if pos is None:
-            # 笔位尚未回报：记下作业，等一次状态回报再继续
-            self._origin_job_pending = result
+            # 笔位尚未回报：仅记下待发送标记，等状态回报到达后再按最新配置生成 G-code
+            self._origin_job_pending = True
             try:
                 link.request_status()
             except Exception as exc:
-                self._origin_job_pending = None
+                self._origin_job_pending = False
                 self.statusBar().showMessage(trf('读取失败：{v0}', v0=exc), 5000)
                 return
             self.statusBar().showMessage(tr("正在读取笔头位置…"), 2000)
             return
-        self._origin_move_and_send(result, pos)
+        self._origin_move_and_send(pos)
 
-    def _origin_move_and_send(self, result, pos) -> None:
+    def _origin_move_and_send(self, pos) -> None:
         link = self.machine_panel.link
         cfg = self.machine_panel.current_config()
+        result = self._build_gcode(optimize=True)
         try:
             for line in cfg.pen_up_lines():       # 先抬笔，避免划伤纸面
                 link.send_line(line)
@@ -3115,14 +3122,13 @@ class MainWindow(QMainWindow):
 
     def _on_machine_status_for_send(self, status) -> None:
         """「以机械原点为起点」等待笔位回报的续场。"""
-        result = getattr(self, "_origin_job_pending", None)
-        if result is None:
+        if not getattr(self, "_origin_job_pending", False):
             return
         pos = getattr(status, "pos", None)
         if pos is None:
             return
-        self._origin_job_pending = None
-        self._origin_move_and_send(result, (float(pos[0]), float(pos[1])))
+        self._origin_job_pending = False
+        self._origin_move_and_send((float(pos[0]), float(pos[1])))
 
     def _about(self) -> None:
         from .. import __version__

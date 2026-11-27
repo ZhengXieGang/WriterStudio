@@ -1053,3 +1053,46 @@ def test_optimize_order_large_input_fast():
     want = _bruteforce_optimize(strokes, start=(30, 30))
     assert len(out) == len(want)
     assert dt < 0.5, f"optimize_order 3000 笔耗时 {dt*1e3:.0f}ms"
+
+
+# ===================================================== 单次抬/落笔测试指令
+def test_pen_test_lines_and_link_pen_up_down():
+    """单次落笔测试与抬笔：Z 模式带 G90 绝对坐标，激光模式仅用预览功率。"""
+    from writerstudio.machine.config import (
+        PEN_LASER,
+        PEN_SERVO_ANGLE,
+        PEN_Z,
+    )
+    from writerstudio.machine.serial_link import FakeSerial, GrblLink
+
+    # Z 轴模式（含 C1 签名笔架负向 Z 下压场景）
+    z_cfg = GCodeConfig(pen_mode=PEN_Z, pen_up_z=0.0, pen_down_z=-3.0,
+                        pen_z_feed=3000.0)
+    assert z_cfg.pen_test_down_lines() == ["G1 G90 Z-3 F3000"]
+    assert z_cfg.pen_test_down_lines(to_z=-2.5) == ["G1 G90 Z-2.5 F3000"]
+    assert z_cfg.pen_test_up_lines() == ["G1 G90 Z0 F3000"]
+
+    # 激光模式：测试时绝不发满功率，必须降到预览功率
+    laser_cfg = GCodeConfig(pen_mode=PEN_LASER, laser_power=1000,
+                            laser_preview_power=45)
+    assert laser_cfg.pen_test_down_lines() == ["M3 S45"]
+    assert laser_cfg.pen_test_up_lines() == ["M5"]
+
+    # 舵机角度模式
+    servo_cfg = GCodeConfig(pen_mode=PEN_SERVO_ANGLE,
+                            pen_down_angle=85, pen_up_s=20)
+    assert servo_cfg.pen_test_down_lines() == ["M3 S85"]
+    assert servo_cfg.pen_test_up_lines() == ["M3 S20"]
+
+    # 通过 GrblLink 实际下发到串口
+    fake = FakeSerial()
+    link = GrblLink()
+    link._greeting = False
+    link.connect_backend(fake)
+    try:
+        assert link.pen_down(z_cfg) == ["G1 G90 Z-3 F3000"]
+        assert link.pen_up(z_cfg) == ["G1 G90 Z0 F3000"]
+        assert "G1 G90 Z-3 F3000" in fake.out_lines
+        assert "G1 G90 Z0 F3000" in fake.out_lines
+    finally:
+        link.disconnect()

@@ -822,6 +822,124 @@ class AiTools:
                     "点「发送到机器」，发送前建议先用界面预览确认",
         }
 
+    # ============================================================ 机器辅助
+    def tool_pen_test(self, args: dict) -> dict:
+        """单次落笔/抬笔测试（用于换笔/换纸时标定落笔深度）。
+
+        action: tap（默认，落笔停顿 hold_ms 后自动抬回）/ down（落笔不抬回）/ up（立即抬笔）。
+        z: 可选临时测试深度(mm)，仅 Z 轴笔控且 action 为 tap/down 时生效。
+        hold_ms: tap 模式的下压保持时长(100~10000 ms，默认 1500)。
+        apply_z: 为 true 且给出 z 时，把该深度同步写入面板「落笔 Z」参数。
+        """
+        from ..machine.config import PEN_Z
+        from ..machine.serial_link import State as LinkState
+
+        action = str(args.get("action") or "tap").strip().lower()
+        if action not in ("tap", "down", "up"):
+            raise ToolError(f"action 只能是 tap/down/up，收到：{action!r}")
+
+        mp = self.win.machine_panel
+        link = mp.link
+        if not link.connected:
+            raise ToolError("未连接机器：请先在软件「机器控制」面板连接串口")
+        if link.state in (LinkState.RUNNING, LinkState.PAUSED):
+            raise ToolError("作业进行中或已暂停，无法执行落笔测试")
+        if link.state is LinkState.ALARM:
+            raise ToolError("机器处于 ALARM 状态，请先回零（$H）或解锁（$X）")
+
+        z_raw = args.get("z")
+        to_z = _num(z_raw, "z", lo=-10.0, hi=50.0) if z_raw is not None else None
+        hold_ms = int(_num(args.get("hold_ms", mp.PEN_TEST_HOLD_MS),
+                           "hold_ms", lo=100, hi=10000))
+        apply_z = bool(args.get("apply_z", False))
+
+        cfg = mp.current_config()
+        if apply_z and to_z is not None and cfg.pen_mode == PEN_Z:
+            mp.pen_down_z.setValue(to_z)
+            mp.config.pen_down_z = to_z
+            cfg = mp.current_config()
+
+        if action == "up":
+            cmds = mp.pen_up_now()
+        elif action == "down":
+            cmds = mp.pen_test(to_z=to_z, hold_ms=0)
+        else:
+            cmds = mp.pen_test(to_z=to_z, hold_ms=hold_ms)
+
+        if not cmds:
+            raise ToolError("发送抬/落笔测试指令失败，请检查串口连接状态")
+        return {
+            "ok": True,
+            "action": action,
+            "pen_mode": cfg.pen_mode,
+            "commands": cmds,
+            "pen_down_z": round(float(cfg.pen_down_z), 3),
+            "pen_up_z": round(float(cfg.pen_up_z), 3),
+            "tested_z": round(float(to_z if to_z is not None else cfg.pen_down_z), 3),
+            "hold_ms": hold_ms if action == "tap" else 0,
+            "applied_z": bool(apply_z and to_z is not None and cfg.pen_mode == PEN_Z),
+        }
+
+    def tool_set_start_origin(self, args: dict) -> dict:
+        """把当前机器笔位设为写字起点（或移除起点标记）。
+
+        clear: 为 true 时清除当前起点标记。
+        mode: canvas（默认，把内容包围盒左下角对齐当前笔位）/
+              register（笔位校准：把画布参考标记处与当前笔位绑定，适合套打填表）。
+        page_x / page_y: 可选页面坐标(mm，左上原点 y 向下)；mode=register 时
+              同时将红色参考标记放到该页面点并校准（省略则复用已有标记）。
+        """
+        if bool(args.get("clear", False)):
+            self.win._on_remove_start_marker()
+            return {"ok": True, "cleared": True, "mode": "none"}
+
+        mode = str(args.get("mode") or "canvas").strip().lower()
+        if mode not in ("canvas", "register"):
+            raise ToolError(f"mode 只能是 canvas 或 register，收到：{mode!r}")
+
+        mp = self.win.machine_panel
+        if not mp.link.connected:
+            raise ToolError("未连接机器：请先在软件「机器控制」面板连接串口")
+        pos = self.win._read_machine_pos()
+        if pos is None:
+            raise ToolError("尚未收到机器坐标回报，请稍等状态刷新后再试")
+
+        px_raw, py_raw = args.get("page_x"), args.get("page_y")
+        if (px_raw is None) != (py_raw is None):
+            raise ToolError("page_x 与 page_y 必须成对提供（页面左上原点，y 向下，mm）")
+
+        page = self._page
+        if mode == "register":
+            if px_raw is not None:
+                px = _num(px_raw, "page_x")
+                py = _num(py_raw, "page_y")
+                page_pt = _page_top_left(page, _Pos(px, py))
+                mp.start_point.pen_marker = self.win._page_to_machine(page_pt)
+            elif mp.start_point.pen_marker is None:
+                raise ToolError(
+                    "笔位校准需要先放置起点标记：请传入 page_x/page_y（如表格框角），"
+                    "或在软件画布上先手动标记起点")
+            self.win._register_pen_at(pos)
+        else:
+            self.win._set_start_from_machine(
+                pos,
+                f"AI：已将当前笔位 ({pos[0]:.1f}, {pos[1]:.1f}) mm 设为写字起点")
+
+        marker_m = mp.start_point.pen_marker
+        marker_page_ai = None
+        if marker_m is not None:
+            mx_p, my_p = self.win._machine_to_page(marker_m)
+            marker_page_ai = {
+                "x": round(mx_p, 3),
+                "y": round(page.height - my_p, 3),
+            }
+        return {
+            "ok": True,
+            "mode": mp.start_point.mode,
+            "machine_xy": [round(pos[0], 3), round(pos[1], 3)],
+            "marker_page_ai": marker_page_ai,
+        }
+
     # ============================================================ 检查
     def tool_check_layout(self, args: dict) -> dict:
         page = self._page
@@ -987,6 +1105,11 @@ class AiTools:
             painter.save()
             painter.setOpacity(max(0.0, min(1.0, float(ref.opacity))))
             painter.setTransform(tr)
+            # item 本地坐标为 Y 向上，而 QImage 为 Y 向下；与主画布
+            # ReferenceGraphicsItem._paint_pix_direct 保持同一翻转，
+            # 使图像顶部落在本地 y=height_mm（页面视觉上方）。
+            painter.translate(0.0, ref.height_mm)
+            painter.scale(1.0, -1.0)
             painter.drawImage(QRectF(0.0, 0.0, ref.width_mm, ref.height_mm), img)
             painter.restore()
 

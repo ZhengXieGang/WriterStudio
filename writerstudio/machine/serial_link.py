@@ -625,6 +625,20 @@ class GrblLink:
             self.send_line(ln)
         self.send_line(grbl.goto_command(x, y, feed=feed))
 
+    def pen_down(self, pen_cfg, to_z: Optional[float] = None) -> list[str]:
+        """立即执行一次单次落笔测试（不经过作业流控队列），返回发出的指令行。"""
+        lines = list(pen_cfg.pen_test_down_lines(to_z=to_z))
+        for ln in lines:
+            self.send_line(ln)
+        return lines
+
+    def pen_up(self, pen_cfg) -> list[str]:
+        """立即执行一次单次抬笔（不经过作业流控队列），返回发出的指令行。"""
+        lines = list(pen_cfg.pen_test_up_lines())
+        for ln in lines:
+            self.send_line(ln)
+        return lines
+
     def home(self) -> None:
         self.send_line(grbl.home_command())
 

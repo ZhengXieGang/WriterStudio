@@ -388,6 +388,28 @@ class GCodeConfig:
             lines.append(f"G4 P{self._f(self.pen_on_delay)}")
         return [ln for ln in lines if ln]
 
+    def pen_test_down_lines(self, to_z: float | None = None) -> list[str]:
+        """单次落笔测试指令（独立于作业流，确保安全与绝对坐标语义）。
+
+        * Z 轴模式显式附带 ``G90``，避免机器停留在 ``G91`` 相对模式时多次
+          点击叠加下降砸坏笔尖。
+        * 激光模式改用低功率预览（``laser_preview_power``），避免标定时满
+          功率灼穿纸张或桌面。
+        * 其余模式复用 :meth:`pen_down_lines`。
+        """
+        if self.pen_mode == PEN_Z:
+            z = self.pen_down_z if to_z is None else to_z
+            return [f"G1 G90 Z{self._f(z)} F{self._ff(self.pen_z_feed)}"]
+        if self.pen_mode == PEN_LASER:
+            return [f"M3 S{int(self.laser_preview_power)}"]
+        return self.pen_down_lines(to_z=to_z)
+
+    def pen_test_up_lines(self) -> list[str]:
+        """单次抬笔指令（独立于作业流，Z 轴模式显式附带 ``G90``）。"""
+        if self.pen_mode == PEN_Z:
+            return [f"G1 G90 Z{self._f(self.pen_up_z)} F{self._ff(self.pen_z_feed)}"]
+        return self.pen_up_lines()
+
     def split_custom(self, text: str) -> list[str]:
         """把 ``;`` 分隔的自定义 G-code 拆成行。"""
         return [s.strip() for s in text.split(";") if s.strip()]

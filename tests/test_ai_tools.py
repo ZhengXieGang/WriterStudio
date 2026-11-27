@@ -474,3 +474,178 @@ def test_markdown_reports_missing_chars(tools):
         "size": 4.0, "font_names": ["STRK-Kaiti"]})
     assert "☃" in (r2.get("missing") or []), r2
     assert "无法绘制" in r2.get("warning", "")
+
+
+# --------------------------------------------------- Issue #2 参考图预览方向
+def test_render_preview_reference_image_upright_and_matches_canvas(
+        tools, win, tmp_path):
+    """render_preview 参考图必须正向（上红下蓝），与主画布及旋转后方向一致。"""
+    import base64
+    from PIL import Image, ImageDraw
+    from PySide6.QtCore import QByteArray
+    from PySide6.QtGui import QImage
+    from writerstudio.core.document import ROTATE_CW
+
+    p = tmp_path / "asym.png"
+    im = Image.new("RGB", (200, 200))
+    draw = ImageDraw.Draw(im)
+    draw.rectangle([0, 0, 199, 99], fill=(220, 20, 20))      # 上半纯红
+    draw.rectangle([0, 100, 199, 199], fill=(20, 20, 220))   # 下半纯蓝
+    im.save(p)
+
+    tools.call("add_reference_image", {
+        "path": str(p), "x": 0, "y": 0, "anchor": "top-left",
+        "width_mm": 297.0, "opacity": 1.0,
+    })
+
+    # 1) 正常放置：预览图上半为红、下半为蓝（此前被垂直翻转成上蓝下红）
+    res = tools.call("render_preview", {
+        "width_px": 400, "include_references": True,
+    })
+    out_img = QImage.fromData(
+        QByteArray(base64.b64decode(res["png_base64"])), "PNG")
+    top_c = out_img.pixelColor(out_img.width() // 2, out_img.height() // 4)
+    bot_c = out_img.pixelColor(out_img.width() // 2, out_img.height() * 3 // 4)
+    assert top_c.red() > 200 and top_c.blue() < 40
+    assert bot_c.blue() > 200 and bot_c.red() < 40
+
+    # 2) 与主画布 ReferenceGraphicsItem 实际渲染方向对照：画面同样上红下蓝
+    from PySide6.QtCore import QRectF
+    from PySide6.QtGui import QPainter
+    page = win.controller.doc.page
+    canvas_img = QImage(400, int(round(400 * page.height / page.width)),
+                        QImage.Format_RGB32)
+    canvas_img.fill(0xFFFFFF)
+    painter = QPainter(canvas_img)
+    # CanvasView 视口是 Y 向下，场景是 Y 向上：与 CanvasView 相同做一次视口翻转
+    painter.translate(0.0, float(canvas_img.height()))
+    painter.scale(1.0, -1.0)
+    win.canvas.scene().render(
+        painter,
+        QRectF(0.0, 0.0, canvas_img.width(), canvas_img.height()),
+        QRectF(0.0, 0.0, page.width, page.height),
+    )
+    painter.end()
+    cv_top = canvas_img.pixelColor(canvas_img.width() // 2,
+                                   canvas_img.height() // 4)
+    cv_bot = canvas_img.pixelColor(canvas_img.width() // 2,
+                                   canvas_img.height() * 3 // 4)
+    assert cv_top.red() > 200 and cv_top.blue() < 40
+    assert cv_bot.blue() > 200 and cv_bot.red() < 40
+
+    # 3) 顺时针旋转页面 90° 后：原上红转到右侧、原下蓝转到左侧
+    win._rotate_page(ROTATE_CW)
+    res_rot = tools.call("render_preview", {
+        "width_px": 400, "include_references": True,
+    })
+    rot_img = QImage.fromData(
+        QByteArray(base64.b64decode(res_rot["png_base64"])), "PNG")
+    left_c = rot_img.pixelColor(rot_img.width() // 4, rot_img.height() // 2)
+    right_c = rot_img.pixelColor(rot_img.width() * 3 // 4, rot_img.height() // 2)
+    assert left_c.blue() > 200 and left_c.red() < 40
+    assert right_c.red() > 200 and right_c.blue() < 40
+
+
+def test_render_preview_reference_svg_upright(tools, tmp_path):
+    """SVG 参考图在 render_preview 中同样正向（上红下蓝）。"""
+    import base64
+    from PySide6.QtCore import QByteArray
+    from PySide6.QtGui import QImage
+
+    svg = tmp_path / "asym.svg"
+    svg.write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200"'
+        ' viewBox="0 0 200 200">'
+        '<rect x="0" y="0" width="200" height="100" fill="#dc1414"/>'
+        '<rect x="0" y="100" width="200" height="100" fill="#1414dc"/>'
+        '</svg>',
+        encoding="utf-8",
+    )
+    tools.call("add_reference_image", {
+        "path": str(svg), "x": 0, "y": 0, "anchor": "top-left",
+        "width_mm": 297.0, "opacity": 1.0,
+    })
+    res = tools.call("render_preview", {
+        "width_px": 400, "include_references": True,
+    })
+    out_img = QImage.fromData(
+        QByteArray(base64.b64decode(res["png_base64"])), "PNG")
+    top_c = out_img.pixelColor(out_img.width() // 2, out_img.height() // 4)
+    bot_c = out_img.pixelColor(out_img.width() // 2, out_img.height() * 3 // 4)
+    assert top_c.red() > 200 and top_c.blue() < 40
+    assert bot_c.blue() > 200 and bot_c.red() < 40
+
+
+# --------------------------------------------------- Issue #3 MCP 标定闭环工具
+def test_ai_pen_test_and_set_start_origin(tools, win, qapp):
+    """MCP 新增 pen_test 与 set_start_origin：支持深度测试写回与参考点校准。"""
+    import time
+    from writerstudio.machine.serial_link import FakeSerial
+    from writerstudio.machine.start_point import MODE_CANVAS, MODE_REGISTERED
+
+    # 未连接时返回可读错误
+    with pytest.raises(ToolError, match="未连接"):
+        tools.call("pen_test", {})
+    with pytest.raises(ToolError, match="未连接"):
+        tools.call("set_start_origin", {})
+
+    fake = FakeSerial(initial_pos=(42.5, 18.0, 0.0))
+    mp = win.machine_panel
+    mp.pen_mode.setCurrentIndex(mp.pen_mode.findData("z"))
+    mp.pen_up_z.setValue(0.0)
+    mp.pen_down_z.setValue(-2.0)
+    mp.pen_z_feed.setValue(3000.0)
+    mp.link._greeting = False
+    mp.link.connect_backend(fake)
+    try:
+        # 等待状态回报填充机械坐标
+        mp.link.request_status()
+        end = time.time() + 2.0
+        while time.time() < end and mp.machine_pos() is None:
+            qapp.processEvents()
+            time.sleep(0.01)
+
+        # 1) pen_test tap + 临时深度 + 写回 pen_down_z
+        r = tools.call("pen_test", {
+            "action": "tap", "z": -3.2, "hold_ms": 100, "apply_z": True,
+        })
+        assert r["ok"] is True
+        assert r["commands"] == ["G1 G90 Z-3.2 F3000"]
+        assert r["applied_z"] is True
+        assert mp.pen_down_z.value() == pytest.approx(-3.2)
+        end = time.time() + 1.0
+        while time.time() < end and mp._pen_test_timer.isActive():
+            qapp.processEvents()
+            time.sleep(0.01)
+        qapp.processEvents()
+        assert fake.out_lines[-1] == "G1 G90 Z0 F3000"
+
+        # 2) pen_test down / up 配对
+        r_down = tools.call("pen_test", {"action": "down"})
+        assert r_down["commands"] == ["G1 G90 Z-3.2 F3000"]
+        assert not mp._pen_test_timer.isActive()
+        r_up = tools.call("pen_test", {"action": "up"})
+        assert r_up["commands"] == ["G1 G90 Z0 F3000"]
+
+        # 3) set_start_origin canvas 模式
+        r_c = tools.call("set_start_origin", {"mode": "canvas"})
+        assert r_c["mode"] == MODE_CANVAS
+        assert r_c["machine_xy"] == pytest.approx([42.5, 18.0])
+
+        # 4) set_start_origin register 模式（按页面 AI 坐标放参考标记并校准）
+        r_reg = tools.call("set_start_origin", {
+            "mode": "register", "page_x": 20.0, "page_y": 30.0,
+        })
+        assert r_reg["mode"] == MODE_REGISTERED
+        assert r_reg["machine_xy"] == pytest.approx([42.5, 18.0])
+        assert r_reg["marker_page_ai"]["x"] == pytest.approx(20.0)
+        assert r_reg["marker_page_ai"]["y"] == pytest.approx(30.0)
+        s_page, _off = win._start_anchor()
+        assert s_page == pytest.approx((20.0, win.controller.doc.page.height - 30.0))
+
+        # 5) 清除起点标记
+        r_clr = tools.call("set_start_origin", {"clear": True})
+        assert r_clr["cleared"] is True
+        assert mp.start_point.pen_marker is None
+    finally:
+        mp.link.disconnect()

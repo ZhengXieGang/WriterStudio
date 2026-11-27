@@ -101,7 +101,8 @@ def test_bridge_end_to_end(qapp, server, win, tmp_path):
                 tools = await session.list_tools()
                 names = {t.name for t in tools.tools}
                 assert {"add_text", "add_tikz", "render_preview",
-                        "check_layout", "save_project"} <= names
+                        "check_layout", "save_project",
+                        "pen_test", "set_start_origin"} <= names
 
                 # 1) 查询页面的返回是合法 JSON 文本
                 r = await session.call_tool("get_page_info", {})

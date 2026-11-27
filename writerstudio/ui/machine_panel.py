@@ -65,6 +65,9 @@ class MachinePanel(QWidget):
     # Qt 控件只能在本信号（自动排队连接）的槽里安全操作
     linkEventReceived = Signal(object)
 
+    #: 单次「落笔测试」默认下压保持时长（毫秒），到期后自动抬回
+    PEN_TEST_HOLD_MS = 1500
+
     def __init__(self, link: Optional[GrblLink] = None,
                  parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -74,6 +77,10 @@ class MachinePanel(QWidget):
         self.start_point = StartPoint()
         self._machine_pos: Optional[tuple[float, float, float]] = None
         self._job_started: Optional[float] = None
+        self._pen_test_cfg: Optional[GCodeConfig] = None
+        self._pen_test_timer = QTimer(self)
+        self._pen_test_timer.setSingleShot(True)
+        self._pen_test_timer.timeout.connect(self._on_pen_test_timeout)
         self._build_ui()
         self._ui_timer = QTimer(self)
         self._ui_timer.timeout.connect(self._tick_progress)
@@ -212,6 +219,20 @@ class MachinePanel(QWidget):
         for c in range(3):
             pad.setColumnStretch(c, 1)
         jogv.addLayout(pad)
+        # 单次抬/落笔测试按钮：归入手动控制区，标定落笔深度时直接验证，不必发整页作业
+        pen_test_row = QHBoxLayout()
+        self.pen_test_btn = QPushButton(tr("落笔测试"))
+        self.pen_test_btn.setToolTip(
+            tr("按当前参数落笔并停留约 1.5 秒后自动抬回（用于标定落笔深度；\n"
+            "激光模式仅以预览功率短时出光）。"))
+        self.pen_test_btn.clicked.connect(lambda: self.pen_test())
+        self.pen_up_btn = QPushButton(tr("抬笔"))
+        self.pen_up_btn.setToolTip(
+            tr("按当前抬笔参数立即抬起笔头（并取消未完成的落笔测试）。"))
+        self.pen_up_btn.clicked.connect(lambda: self.pen_up_now())
+        pen_test_row.addWidget(self.pen_test_btn)
+        pen_test_row.addWidget(self.pen_up_btn)
+        jogv.addLayout(pen_test_row)
         root.addWidget(jog)
 
         # ---- 抬落笔设置 ----
@@ -227,10 +248,10 @@ class MachinePanel(QWidget):
         self.pen_mode.currentIndexChanged.connect(self._on_pen_mode)
         pf.addRow(tr("方式"), self.pen_mode)
         # 步进 Z 轴（抬/落笔各走一段受控 Z 进给）。默认按弹簧回位笔架标定：
-        # 落笔 Z 6mm、抬笔 Z 0mm（弹簧回位笔架释放位）。
-        self.pen_down_z = spin(-10.0, 50.0, 6.0, " mm", 0.5)
+        # 落笔 Z 6mm、抬笔 Z 0mm（弹簧回位笔架释放位）；支持 0.1mm 精细标定。
+        self.pen_down_z = spin(-10.0, 50.0, 6.0, " mm", 0.1)
         self.pen_down_z.setToolTip(tr("落笔 Z 位置：Z 轴笔控写到该高度即下压触纸"))
-        self.pen_up_z = spin(0.0, 50.0, 0.0, " mm", 0.5)
+        self.pen_up_z = spin(-10.0, 50.0, 0.0, " mm", 0.1)
         self.pen_up_z.setToolTip(tr("抬笔 Z 位置：弹簧回位笔架填 0（释放位）"))
         self.pen_z_feed = spin(1.0, 20000.0, 12000.0, " mm/min", 100.0, 0)
         self.pen_z_feed.setToolTip(
@@ -328,16 +349,17 @@ class MachinePanel(QWidget):
         self.read_pos_start_btn.setMinimumHeight(30)
         self.read_pos_start_btn.setToolTip(
             tr("读取机器笔头当前坐标作为写字起点（需已连接）。\n"
-            "会把笔画标记移动到笔头当前位置。"))
+            "会把红色标记移到笔位，并将「内容包围盒左下角」直接对齐到此处；\n"
+            "若要把页面上特定参考点（如表格框角）对准笔位，请改用下方「以当前笔位校准标记」。"))
         self.read_pos_start_btn.clicked.connect(self.readPenAsStartRequested.emit)
         spv.addWidget(self.read_pos_start_btn)
 
         self.register_pen_btn = QPushButton(tr("以当前笔位校准标记"))
         self.register_pen_btn.setMinimumHeight(30)
         self.register_pen_btn.setToolTip(
-            tr("标记不动，用笔来标定：先把红色标记放到纸上「希望笔开始写」的位置，\n"
-            "再把笔手动移到纸上同一点，点此按钮。软件记录「笔现在就在标记处」，\n"
-            "据此校正机器原点与纸张的偏差。适合机器原点与纸张角落对不齐时。"))
+            tr("标记不动，用笔来标定：先用「手动标记起点」把红色标记放到画布上\n"
+            "任意参考点（如表格框角），再把笔移到纸上同一点并点此按钮。\n"
+            "整页内容将相对该参考点原样落位，适合套打填表或机器原点与纸角不对齐时。"))
         self.register_pen_btn.clicked.connect(self.registerPenRequested.emit)
         spv.addWidget(self.register_pen_btn)
 
@@ -470,6 +492,8 @@ class MachinePanel(QWidget):
             (self._refresh_btn, (self._refresh_btn.text(),)),
             (self.home_btn, (self.home_btn.text(),)),
             (self.unlock_btn, (self.unlock_btn.text(),)),
+            (self.pen_test_btn, (self.pen_test_btn.text(),)),
+            (self.pen_up_btn, (self.pen_up_btn.text(),)),
             (self.send_btn, (self.send_btn.text(),)),
             (self.pause_btn, (tr("暂停"), tr("继续"))),
             (self.abort_btn, (self.abort_btn.text(),)),
@@ -523,6 +547,9 @@ class MachinePanel(QWidget):
         self.connect_btn.setText(tr('断开') if st is not State.DISCONNECTED else tr('连接'))
         # 控制器可能在本软件之外进入保持（Hold）——按钮显示「继续」以便恢复
         self.pause_btn.setText(tr('继续') if st is State.PAUSED else tr('暂停'))
+        if st is not State.IDLE:
+            # 离开空闲态（断开/运行/报警等）立即取消自动抬回定时器，避免滞后抬笔
+            self.cancel_pen_test()
         if st is State.DISCONNECTED:
             # 断开后旧坐标不再代表笔头位置，留着会让「读取当前笔位」
             # 拿到上一次连接的过期值；固件参数同理，未连接时不显示。
@@ -674,6 +701,76 @@ class MachinePanel(QWidget):
         self._set_pen_row_visible(self.laser_power, mode == PEN_LASER)
         self._set_pen_row_visible(self.laser_preview, mode == PEN_LASER)
 
+    def cancel_pen_test(self) -> None:
+        """取消未到期的落笔测试自动抬回定时器。"""
+        if self._pen_test_timer.isActive():
+            self._pen_test_timer.stop()
+        self._pen_test_cfg = None
+
+    def _can_manual_pen(self) -> bool:
+        """检查当前是否允许执行手动抬/落笔测试，不允许则给出界面提示。"""
+        if not self.link.connected:
+            self.state_label.setText(tr("未连接"))
+            return False
+        if self.link.state in (State.RUNNING, State.PAUSED):
+            self.progress_label.setText(tr("作业进行中，无法测试抬落笔"))
+            return False
+        if self.link.state is State.ALARM:
+            self.progress_label.setText(tr("机器处于报警状态，请先回零或解锁"))
+            return False
+        return True
+
+    def pen_test(self, *, to_z: Optional[float] = None,
+                 hold_ms: Optional[int] = None) -> list[str]:
+        """单次落笔测试：按当前配置下压，停顿 ``hold_ms`` 毫秒后自动抬回。
+
+        ``hold_ms=0`` 时保持落笔不自动抬回（用于外部工具或手动配对抬笔）。
+        返回实际发出的 G-code 指令行；被拦截或失败时返回空列表。
+        """
+        if not self._can_manual_pen():
+            return []
+        self.cancel_pen_test()
+        cfg = self.current_config()
+        try:
+            cmds = self.link.pen_down(cfg, to_z=to_z)
+        except Exception as exc:
+            self.progress_label.setText(trf('命令失败：{v0}', v0=exc))
+            return []
+        ms = self.PEN_TEST_HOLD_MS if hold_ms is None else int(hold_ms)
+        if ms > 0:
+            self._pen_test_cfg = cfg
+            self._pen_test_timer.start(ms)
+            self.progress_label.setText(tr("落笔测试中，稍后自动抬笔…"))
+        else:
+            self.progress_label.setText(tr("已发送落笔指令"))
+        return cmds
+
+    def pen_up_now(self) -> list[str]:
+        """立即执行单次抬笔（同时取消任何未到期的落笔测试自动抬回）。"""
+        self.cancel_pen_test()
+        if not self._can_manual_pen():
+            return []
+        cfg = self.current_config()
+        try:
+            cmds = self.link.pen_up(cfg)
+        except Exception as exc:
+            self.progress_label.setText(trf('命令失败：{v0}', v0=exc))
+            return []
+        self.progress_label.setText(tr("已发送抬笔指令"))
+        return cmds
+
+    def _on_pen_test_timeout(self) -> None:
+        """落笔测试保压结束：若仍处于连接空闲态则自动抬笔。"""
+        cfg = self._pen_test_cfg
+        self._pen_test_cfg = None
+        if not self.link.connected or self.link.state is not State.IDLE:
+            return
+        try:
+            self.link.pen_up(cfg or self.current_config())
+            self.progress_label.setText(tr("落笔测试完成，已自动抬笔"))
+        except Exception as exc:
+            self.progress_label.setText(trf('命令失败：{v0}', v0=exc))
+
     def _set_pen_row_visible(self, widget, visible: bool) -> None:
         """同时隐藏/显示表单行里的控件与它的标签。"""
         widget.setVisible(visible)
@@ -686,6 +783,10 @@ class MachinePanel(QWidget):
 
     # --------------------------------------------------------------- 坐标轴
     def _on_axis_changed(self) -> None:
+        # 同步写回底层配置对象，防止 self.config 滞留在启动/加载项目时的旧快照
+        self.config.swap_xy = self.swap_xy_check.isChecked()
+        self.config.invert_x = self.invert_x_check.isChecked()
+        self.config.invert_y = self.invert_y_check.isChecked()
         self.axisOptionsChanged.emit()
 
     # --------------------------------------------------------------- 起点
@@ -762,6 +863,7 @@ class MachinePanel(QWidget):
             self.progress_label.setText(trf('命令失败：{v0}', v0=exc))
 
     def _abort(self) -> None:
+        self.cancel_pen_test()
         if not self.link.connected:
             self.state_label.setText(tr("未连接"))
             return
