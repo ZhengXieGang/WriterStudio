@@ -393,3 +393,33 @@ def test_light_theme_field_border_and_canvas_bg(qapp):
         win.close()
         apply_theme(qapp, THEME_DARK)
         qapp.setStyleSheet("")
+
+
+def test_app_icon_and_desktop_identity(qapp):
+    """应用图标内置多档位图并绑定到 QApplication、MainWindow 与 Wayland desktopFileName。"""
+    from writerstudio.__main__ import _apply_desktop_identity
+    from writerstudio.settings import Settings, _MemoryBackend
+    from writerstudio.ui.icons import app_icon, app_icon_path
+
+    path = app_icon_path()
+    assert path is not None and path.is_file()
+    ic = app_icon()
+    assert not ic.isNull()
+    sizes = {(s.width(), s.height()) for s in ic.availableSizes()}
+    assert {(16, 16), (32, 32), (48, 48), (96, 96), (256, 256)} <= sizes
+    # 图标应保留透明安全边距（避免在任务栏/标题栏视觉偏大，主体约占 78%~86%）
+    img = ic.pixmap(256, 256).toImage()
+    assert img.pixelColor(0, 0).alpha() == 0
+    assert img.pixelColor(16, 128).alpha() == 0
+    assert img.pixelColor(128, 128).alpha() > 0
+
+    _apply_desktop_identity(qapp)
+    assert qapp.desktopFileName() == "writerstudio"
+    assert not qapp.windowIcon().isNull()
+
+    win = MainWindow(settings=Settings(backend=_MemoryBackend()))
+    win.confirm_on_close = False
+    try:
+        assert not win.windowIcon().isNull()
+    finally:
+        win.close()

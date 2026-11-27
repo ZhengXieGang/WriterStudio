@@ -81,6 +81,8 @@ class MachinePanel(QWidget):
         self.start_point = StartPoint()
         self._machine_pos: Optional[tuple[float, float, float]] = None
         self._job_started: Optional[float] = None
+        self._pause_started: Optional[float] = None
+        self._paused_total: float = 0.0
         self._pen_test_cfg: Optional[GCodeConfig] = None
         self._pen_test_timer = QTimer(self)
         self._pen_test_timer.setSingleShot(True)
@@ -641,8 +643,36 @@ class MachinePanel(QWidget):
         }
         self.state_label.setText(names.get(st, st.value))
         self.connect_btn.setText(tr('断开') if st is not State.DISCONNECTED else tr('连接'))
-        # 控制器可能在本软件之外进入保持（Hold）——按钮显示「继续」以便恢复
-        self.pause_btn.setText(tr('继续') if st is State.PAUSED else tr('暂停'))
+        # 按钮状态与文案随真实状态同步：暂停中按钮高亮显示「继续」，
+        # 空闲/断开/报警时禁用暂停按钮防止误触。
+        if st is State.PAUSED:
+            self.pause_btn.setText(tr("继续"))
+            set_role(self.pause_btn, "primary")
+            self.pause_btn.setEnabled(True)
+            self.pause_btn.setToolTip(tr("从最后暂停的位置继续书写"))
+            if self._job_started is not None and self._pause_started is None:
+                self._pause_started = time.monotonic()
+            self._update_paused_progress()
+        elif st is State.RUNNING:
+            self.pause_btn.setText(tr("暂停"))
+            set_role(self.pause_btn, "")
+            self.pause_btn.setEnabled(True)
+            self.pause_btn.setToolTip(tr("抬笔暂停，稍后可从暂停位置继续"))
+            if self._pause_started is not None:
+                self._paused_total += max(0.0, time.monotonic() - self._pause_started)
+                self._pause_started = None
+            elif self._job_started is None:
+                self._job_started = time.monotonic()
+                self._paused_total = 0.0
+        else:
+            self.pause_btn.setText(tr("暂停"))
+            set_role(self.pause_btn, "")
+            self.pause_btn.setEnabled(False)
+            self.pause_btn.setToolTip(tr("作业发送中可随时暂停并从断点继续"))
+            if st in (State.DISCONNECTED, State.IDLE, State.ALARM):
+                self._job_started = None
+                self._pause_started = None
+                self._paused_total = 0.0
         if st is not State.IDLE:
             # 离开空闲态（断开/运行/报警等）立即取消自动抬回定时器，避免滞后抬笔
             self.cancel_pen_test()
@@ -657,19 +687,43 @@ class MachinePanel(QWidget):
             self.fw_label.setText(tr("读取中…"))
 
     # ------------------------------------------------- 进度与笔寿命
+    def _update_paused_progress(self) -> None:
+        """暂停期间在进度栏清晰展示当前进度与最后暂停位置。"""
+        acked, total = self.link.progress()
+        if total > 0:
+            pct = min(100.0, acked / total * 100.0)
+            pt = self.link.pause_point
+            if pt is not None and pt[1] is not None:
+                px, py = pt[1]
+                self.set_progress(trf(
+                    '已暂停：{v0:.0f}%（{v1}/{v2} 行 · X {v3:.1f}, Y {v4:.1f}）',
+                    v0=pct, v1=acked, v2=total, v3=px, v4=py))
+            else:
+                self.set_progress(trf(
+                    '已暂停：{v0:.0f}%（{v1}/{v2} 行）',
+                    v0=pct, v1=acked, v2=total))
+        else:
+            self.set_progress(tr("已暂停（控制器保持中）"))
+
     def _tick_progress(self) -> None:
-        """发送中每 0.5s 刷新：百分比 + 已用时间 + 预计剩余。"""
+        """发送中每 0.5s 刷新：百分比 + 已用时间 + 预计剩余（暂停耗时不计入）。"""
+        if self.link.state is State.PAUSED:
+            self._update_paused_progress()
+            return
         if self.link.state is not State.RUNNING:
-            if self.link.state is State.IDLE:
+            if self.link.state in (State.IDLE, State.DISCONNECTED, State.ALARM):
                 self._job_started = None
+                self._pause_started = None
+                self._paused_total = 0.0
             return
         if self._job_started is None:
             self._job_started = time.monotonic()
+            self._paused_total = 0.0
             return
         acked, total = self.link.progress()
         if total <= 0:
             return
-        elapsed = time.monotonic() - self._job_started
+        elapsed = max(0.0, time.monotonic() - self._job_started - self._paused_total)
         pct = acked / total * 100.0
         eta = elapsed / pct * (100.0 - pct) if pct > 0.5 else 0.0
         self.set_progress(
@@ -746,7 +800,12 @@ class MachinePanel(QWidget):
             self.state_label.setText(tr("无响应？"))
             self.progress_label.setText(trf('{v0}（检查 USB/固件）', v0=e.text))
         elif e.kind == "job_done":
+            self._job_started = None
+            self._pause_started = None
+            self._paused_total = 0.0
             self.pause_btn.setText(tr("暂停"))
+            set_role(self.pause_btn, "")
+            self.pause_btn.setEnabled(False)
             self.set_progress(tr("作业完成"))
             if self.sleep_check.isChecked():
                 try:
@@ -952,14 +1011,18 @@ class MachinePanel(QWidget):
         set_role(self.start_summary, "")
 
     def _toggle_pause(self) -> None:
+        if not self.link.connected:
+            self.state_label.setText(tr("未连接"))
+            return
         try:
-            if self.link.state is State.PAUSED:
-                self.link.resume()
-                self.pause_btn.setText(tr("暂停"))
-            elif self.link.state is State.RUNNING:
-                # 抬笔暂停：笔尖离纸，避免进给保持期间洇墨
+            if self.link.is_paused:
+                # 传入最新笔控配置：支持暂停期间微调压笔深度并从最后暂停处继续
+                self.link.resume(pen_cfg=self.current_config())
+                self._on_state(self.link.state)
+            elif self.link.state is State.RUNNING or self.link.job_active:
+                # 抬笔暂停：笔尖离纸并记录精确断点，稍后可自由继续
                 self.link.pause(pen_cfg=self.current_config())
-                self.pause_btn.setText(tr("继续"))
+                self._on_state(self.link.state)
         except Exception as exc:
             # 槽里抛未捕获异常会让应用直接退出（PySide6 行为）
             self.progress_label.setText(trf('命令失败：{v0}', v0=exc))

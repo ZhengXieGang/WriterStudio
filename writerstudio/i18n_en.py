@@ -869,4 +869,10 @@ TRANSLATIONS: dict[str, str] = {
     '画布红点标记已对准该机器笔位，整页内容相对标记原样落位': 'Red canvas marker is bound to this pen position; the page maps relative to it',
     '已标记 · X {v0:.1f}, Y {v1:.1f} mm': 'Marked · X {v0:.1f}, Y {v1:.1f} mm',
     '内容左下角将对齐到该机器坐标起笔': 'Content bottom-left will align to this machine position',
+    '从最后暂停的位置继续书写': 'Resume writing from the last paused position',
+    '抬笔暂停，稍后可从暂停位置继续': 'Lift pen and pause; resume later from this position',
+    '作业发送中可随时暂停并从断点继续': 'Pause and resume from the exact breakpoint while sending',
+    '已暂停：{v0:.0f}%（{v1}/{v2} 行 · X {v3:.1f}, Y {v4:.1f}）': 'Paused: {v0:.0f}% ({v1}/{v2} lines · X {v3:.1f}, Y {v4:.1f})',
+    '已暂停：{v0:.0f}%（{v1}/{v2} 行）': 'Paused: {v0:.0f}% ({v1}/{v2} lines)',
+    '已暂停（控制器保持中）': 'Paused (controller hold)',
 }

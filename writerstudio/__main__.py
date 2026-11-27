@@ -28,6 +28,40 @@ def _install_crash_log() -> None:
         pass
 
 
+def _apply_desktop_identity(app) -> None:
+    """绑定应用桌面标识与图标（Wayland/X11 任务栏与窗口标题栏图标）。
+
+    * ``setDesktopFileName("writerstudio")``：在 Linux Wayland 下决定
+      ``xdg_toplevel.app_id``，与 ``writerstudio.desktop`` / ``StartupWMClass``
+      严格对齐；
+    * ``setWindowIcon(app_icon())``：在支持 ``xdg-toplevel-icon-v1`` 的
+      Wayland 合成器（如 KDE Plasma 6 / KWin 6.2+）、X11、Windows 与 macOS
+      上直接把应用多档位图图标送给窗口管理器，避免退化成通用 Wayland 图标。
+    """
+    import sys
+
+    app.setApplicationName("WriterStudio")
+    app.setApplicationDisplayName("WriterStudio")
+    app.setOrganizationName("WriterStudio")
+    app.setDesktopFileName("writerstudio")
+
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "WriterStudio.App")
+        except Exception:
+            pass
+
+    try:
+        from .ui.icons import app_icon
+        ic = app_icon()
+        if not ic.isNull():
+            app.setWindowIcon(ic)
+    except Exception:
+        pass
+
+
 def _self_check() -> int:
     """无桌面环境的最小启动自检（打包产物冒烟用）。
 
@@ -47,8 +81,7 @@ def _self_check() -> int:
         from .settings import Settings
 
         app = QApplication(sys.argv[:1])
-        app.setApplicationName("WriterStudio")
-        app.setOrganizationName("WriterStudio")
+        _apply_desktop_identity(app)
         settings = Settings()
         # 先定语言再导入/构造任何界面（模块级/构造时的 tr() 都取当前值）
         _i18n_update(settings.ui_language())
@@ -86,8 +119,7 @@ def main() -> int:
     from .settings import Settings
 
     app = QApplication(sys.argv)
-    app.setApplicationName("WriterStudio")
-    app.setOrganizationName("WriterStudio")
+    _apply_desktop_identity(app)
 
     settings = Settings()
     # 语言要在导入/构造任何窗口之前定下来（tr() 在构造时取值）

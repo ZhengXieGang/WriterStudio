@@ -135,6 +135,10 @@ class MainWindow(QMainWindow):
     def __init__(self, settings: Settings | None = None) -> None:
         super().__init__()
         self.setWindowTitle(tr("WriterStudio — ESP32 GRBL 写字机软件"))
+        from .icons import app_icon
+        _ic = app_icon()
+        if not _ic.isNull():
+            self.setWindowIcon(_ic)
         self.resize(1280, 840)
 
         self.settings = settings if settings is not None else Settings()

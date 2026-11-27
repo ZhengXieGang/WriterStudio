@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from collections import deque
@@ -22,11 +23,199 @@ from typing import Callable, Optional, Protocol
 
 from ..i18n import tr, trf
 from . import grbl
+from .config import (
+    PEN_CUSTOM,
+    PEN_LASER,
+    PEN_M3M5,
+    PEN_M7M9,
+    PEN_SERVO_ANGLE,
+    PEN_Z,
+)
 from .profile import MachineProfile
 
 RX_BUFFER_SIZE = 128          # GRBL 默认接收缓冲字节数
 STATUS_POLL_INTERVAL = 0.2    # 状态轮询间隔（秒）
 PROBE_MIN_SETTINGS = 4        # 收到这么多条 $N=… 才认定是一份 $$ 应答
+
+# 注入队列来源标签：区分清偏移、暂停抬笔与继续恢复，支持自由反复暂停/继续
+_INJ_OFFSET = "offset"
+_INJ_PAUSE = "pause"
+_INJ_RESUME_MOVE = "resume_move"
+_INJ_RESUME_DOWN = "resume_down"
+_INJ_RESUME_MODAL = "resume_modal"
+
+_GCODE_COMMENT_RE = re.compile(r"\([^)]*\)")
+_GCODE_WORD_RE = re.compile(r"([A-Za-z])\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))")
+
+
+def _strip_gcode_comments(line: str) -> str:
+    """去除 G-code 行内的括号注释与分号尾注，返回大写规范文本。"""
+    s = _GCODE_COMMENT_RE.sub("", line)
+    if ";" in s:
+        s = s.split(";", 1)[0]
+    return " ".join(s.strip().upper().split())
+
+
+def _line_has_word(line: str, letter: str) -> bool:
+    """判断单行 G-code 是否显式携带指定词字母（如 ``F``）。"""
+    clean = _strip_gcode_comments(line)
+    target = letter.upper()
+    return any(w == target for w, _ in _GCODE_WORD_RE.findall(clean))
+
+
+class _JobMotionTracker:
+    """实时追踪已发送作业行的模态位置、进给与抬落笔状态。
+
+    用于暂停时精确锁定「最后暂停的位置与笔状态」，确保恢复继续时：
+    1. 暂停期间若手动移动过笔头，可先抬笔精准返回最后暂停的 ``(X, Y)``；
+    2. 仅在暂停前确实处于落笔态时才落笔（精确还原斜坡 Z 高度），空程暂停绝不误落笔划纸；
+    3. 被 Z 抬落笔改写的模态进给率 ``F`` 可按需恢复，避免后续省略 ``F`` 的行失速。
+    """
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self.abs_mode: bool = True
+        self.motion: str = ""
+        self.last_xy_motion: str = ""
+        self.x: Optional[float] = None
+        self.y: Optional[float] = None
+        self.z: Optional[float] = None
+        self.draw_feed: Optional[float] = None
+        self.last_feed: Optional[float] = None
+        self.spindle_on: Optional[bool] = None
+        self.spindle_s: Optional[float] = None
+        self.coolant_on: Optional[bool] = None
+
+    @property
+    def xy(self) -> Optional[tuple[float, float]]:
+        if self.x is not None and self.y is not None:
+            return (self.x, self.y)
+        return None
+
+    def feed(self, line: str) -> None:
+        """解析一条已发出的作业 G-code 行，更新当前模态快照。"""
+        clean = _strip_gcode_comments(line)
+        if not clean or clean.startswith("$"):
+            return
+        words = [(ch, float(val)) for ch, val in _GCODE_WORD_RE.findall(clean)]
+        if not words:
+            return
+        has_xy = False
+        line_motion: Optional[str] = None
+        line_f: Optional[float] = None
+        for ch, val in words:
+            if ch == "G":
+                code = int(round(val))
+                if abs(val - code) < 1e-6:
+                    if code == 90:
+                        self.abs_mode = True
+                    elif code == 91:
+                        self.abs_mode = False
+                    elif code == 0:
+                        line_motion = "G0"
+                        self.motion = "G0"
+                    elif code == 1:
+                        line_motion = "G1"
+                        self.motion = "G1"
+                    elif code in (2, 3):
+                        line_motion = f"G{code}"
+                        self.motion = line_motion
+            elif ch == "M":
+                code = int(round(val))
+                if abs(val - code) < 1e-6:
+                    if code in (3, 4):
+                        self.spindle_on = True
+                    elif code == 5:
+                        self.spindle_on = False
+                    elif code in (7, 8):
+                        self.coolant_on = True
+                    elif code == 9:
+                        self.coolant_on = False
+            elif ch == "X":
+                self.x = val if self.abs_mode else (self.x or 0.0) + val
+                has_xy = True
+            elif ch == "Y":
+                self.y = val if self.abs_mode else (self.y or 0.0) + val
+                has_xy = True
+            elif ch == "Z":
+                self.z = val if self.abs_mode else (self.z or 0.0) + val
+            elif ch == "F":
+                line_f = val
+                self.last_feed = val
+            elif ch == "S":
+                self.spindle_s = val
+        if has_xy:
+            eff_motion = line_motion or self.motion
+            if eff_motion:
+                self.last_xy_motion = eff_motion
+            if line_f is not None and eff_motion != "G0":
+                self.draw_feed = line_f
+
+    def pen_state(self, pen_cfg, sent_lines: list[str]) -> Optional[bool]:
+        """依据笔控配置判定当前笔的显式状态。
+
+        返回 ``True``（明确落笔）、``False``（明确抬笔）或 ``None``（作业中
+        尚未出现该模式的显式抬落笔指令）。
+        """
+        if pen_cfg is None:
+            return None
+        mode = getattr(pen_cfg, "pen_mode", PEN_Z)
+        if mode == PEN_Z:
+            if self.z is None:
+                return None
+            return abs(self.z - float(pen_cfg.pen_up_z)) > 1e-3
+        if mode == PEN_SERVO_ANGLE:
+            if self.spindle_on is False:
+                return False
+            if self.spindle_on is True and self.spindle_s is not None:
+                return abs(self.spindle_s - float(pen_cfg.pen_up_s)) > 1e-3
+            return None
+        if mode in (PEN_M3M5, PEN_LASER):
+            if self.spindle_on is False:
+                return False
+            if self.spindle_on is True:
+                return self.spindle_s is None or self.spindle_s > 1e-6
+            return None
+        if mode == PEN_M7M9:
+            return self.coolant_on
+        if mode == PEN_CUSTOM:
+            up_cmds = {_strip_gcode_comments(x) for x in pen_cfg.pen_up_lines()
+                       if _strip_gcode_comments(x) and not _strip_gcode_comments(x).startswith("G4")}
+            down_cmds = {_strip_gcode_comments(x) for x in pen_cfg.pen_down_lines()
+                         if _strip_gcode_comments(x) and not _strip_gcode_comments(x).startswith("G4")}
+            for raw in reversed(sent_lines):
+                norm = _strip_gcode_comments(raw)
+                if norm in down_cmds and norm not in up_cmds:
+                    return True
+                if norm in up_cmds and norm not in down_cmds:
+                    return False
+            return None
+        return None
+
+    def is_pen_down(self, pen_cfg, sent_lines: list[str]) -> bool:
+        """判定暂停瞬间笔是否压在纸上（无显式抬落笔时按最后 XY 运动兜底）。"""
+        explicit = self.pen_state(pen_cfg, sent_lines)
+        if explicit is not None:
+            return explicit
+        # 作业未含显式抬落笔指令（如纯 G1 线段流）：正在执行直线插补视为落笔态
+        return self.last_xy_motion in ("G1", "G2", "G3")
+
+
+@dataclass
+class _PauseSnapshot:
+    """暂停瞬间的精确断点状态快照，用于自由恢复并从最后暂停处续写。"""
+
+    line_index: int
+    xy: Optional[tuple[float, float]]
+    z: Optional[float]
+    abs_mode: bool
+    pen_down: bool
+    feed: Optional[float]
+    pen_cfg: object
+    used_hold: bool
+    moved_while_paused: bool = False
 
 
 class State(Enum):
@@ -120,7 +309,8 @@ class GrblLink:
 
         # 流控队列：在途行 (字节数, 是否注入行)；注入行不参与作业计数
         self._pending: deque[tuple[int, bool]] = deque()
-        self._injected: deque[str] = deque()   # 优先发送的行（暂停抬笔等）
+        # 优先发送的注入行：(来源标签, 指令文本)，区分清偏移/暂停抬笔/继续恢复
+        self._injected: deque[tuple[str, str]] = deque()
         self._extra_inflight = 0
         self._job_lines_cache: list[str] = []
         # 流控计数在 __init__ 即就位：connect 之前调用 progress()/load_job
@@ -137,6 +327,12 @@ class GrblLink:
         self._last_poll = 0.0
         self._paused = False
         self._finish_announced = False
+        # 作业模态与暂停断点追踪：支持自由多次暂停/继续，并从最后暂停位置精准续写
+        self._tracker = _JobMotionTracker()
+        self._pause_snap: Optional[_PauseSnapshot] = None
+        self._resume_pending_snap: Optional[_PauseSnapshot] = None
+        self._pause_lift_sent = False
+        self._resume_move_needed = False
         # --- 扩展能力 ---
         self.single_step = False        # 单步模式：在途行确认后才发下一行
         self.stale_seconds = 5.0        # 状态看门狗：N 秒无状态报告 → stale 事件
@@ -196,6 +392,28 @@ class GrblLink:
     @property
     def connected(self) -> bool:
         return self._serial is not None
+
+    @property
+    def is_paused(self) -> bool:
+        """当前是否处于暂停态（软件主动暂停或控制器外部保持 Hold/Door）。"""
+        with self._lock:
+            return self._paused or self.state is State.PAUSED
+
+    @property
+    def job_active(self) -> bool:
+        """当前是否存在尚未完成的已装载作业（运行中或暂停中均为 True）。"""
+        with self._lock:
+            return (self._job_lines > 0
+                    and not self._finish_announced
+                    and self.state is not State.ALARM)
+
+    @property
+    def pause_point(self) -> Optional[tuple[int, Optional[tuple[float, float]]]]:
+        """暂停时的断点信息 ``(已发作业行数, 最后暂停 XY 坐标)``；未暂停返回 None。"""
+        with self._lock:
+            if not self._paused or self._pause_snap is None:
+                return None
+            return (self._pause_snap.line_index, self._pause_snap.xy)
 
     def disconnect(self) -> None:
         self._stop.set()
@@ -257,16 +475,35 @@ class GrblLink:
                     self.status = st
                     self._last_status_time = time.monotonic()
                     self._stale_emitted = False
-                    # 以控制器上报状态为准（外部 Hold/Alarm 可见）。仅忽略
-                    # 「作业进行中的瞬时 Idle」——行间缓冲会短暂报 Idle，
-                    # 采纳它会把正在发送的作业误打回空闲。
+                    # 以控制器上报状态为准（外部 Hold/Alarm 可见）。
+                    # 例外：
+                    # 1. 软件主动暂停中：控制器排空在途缓冲报 Run、停稳报 Idle、
+                    #    或暂停期间手动点动报 Jog 都不得把 PAUSED 冲回 RUNNING/IDLE
+                    #    （否则界面「继续」按钮会被覆写成「暂停」，作业死锁）；
+                    #    仅 ALARM 具有最高优先级，可打断暂停。
+                    # 2. 作业进行中的行间瞬时 Idle 不得把 RUNNING 打回空闲。
                     name = (st.state or "").strip().lower().split(":")[0]
                     mapped = _CONTROLLER_STATE.get(name)
-                    job_active = (self._job_lines > 0
-                                  and not self._finish_announced)
-                    if mapped is not None and not (
-                            mapped is State.IDLE and job_active):
-                        self._set_state(mapped)
+                    with self._lock:
+                        paused = self._paused
+                        job_active = (self._job_lines > 0
+                                      and not self._finish_announced)
+                    if mapped is not None:
+                        if mapped is State.ALARM:
+                            with self._lock:
+                                self._paused = False
+                                self._pause_snap = None
+                                self._resume_pending_snap = None
+                                self._pause_lift_sent = False
+                                self._resume_move_needed = False
+                                self._pen_cfg = None
+                            self._set_state(State.ALARM)
+                        elif paused:
+                            pass
+                        elif mapped is State.IDLE and job_active:
+                            pass
+                        else:
+                            self._set_state(mapped)
                     self._emit("status", body.decode("utf-8", "replace"), st)
             else:
                 if self._tag_buffer or ch == b"<":
@@ -296,16 +533,19 @@ class GrblLink:
             except ValueError:
                 pass
             self._emit("line", line)
-        elif kind is grbl.ResponseKind.ERROR:
-            self._emit("error", grbl.error_message(line))
-            self._on_ack()
         elif kind is grbl.ResponseKind.ALARM:
             self._emit("alarm", grbl.alarm_message(line))
             # 报警：丢弃剩余作业，保持 ALARM 状态直到用户解锁($X)/回零
             with self._lock:
                 self._job_total = self._job_lines
                 self._pending.clear()
-            self._paused = False
+                self._injected.clear()
+                self._paused = False
+                self._pause_snap = None
+                self._resume_pending_snap = None
+                self._pause_lift_sent = False
+                self._resume_move_needed = False
+                self._pen_cfg = None
             self._set_state(State.ALARM)
             self._on_ack()
         elif kind is grbl.ResponseKind.VERSION:
@@ -356,7 +596,12 @@ class GrblLink:
             self._stale_emitted = False
             self._settings_buf.clear()
             self._paused = False
-        self._pen_cfg = None
+            self._tracker.reset()
+            self._pause_snap = None
+            self._resume_pending_snap = None
+            self._pause_lift_sent = False
+            self._resume_move_needed = False
+            self._pen_cfg = None
         self._job_home = None
         self.profile = None
 
@@ -404,7 +649,6 @@ class GrblLink:
         发送前注入清零指令（见 :meth:`zero_offset_lines`），避免固件里
         残留的 G54/G92 偏移让烘焙绝对坐标的作业整体错位。
         """
-        self._injected.extend(self.zero_offset_lines())
         cleaned = []
         for ln in lines:
             s = ln.strip()
@@ -414,13 +658,23 @@ class GrblLink:
         self._job_lines_cache = cleaned
         self._job_home = _first_positioning(cleaned)
         with self._lock:
+            self._injected.clear()
+            self._injected.extend(
+                (_INJ_OFFSET, ln) for ln in self.zero_offset_lines()
+            )
             self._job_lines = len(cleaned)
             self._job_total = 0
             self._job_acked = 0
             self._pending.clear()
             self._finish_announced = False
             self._all_acked_at = 0.0
-        self._paused = False
+            self._paused = False
+            self._tracker.reset()
+            self._pause_snap = None
+            self._resume_pending_snap = None
+            self._pause_lift_sent = False
+            self._resume_move_needed = False
+            self._pen_cfg = None
         self._emit("line", f"已装载作业：{len(cleaned)} 行")
         self._pump()
 
@@ -445,12 +699,20 @@ class GrblLink:
                 if self._injected:
                     if self.single_step and self._pending:
                         return
-                    line = self._injected[0]
+                    kind, line = self._injected[0]
                     need = len(line) + 1
                     if self._in_flight() + need > RX_BUFFER_SIZE:
                         return
                     self._injected.popleft()
                     self._pending.append((need, True))
+                    if kind == _INJ_PAUSE:
+                        self._pause_lift_sent = True
+                    elif kind == _INJ_RESUME_DOWN:
+                        self._pause_lift_sent = False
+                    elif kind == _INJ_RESUME_MOVE:
+                        if not any(k == _INJ_RESUME_MOVE
+                                   for k, _ in self._injected):
+                            self._resume_move_needed = False
                 else:
                     if self._paused:
                         return
@@ -474,6 +736,9 @@ class GrblLink:
                                     return
                             self._finish_announced = True
                             self._all_acked_at = 0.0
+                            self._resume_pending_snap = None
+                            self._pause_lift_sent = False
+                            self._resume_move_needed = False
                             self._set_state(State.IDLE)
                             self._emit("line", "作业发送完成")
                             self._emit("job_done", "")
@@ -489,6 +754,10 @@ class GrblLink:
                         return
                     self._pending.append((need, False))
                     self._job_total += 1
+                    self._tracker.feed(line)
+                    self._pause_lift_sent = False
+                    self._resume_move_needed = False
+                    self._resume_pending_snap = None
                     self._set_state(State.RUNNING)
                 try:
                     self._write_raw((line + "\n").encode("ascii", "replace"))
@@ -515,43 +784,212 @@ class GrblLink:
         self.load_job(cleaned)
 
     # ------------------------------------------------------------ 控制
-    def pause(self, pen_cfg=None, use_hold: bool = True) -> None:
-        """暂停作业。
+    def _drop_injected_kinds_locked(self, kinds: set[str]) -> list[tuple[str, str]]:
+        """在持锁状态下移除指定来源标签的尚未发出注入行，并返回被移除列表。"""
+        kept: deque[tuple[str, str]] = deque()
+        removed: list[tuple[str, str]] = []
+        for item in self._injected:
+            if item[0] in kinds:
+                removed.append(item)
+            else:
+                kept.append(item)
+        self._injected = kept
+        return removed
 
-        ``pen_cfg`` 传入笔控配置时，会把**抬笔指令**排到
-        在途缓冲之后执行——笔尖离开纸面，避免进给保持期间墨水洇纸；
+    def pause(self, pen_cfg=None, use_hold: bool = True) -> None:
+        """暂停作业，记录精确断点位置与笔状态，供后续自由恢复继续。
+
+        ``pen_cfg`` 传入笔控配置时，停止补充后续作业行，并在必要时把**抬笔指令**
+        排到在途缓冲之后执行——笔尖离开纸面，避免暂停期间墨水洇纸；
         否则仅发送实时进给保持 ``!``。
 
         空闲/未连接时是**误操作**：直接忽略（否则继续时会把落笔指令
         注入一台没在写字的机器，激光模式等于点亮光束且状态卡在运行中）。
         """
-        if self._serial is None or self.state is not State.RUNNING:
-            return
-        self._paused = True
-        if pen_cfg is not None:
-            self._pen_cfg = pen_cfg
-            for ln in pen_cfg.pen_up_lines():
-                self._injected.append(ln)
+        used_hold = False
+        need_pump = False
+        with self._lock:
+            if self._serial is None or self._paused:
+                return
+            job_active = (self._job_lines > 0 and not self._finish_announced)
+            if self.state is not State.RUNNING and not (
+                    job_active and self.state is not State.ALARM):
+                return
+            self._paused = True
+            self._all_acked_at = 0.0
+
+            # 极速 resume -> pause：先撤销尚未发出的旧恢复指令，避免落笔滞后发出
+            self._drop_injected_kinds_locked(
+                {_INJ_RESUME_MOVE, _INJ_RESUME_DOWN, _INJ_RESUME_MODAL}
+            )
+            prev_snap = self._resume_pending_snap
+            re_paused_before_job = (
+                prev_snap is not None
+                and self._job_total == prev_snap.line_index
+            )
+            self._resume_pending_snap = None
+
+            cfg_copy = (pen_cfg.clone()
+                        if (pen_cfg is not None and hasattr(pen_cfg, "clone"))
+                        else pen_cfg)
+
+            if re_paused_before_job and prev_snap is not None:
+                # 刚恢复但一行新作业还没发出就再次暂停：完整保留原始断点与笔状态
+                snap_xy = prev_snap.xy
+                snap_z = prev_snap.z
+                snap_abs = prev_snap.abs_mode
+                snap_feed = prev_snap.feed
+                pen_down = prev_snap.pen_down
+                moved_flag = bool(self._resume_move_needed)
+                if pen_cfg is not None:
+                    self._pen_cfg = cfg_copy
+                    # 若上次恢复已经把笔落回纸上（或笔未抬起），再次注入抬笔
+                    if not self._pause_lift_sent and pen_down:
+                        for ln in pen_cfg.pen_up_lines():
+                            self._injected.append((_INJ_PAUSE, ln))
+                    need_pump = True
+                elif use_hold:
+                    used_hold = True
+            else:
+                sent_lines = self._job_lines_cache[:self._job_total]
+                snap_xy = self._tracker.xy
+                snap_z = self._tracker.z
+                snap_abs = self._tracker.abs_mode
+                snap_feed = self._tracker.draw_feed or self._tracker.last_feed
+                explicit_pen = (
+                    self._tracker.pen_state(pen_cfg, sent_lines)
+                    if pen_cfg is not None else None
+                )
+                pen_down = (
+                    self._tracker.is_pen_down(pen_cfg, sent_lines)
+                    if pen_cfg is not None else False
+                )
+                moved_flag = False
+                self._pause_lift_sent = False
+                self._resume_move_needed = False
+                if pen_cfg is not None:
+                    self._pen_cfg = cfg_copy
+                    # 除非已明确处于抬笔状态（如刚抬笔或在空程 G0 处），一律抬笔确保安全
+                    if explicit_pen is not False:
+                        for ln in pen_cfg.pen_up_lines():
+                            self._injected.append((_INJ_PAUSE, ln))
+                    need_pump = True
+                elif use_hold:
+                    used_hold = True
+
+            self._pause_snap = _PauseSnapshot(
+                line_index=self._job_total,
+                xy=snap_xy,
+                z=snap_z,
+                abs_mode=snap_abs,
+                pen_down=pen_down,
+                feed=snap_feed,
+                pen_cfg=cfg_copy,
+                used_hold=used_hold,
+                moved_while_paused=moved_flag,
+            )
+        if need_pump:
             self._pump()
-        elif use_hold:
+        elif used_hold:
             self.realtime(grbl.CMD_HOLD)
         self._set_state(State.PAUSED)
 
-    def resume(self) -> None:
-        """恢复作业。若暂停时抬了笔，先落回笔再继续；未在暂停时是误操作。"""
-        if not self._paused:
-            # 外部保持（Hold）：软件没暂停过，但仍允许发 ~ 恢复运行
-            name = ""
-            if self.status is not None:
-                name = (self.status.state or "").strip().lower().split(":")[0]
-            if name in ("hold", "door"):
-                self.realtime(grbl.CMD_RESUME)
+    def resume(self, pen_cfg=None) -> None:
+        """恢复作业：从最后暂停的位置与笔状态无缝继续。
+
+        * 若暂停期间手动移动过笔头（Jog/Goto/Home），自动先确保抬笔、清偏移、
+          快速精准移回最后暂停坐标；
+        * 仅当暂停前笔处于落笔态时才落笔（精确还原斜坡 Z 高度，也支持暂停期间
+          微调落笔深度）；空程暂停绝不误落笔划纸；
+        * 若 Z 抬落笔改写了模态进给率 ``F`` 且下一行未显式带 ``F``，自动恢复原速度。
+        """
+        if self._serial is None:
             return
-        if self._pen_cfg is not None:
-            for ln in self._pen_cfg.pen_down_lines():
-                self._injected.append(ln)
+        with self._lock:
+            if not self._paused:
+                # 外部保持（Hold/Door）：软件没主动暂停过，仍允许发 ~ 恢复运行
+                name = ""
+                if self.status is not None:
+                    name = (self.status.state or "").strip().lower().split(":")[0]
+                if name in ("hold", "door"):
+                    self.realtime(grbl.CMD_RESUME)
+                return
+
+            snap = self._pause_snap
+            self._pause_snap = None
+            cfg = (pen_cfg if pen_cfg is not None
+                   else (self._pen_cfg or (snap.pen_cfg if snap else None)))
             self._pen_cfg = None
-        self._paused = False
+
+            # 清理尚未发出的暂停抬笔行
+            removed_pause = self._drop_injected_kinds_locked({_INJ_PAUSE})
+            has_remaining = (self._job_total < self._job_lines)
+
+            # 情况 1：刚点暂停、抬笔一行都未发出且未移动笔头 → 直接无痕取消暂停
+            no_lift_and_still = (
+                bool(removed_pause)
+                and not self._pause_lift_sent
+                and (snap is None or not snap.moved_while_paused)
+            )
+
+            resume_items: list[tuple[str, str]] = []
+            if not no_lift_and_still and cfg is not None and snap is not None and has_remaining:
+                moved = snap.moved_while_paused
+                # 1) 暂停期间挪动过笔头：确保抬笔 → 清偏移 → 精准回到最后暂停的 XY
+                if moved:
+                    for ln in cfg.pen_up_lines():
+                        resume_items.append((_INJ_RESUME_MOVE, ln))
+                    if snap.xy is not None:
+                        for ln in self.zero_offset_lines():
+                            resume_items.append((_INJ_RESUME_MOVE, ln))
+                        resume_items.append(
+                            (_INJ_RESUME_MOVE,
+                             f"G90 G0 {cfg.fmt_xy(snap.xy[0], snap.xy[1])}")
+                        )
+                    self._resume_move_needed = True
+
+                # 2) 仅在暂停前笔处于落笔态时才落笔（空程暂停绝不误落笔划纸）
+                need_pen_down = snap.pen_down and (self._pause_lift_sent or moved)
+                if need_pen_down:
+                    to_z: Optional[float] = None
+                    if (getattr(cfg, "pen_mode", None) == PEN_Z
+                            and snap.z is not None):
+                        old_cfg = snap.pen_cfg
+                        # 若暂停在入/收笔斜坡过渡高度，精准落回该高度；
+                        # 若暂停在满压深度，使用当前配置的 pen_down_z（支持暂停中微调压深）
+                        if (old_cfg is not None
+                                and getattr(old_cfg, "pen_mode", None) == PEN_Z
+                                and abs(snap.z - float(old_cfg.pen_down_z)) > 1e-3):
+                            to_z = snap.z
+                    for ln in cfg.pen_down_lines(to_z=to_z):
+                        resume_items.append((_INJ_RESUME_DOWN, ln))
+
+                # 3) 恢复坐标模式（若原作业是 G91 且回位用了 G90）
+                if moved and snap.xy is not None and not snap.abs_mode:
+                    resume_items.append((_INJ_RESUME_MODAL, "G91"))
+
+                # 4) 恢复被 Z 抬落笔覆盖的模态进给速度 F（下一行未显式带 F 时）
+                if (getattr(cfg, "pen_mode", None) == PEN_Z
+                        and snap.feed is not None and snap.feed > 0
+                        and abs(snap.feed - float(cfg.pen_z_feed)) > 1e-3
+                        and (self._pause_lift_sent or need_pen_down or moved)):
+                    next_line = self._get_job_line(self._job_total)
+                    if next_line and not _line_has_word(next_line, "F"):
+                        resume_items.append(
+                            (_INJ_RESUME_MODAL, f"F{cfg._ff(snap.feed)}")
+                        )
+
+            if resume_items:
+                self._injected.extend(resume_items)
+                self._resume_pending_snap = snap
+            else:
+                self._resume_pending_snap = None
+                if not has_remaining:
+                    self._pause_lift_sent = False
+                    self._resume_move_needed = False
+
+            self._paused = False
+
         self.realtime(grbl.CMD_RESUME)
         self._set_state(State.RUNNING)
         self._pump()
@@ -565,10 +1003,16 @@ class GrblLink:
         """
         with self._lock:
             self._job_total = self._job_lines  # 丢弃剩余
+            self._finish_announced = True
             self._pending.clear()
             self._injected.clear()
-        self._paused = False
-        self._pen_cfg = None
+            self._paused = False
+            self._pause_snap = None
+            self._resume_pending_snap = None
+            self._pause_lift_sent = False
+            self._resume_move_needed = False
+            self._tracker.reset()
+            self._pen_cfg = None
         self.realtime(grbl.CMD_SOFT_RESET)
         self._set_state(State.IDLE)
         if pen_cfg is not None:
@@ -610,8 +1054,15 @@ class GrblLink:
     def request_status(self) -> None:
         self.realtime(grbl.CMD_STATUS)
 
+    def _mark_moved_while_paused(self) -> None:
+        """暂停期间发生手动移动/笔控操作时标记：恢复继续前自动抬笔回最后暂停点。"""
+        with self._lock:
+            if self._paused and self._pause_snap is not None:
+                self._pause_snap.moved_while_paused = True
+
     def jog(self, dx: float = 0.0, dy: float = 0.0, feed: float = 1000.0) -> None:
         # 版本感知：grbl <1.1 不支持 $J=
+        self._mark_moved_while_paused()
         self.send_line(grbl.jog_command(dx, dy, feed=feed,
                                         grbl_version=self.grbl_version))
 
@@ -621,12 +1072,14 @@ class GrblLink:
         发送前先清固件里的工件偏移：绝对坐标只有在「工件坐标 ≡ 机械坐标」
         时才等于用户设定的机器点位，否则会整体偏移到错误位置。
         """
+        self._mark_moved_while_paused()
         for ln in self.zero_offset_lines():
             self.send_line(ln)
         self.send_line(grbl.goto_command(x, y, feed=feed))
 
     def pen_down(self, pen_cfg, to_z: Optional[float] = None) -> list[str]:
         """立即执行一次单次落笔测试（不经过作业流控队列），返回发出的指令行。"""
+        self._mark_moved_while_paused()
         lines = list(pen_cfg.pen_test_down_lines(to_z=to_z))
         for ln in lines:
             self.send_line(ln)
@@ -640,11 +1093,15 @@ class GrblLink:
         return lines
 
     def home(self) -> None:
+        self._mark_moved_while_paused()
         self.send_line(grbl.home_command())
 
     def unlock(self) -> None:
         self.send_line(grbl.unlock_command())
         if self.state is State.ALARM:
+            with self._lock:
+                if self._job_total >= self._job_lines:
+                    self._finish_announced = True
             self._set_state(State.IDLE)
 
     def set_origin(self, axes: str = "XY") -> None:

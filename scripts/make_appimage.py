@@ -34,6 +34,7 @@ Comment=ESP32 GRBL plotter software: multi-font handwriting, Markdown/LaTeX, Tik
 Comment[zh_CN]=ESP32 GRBL 写字机软件：多字体手写、Markdown/LaTeX、TikZ
 Exec=WriterStudio
 Icon=writerstudio
+StartupWMClass=writerstudio
 Categories=Graphics;
 Keywords=plotter;handwriting;GRBL;TikZ;LaTeX;
 Terminal=false
@@ -143,6 +144,13 @@ def main() -> None:
     shutil.copy2(icon, appdir / ".DirIcon")
     shutil.copy2(icon, appdir / "writerstudio.png")
     (appdir / "writerstudio.desktop").write_text(_DESKTOP, encoding="utf-8")
+    # 同时放进 freedesktop 标准目录，便于 AppImage 桌面集成工具读取高清图标与 .desktop
+    std_icon_dir = appdir / "usr" / "share" / "icons" / "hicolor" / "256x256" / "apps"
+    std_icon_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(icon, std_icon_dir / "writerstudio.png")
+    std_apps_dir = appdir / "usr" / "share" / "applications"
+    std_apps_dir.mkdir(parents=True, exist_ok=True)
+    (std_apps_dir / "writerstudio.desktop").write_text(_DESKTOP, encoding="utf-8")
     apprun = appdir / "AppRun"
     apprun.write_text(_APPRUN, encoding="utf-8")
     apprun.chmod(0o755)

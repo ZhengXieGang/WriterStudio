@@ -1086,3 +1086,97 @@ def test_axis_change_without_marker_marks_dirty_and_invalidates_pending_origin(q
         assert win._origin_job_pending is False
     finally:
         win.close()
+
+
+def test_machine_panel_free_pause_resume_ui_and_frozen_timer(qapp):
+    """UI 暂停/继续：按钮与状态不被轮询覆盖，支持反复自由切换，暂停期间计时冻结。"""
+    from writerstudio.machine.serial_link import State
+    from writerstudio.settings import K_AI_ENABLED, Settings, _MemoryBackend
+
+    st = Settings(_MemoryBackend())
+    st.set(K_AI_ENABLED, False)
+    win = MainWindow(settings=st)
+    win.confirm_on_close = False
+    p = win.machine_panel
+    fake = FakeSerial(simulate_full=True)
+    p.link._greeting = False
+    p.link.single_step = True
+    try:
+        # 1) 未连接和空闲时，暂停按钮不可用
+        assert not p.pause_btn.isEnabled()
+        p.link.connect_backend(fake)
+        qapp.processEvents()
+        assert not p.pause_btn.isEnabled()
+        assert p.pause_btn.text() == "暂停"
+
+        # 2) 装载作业后，暂停按钮启用
+        job = [
+            "G21", "G90", "G1 Z0 F12000", "G0 X10 Y10",
+            "G1 Z6 F12000", "G1 X25 Y10 F4400", "G1 X40 Y10 F4400",
+            "G1 Z0 F12000",
+        ]
+        p.link.load_job_lines(job)
+        end = time.time() + 3.0
+        while time.time() < end and "G1 X25 Y10 F4400" not in fake.out_lines:
+            fake.feed("ok\n")
+            qapp.processEvents()
+            time.sleep(0.02)
+        qapp.processEvents()
+        assert p.pause_btn.isEnabled()
+        assert p.pause_btn.text() == "暂停"
+
+        # 3) 点击暂停：按钮切为「继续」并保持启用，进度栏显示断点坐标且计时冻结
+        p.pause_btn.click()
+        qapp.processEvents()
+        assert p.link.state is State.PAUSED
+        assert p.pause_btn.text() == "继续"
+        assert p.pause_btn.isEnabled()
+        assert p.state_label.text() == "已暂停"
+        assert "已暂停" in p.progress_label.text()
+        assert "25.0" in p.progress_label.text()
+        assert p._pause_started is not None
+
+        # 模拟控制器排空缓冲报 Run/Idle 轮询 → 按钮绝不跳回「暂停」
+        fake.feed("<Run|MPos:25.000,10.000,6.000|FS:4400,0>\n")
+        fake.feed("<Idle|MPos:25.000,10.000,0.000|FS:0,0>\n")
+        time.sleep(0.08)
+        qapp.processEvents()
+        assert p.link.state is State.PAUSED
+        assert p.pause_btn.text() == "继续"
+        assert p.state_label.text() == "已暂停"
+
+        # 4) 释放当前在途 ok 让抬笔发出，再点「继续」→ 再点「暂停」→ 再点「继续」直到写完
+        fake.feed("ok\n")
+        time.sleep(0.05)
+        fake.feed("ok\n")
+        time.sleep(0.05)
+        qapp.processEvents()
+
+        p.pause_btn.click()
+        qapp.processEvents()
+        assert p.link.state is State.RUNNING
+        assert p.pause_btn.text() == "暂停"
+        assert p._pause_started is None
+        assert p._paused_total > 0.0
+
+        # 第二次自由暂停并继续
+        p.pause_btn.click()
+        qapp.processEvents()
+        assert p.link.state is State.PAUSED
+        assert p.pause_btn.text() == "继续"
+
+        fake.simulate_full = False
+        p.pause_btn.click()
+        fake.feed("ok\n")
+        end = time.time() + 4.0
+        while time.time() < end and p.link.state is not State.IDLE:
+            qapp.processEvents()
+            time.sleep(0.02)
+        qapp.processEvents()
+        assert p.link.progress() == (len(job), len(job))
+        assert p.link.state is State.IDLE
+        assert not p.pause_btn.isEnabled()
+        assert p.pause_btn.text() == "暂停"
+        p.link.disconnect()
+    finally:
+        win.close()

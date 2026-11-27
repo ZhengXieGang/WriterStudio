@@ -12,8 +12,11 @@ QIcon（见 :func:`clear_cache`）。
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from typing import Optional
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon, QPixmap
 
 try:
@@ -142,3 +145,54 @@ def action_icon(key: str) -> Optional[QIcon]:
     """按动作键取图标（见 :data:`ACTION_ICONS`）。"""
     name = ACTION_ICONS.get(key)
     return icon(name) if name else None
+
+
+#: 应用窗口/任务栏图标多档尺寸：Wayland xdg_toplevel_icon_v1、X11 与 Windows
+#: 均会按需挑选对应像素缓冲，覆盖标题栏(16/24)、任务栏(32/48/96)与切换器(128/256)
+_APP_ICON_SIZES = (16, 24, 32, 48, 64, 96, 128, 256)
+
+
+def app_icon_path() -> Optional[Path]:
+    """定位应用主图标（``app_icon.png`` / ``resources/icon.png``）。
+
+    兼容源码直接运行、``pip install`` 安装包与 PyInstaller 打包（``_MEIPASS``）。
+    """
+    here = Path(__file__).resolve().parent
+    candidates = [
+        here / "app_icon.png",
+        here.parent.parent / "resources" / "icon.png",
+    ]
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        base = Path(meipass)
+        candidates.extend([
+            base / "writerstudio" / "ui" / "app_icon.png",
+            base / "resources" / "icon.png",
+        ])
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
+def app_icon() -> QIcon:
+    """加载应用主图标（含多档平滑缩放位图，供应用与主窗口绑定）。"""
+    path = app_icon_path()
+    if path is None:
+        return QIcon()
+    src = QPixmap(str(path))
+    if src.isNull():
+        return QIcon()
+    out = QIcon()
+    for size in _APP_ICON_SIZES:
+        if src.width() == size and src.height() == size:
+            out.addPixmap(src)
+        else:
+            out.addPixmap(
+                src.scaled(
+                    size, size,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+    return out

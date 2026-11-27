@@ -18,6 +18,8 @@ ROOT = Path(SPECPATH)
 datas = [
     (str(ROOT / "writerstudio" / "fonts" / "builtin"),
      "writerstudio/fonts/builtin"),
+    (str(ROOT / "writerstudio" / "ui" / "app_icon.png"),
+     "writerstudio/ui"),
 ]
 # 主题 QSS/JSON 与图标字体（hooks-contrib 之外的保险收集）
 datas += collect_data_files("qdarktheme")

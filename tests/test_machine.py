@@ -1096,3 +1096,312 @@ def test_pen_test_lines_and_link_pen_up_down():
         assert "G1 G90 Z0 F3000" in fake.out_lines
     finally:
         link.disconnect()
+
+
+# ===================================================== 自由暂停 / 断点续写
+def test_link_pause_stays_paused_through_run_idle_jog_status_polls():
+    """暂停后控制器回报 Run/Idle/Jog 均不得覆盖 PAUSED，仅 Alarm 可打断。"""
+    cfg = GCodeConfig(pen_mode=PEN_Z, pen_up_z=0.0, pen_down_z=6.0,
+                      pen_z_feed=12000.0)
+    fake = FakeSerial(simulate_full=True)
+    link = GrblLink()
+    link._greeting = False
+    link.connect_backend(fake)
+    try:
+        link.load_job_lines([
+            "G21", "G90", "G1 Z0 F12000", "G0 X10 Y10",
+            "G1 Z6 F12000", "G1 X20 Y10 F4400", "G1 X30 Y10 F4400",
+        ])
+        link.pause(pen_cfg=cfg)
+        assert link.state is State.PAUSED
+        assert link.is_paused
+        for raw in (
+            "<Run|MPos:15.000,10.000,6.000|FS:4400,0>\n",
+            "<Idle|MPos:20.000,10.000,0.000|FS:0,0>\n",
+            "<Jog|MPos:35.000,10.000,0.000|FS:2500,0>\n",
+        ):
+            fake.feed(raw)
+            time.sleep(0.05)
+            assert link.state is State.PAUSED
+            assert link.is_paused
+        # 报警具有最高优先级，必须能打断暂停
+        fake.feed("<Alarm|MPos:35.000,10.000,0.000>\n")
+        assert _wait(lambda: link.state is State.ALARM, timeout=2.0)
+        assert not link.is_paused
+    finally:
+        link.disconnect()
+
+
+def test_link_multiple_free_pause_and_resume_preserves_exact_order():
+    """自由多次暂停/继续：落笔处暂停抬笔再落回，空程处暂停不误落笔，全序零丢行零重复。"""
+    cfg = GCodeConfig(pen_mode=PEN_Z, pen_up_z=0.0, pen_down_z=6.0,
+                      pen_z_feed=12000.0)
+    fake = FakeSerial(simulate_full=True)
+    link = GrblLink()
+    link._greeting = False
+    link.single_step = True
+    link.connect_backend(fake)
+    job = [
+        "G21",
+        "G90",
+        "G1 Z0 F12000",
+        "G0 X10 Y10",
+        "G1 Z6 F12000",
+        "G1 X20 Y10 F4400",
+        "G1 X30 Y10 F4400",
+        "G1 Z0 F12000",
+        "G0 X10 Y20",
+        "G1 Z6 F12000",
+        "G1 X20 Y20 F4400",
+        "G1 X30 Y20 F4400",
+        "G1 Z0 F12000",
+    ]
+    try:
+        link.load_job_lines(job)
+
+        def step_until(target: str) -> None:
+            end = time.time() + 3.0
+            while time.time() < end:
+                if target in fake.out_lines:
+                    return
+                fake.feed("ok\n")
+                time.sleep(0.02)
+            raise AssertionError(f"等待 {target!r} 超时，已发：{fake.out_lines}")
+
+        # 1) 写到第一笔中途 G1 X20 Y10 F4400 → 暂停
+        step_until("G1 X20 Y10 F4400")
+        link.pause(pen_cfg=cfg)
+        assert link.state is State.PAUSED
+        assert link.pause_point == (6, (20.0, 10.0))
+        # 释放前一行 ok → 应紧接着发出抬笔 G1 Z0 F12000，且不再发 G1 X30 Y10
+        fake.feed("ok\n")
+        assert _wait(lambda: fake.out_lines[-1] == "G1 Z0 F12000", timeout=2.0)
+        fake.feed("ok\n")
+        time.sleep(0.08)
+        assert "G1 X30 Y10 F4400" not in fake.out_lines
+
+        # 继续 → 应先落笔 G1 Z6 F12000，再精准续写 G1 X30 Y10 F4400
+        n_before_resume = len(fake.out_lines)
+        link.resume()
+        assert _wait(lambda: len(fake.out_lines) > n_before_resume, timeout=2.0)
+        assert fake.out_lines[n_before_resume] == "G1 Z6 F12000"
+        step_until("G1 X30 Y10 F4400")
+
+        # 2) 走到空程 G0 X10 Y20（已抬笔）→ 再次暂停
+        step_until("G0 X10 Y20")
+        n_at_travel_pause = len(fake.out_lines)
+        link.pause(pen_cfg=cfg)
+        assert link.state is State.PAUSED
+        assert link.pause_point == (9, (10.0, 20.0))
+        fake.feed("ok\n")
+        time.sleep(0.08)
+        # 已明确抬笔，无需重复抬笔
+        assert len(fake.out_lines) == n_at_travel_pause
+        # 继续 → 空程暂停绝不额外注入落笔，直接发下一条作业行 G1 Z6 F12000
+        link.resume()
+        assert _wait(lambda: len(fake.out_lines) > n_at_travel_pause, timeout=2.0)
+        assert fake.out_lines[n_at_travel_pause] == "G1 Z6 F12000"
+
+        # 3) 第二笔中途 G1 X20 Y20 F4400 → 第三次暂停并继续直至全部完成
+        step_until("G1 X20 Y20 F4400")
+        link.pause(pen_cfg=cfg)
+        fake.feed("ok\n")
+        assert _wait(lambda: fake.out_lines[-1] == "G1 Z0 F12000", timeout=2.0)
+        fake.feed("ok\n")
+        time.sleep(0.06)
+        link.resume()
+        fake.simulate_full = False
+        fake.feed("ok\n")
+        assert _wait(lambda: link.progress() == (len(job), len(job)), timeout=3.0)
+
+        # 验证所有 XY 移动行严格按原序出现恰好一次，零丢行零重复
+        xy_sent = [ln for ln in fake.out_lines
+                   if ln.startswith(("G0 X", "G1 X"))]
+        xy_want = [ln for ln in job if ln.startswith(("G0 X", "G1 X"))]
+        assert xy_sent == xy_want
+    finally:
+        link.disconnect()
+
+
+def test_link_pause_jog_away_and_resume_returns_to_last_pause_xy():
+    """暂停期间手动 Jog 挪开笔头，继续时自动先抬笔清偏移回最后暂停坐标，再落笔续写。"""
+    cfg = GCodeConfig(pen_mode=PEN_Z, pen_up_z=0.0, pen_down_z=6.0,
+                      pen_z_feed=12000.0)
+    fake = FakeSerial(simulate_full=True)
+    link = GrblLink()
+    link._greeting = False
+    link.single_step = True
+    link.connect_backend(fake)
+    job = [
+        "G21", "G90", "G1 Z0 F12000", "G0 X10 Y18.2",
+        "G1 Z6 F12000", "G1 X42.5 Y18.2 F4400", "G1 X60 Y18.2 F4400",
+        "G1 Z0 F12000",
+    ]
+    try:
+        link.load_job_lines(job)
+        end = time.time() + 3.0
+        while time.time() < end and "G1 X42.5 Y18.2 F4400" not in fake.out_lines:
+            fake.feed("ok\n")
+            time.sleep(0.02)
+        assert "G1 X42.5 Y18.2 F4400" in fake.out_lines
+
+        link.pause(pen_cfg=cfg)
+        fake.feed("ok\n")
+        assert _wait(lambda: fake.out_lines[-1] == "G1 Z0 F12000", timeout=2.0)
+        fake.feed("ok\n")
+        time.sleep(0.05)
+
+        # 暂停期间手动点动挪开笔头（如换笔）
+        link.jog(30.0, 0.0, feed=2500.0)
+        fake.feed("<Jog|MPos:72.500,18.200,0.000>\n")
+        time.sleep(0.05)
+        assert link.state is State.PAUSED
+
+        idx_resume_start = len(fake.out_lines)
+        fake.simulate_full = False
+        link.resume()
+        assert _wait(lambda: link.progress() == (len(job), len(job)), timeout=3.0)
+
+        tail = fake.out_lines[idx_resume_start:]
+        # 严格顺序：确保抬笔 → 清偏移 → 精准回最后暂停坐标 → 落笔 → 续写下一段
+        i_up = tail.index("G1 Z0 F12000")
+        i_g10 = tail.index("G10 L2 P1 X0 Y0 Z0")
+        i_g92 = tail.index("G92.1")
+        i_back = tail.index("G90 G0 X42.5 Y18.2")
+        i_down = tail.index("G1 Z6 F12000")
+        i_next = tail.index("G1 X60 Y18.2 F4400")
+        assert i_up < i_g10 < i_g92 < i_back < i_down < i_next
+    finally:
+        link.disconnect()
+
+
+def test_link_pause_during_taper_restores_exact_z_and_modal_feed():
+    """斜坡中途暂停恢复精确 Z 高度，并自动恢复被 Z 速覆盖的模态进给率 F。"""
+    cfg = GCodeConfig(pen_mode=PEN_Z, pen_up_z=0.0, pen_down_z=6.0,
+                      pen_z_feed=12000.0)
+    fake = FakeSerial(simulate_full=True)
+    link = GrblLink()
+    link._greeting = False
+    link.single_step = True
+    link.connect_backend(fake)
+    job = [
+        "G21", "G90", "G1 Z0 F12000", "G0 X0 Y0",
+        "G1 Z6 F12000",
+        "G1 X10 Y20 Z4.2 F4400",   # 斜坡过渡段（非满压）
+        "G1 X20 Y20",              # 故意省略 F，依赖模态进给 4400
+        "G1 Z0 F12000",
+    ]
+    try:
+        link.load_job_lines(job)
+        end = time.time() + 3.0
+        while time.time() < end and "G1 X10 Y20 Z4.2 F4400" not in fake.out_lines:
+            fake.feed("ok\n")
+            time.sleep(0.02)
+
+        link.pause(pen_cfg=cfg)
+        fake.feed("ok\n")
+        assert _wait(lambda: fake.out_lines[-1] == "G1 Z0 F12000", timeout=2.0)
+        fake.feed("ok\n")
+        time.sleep(0.05)
+
+        idx = len(fake.out_lines)
+        fake.simulate_full = False
+        link.resume()
+        assert _wait(lambda: link.progress() == (len(job), len(job)), timeout=3.0)
+
+        tail = fake.out_lines[idx:]
+        # 落回斜坡高度 Z4.2，再恢复模态进给 F4400，再续写省略 F 的 G1 X20 Y20
+        assert tail[:3] == ["G1 Z4.2 F12000", "F4400", "G1 X20 Y20"]
+    finally:
+        link.disconnect()
+
+
+def test_link_rapid_pause_resume_cancel_unsent_lift_and_keep_reposition():
+    """极速暂停/继续：未发出的抬笔自动无痕取消；回位未发完再暂停不丢失断点回位。"""
+    cfg = GCodeConfig(pen_mode=PEN_Z, pen_up_z=0.0, pen_down_z=6.0,
+                      pen_z_feed=12000.0)
+    fake = FakeSerial(simulate_full=True)
+    link = GrblLink()
+    link._greeting = False
+    link.single_step = True
+    link.connect_backend(fake)
+    job = [
+        "G21", "G90", "G1 Z0 F12000", "G0 X10 Y10",
+        "G1 Z6 F12000", "G1 X25 Y10 F4400", "G1 X40 Y10 F4400",
+        "G1 Z0 F12000",
+    ]
+    try:
+        link.load_job_lines(job)
+        end = time.time() + 3.0
+        while time.time() < end and "G1 X25 Y10 F4400" not in fake.out_lines:
+            fake.feed("ok\n")
+            time.sleep(0.02)
+
+        # 1) 缓冲被当前在途行占住时：pause → 尚未发抬笔 → 立刻 resume → 零多余抬落笔
+        n0 = len(fake.out_lines)
+        link.pause(pen_cfg=cfg)
+        link.resume()
+        fake.feed("ok\n")
+        assert _wait(lambda: len(fake.out_lines) > n0, timeout=2.0)
+        assert fake.out_lines[n0] == "G1 X40 Y10 F4400"
+
+        # 2) 已抬笔 → Jog → 恢复（堵在队列里没发完）→ 立刻再次暂停 → 再恢复 → 仍精准回 (40, 10)
+        link.pause(pen_cfg=cfg)
+        fake.feed("ok\n")
+        assert _wait(lambda: fake.out_lines[-1] == "G1 Z0 F12000", timeout=2.0)
+        # 注意此时抬笔行还在途未 ack，single_step 阻塞后续发出
+        link.jog(15.0, 0.0, feed=2500.0)
+        link.resume()               # 回位与落笔入队但受 single_step 暂未发出
+        link.pause(pen_cfg=cfg)     # 极速再次暂停，撤销未发恢复行但保留回位需求
+        assert link.state is State.PAUSED
+
+        idx = len(fake.out_lines)
+        link.resume()
+        fake.simulate_full = False
+        fake.feed("ok\n")
+        assert _wait(lambda: link.progress() == (len(job), len(job)), timeout=3.0)
+        tail = fake.out_lines[idx:]
+        assert "G90 G0 X40 Y10" in tail
+        assert "G1 Z6 F12000" in tail
+        assert tail.index("G90 G0 X40 Y10") < tail.index("G1 Z6 F12000")
+    finally:
+        link.disconnect()
+
+
+def test_link_pause_at_travel_with_jog_returns_without_lowering_pen():
+    """空程抬笔处暂停后手动 Jog 挪位：继续时精准回到断点坐标但绝不提前落笔划纸。"""
+    cfg = GCodeConfig(pen_mode=PEN_Z, pen_up_z=0.0, pen_down_z=6.0,
+                      pen_z_feed=12000.0)
+    fake = FakeSerial(simulate_full=True)
+    link = GrblLink()
+    link._greeting = False
+    link.single_step = True
+    link.connect_backend(fake)
+    job = [
+        "G21", "G90", "G1 Z0 F12000", "G0 X50 Y60",
+        "G0 X80 Y60", "G1 Z6 F12000", "G1 X90 Y60 F4400", "G1 Z0 F12000",
+    ]
+    try:
+        link.load_job_lines(job)
+        end = time.time() + 3.0
+        while time.time() < end and "G0 X50 Y60" not in fake.out_lines:
+            fake.feed("ok\n")
+            time.sleep(0.02)
+
+        link.pause(pen_cfg=cfg)
+        fake.feed("ok\n")
+        time.sleep(0.05)
+        link.jog(20.0, 0.0, feed=2500.0)
+
+        idx = len(fake.out_lines)
+        fake.simulate_full = False
+        link.resume()
+        assert _wait(lambda: link.progress() == (len(job), len(job)), timeout=3.0)
+        tail = fake.out_lines[idx:]
+        # 回到 (50, 60) 后紧跟空程 G0 X80 Y60，两者之间绝无多余 G1 Z6 落笔
+        i_back = tail.index("G90 G0 X50 Y60")
+        i_travel = tail.index("G0 X80 Y60")
+        assert i_back < i_travel
+        assert "G1 Z6 F12000" not in tail[i_back:i_travel]
+    finally:
+        link.disconnect()

@@ -41,6 +41,7 @@ include = ["writerstudio*"]
 # 不声明的话 pip 安装出的包里没有这些文件，CI 等源码树之外的安装全挂
 [tool.setuptools.package-data]
 "writerstudio.fonts" = ["builtin/**/*"]
+"writerstudio.ui" = ["app_icon.png"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
