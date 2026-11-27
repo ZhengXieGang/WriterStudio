@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -47,10 +48,15 @@ class PerturbPanel(QWidget):
     DEBOUNCE_MS = 80
 
     def __init__(self, params: Optional[PerturbParams] = None,
-                 size_hint: float = 10.0, parent: Optional[QWidget] = None) -> None:
+                 size_hint: float = 10.0, parent: Optional[QWidget] = None,
+                 scrollable: bool = True, columns: int = 1,
+                 vector_only: bool = False) -> None:
         super().__init__(parent)
         self._params = (params or PerturbParams()).clone()
         self._size_hint = size_hint
+        self._scrollable = bool(scrollable)
+        self._columns = 2 if int(columns) >= 2 else 1
+        self._vector_only = bool(vector_only)
         self._loading = False
         self._build_ui()
         # 参数改动防抖：spinbox 按住连点/拖动时每个刻度都会触发一次
@@ -93,6 +99,9 @@ class PerturbPanel(QWidget):
         top2 = QHBoxLayout()
         top2.addWidget(QLabel(tr("预设:")))
         self.preset_combo = QComboBox()
+        self.preset_combo.setSizeAdjustPolicy(
+            QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.preset_combo.setMinimumContentsLength(5)
         for name in _PRESET_ORDER:
             # 显示文字翻译，但 userData 保留内部预设键（PRESETS 的键是中文）
             self.preset_combo.addItem(tr(name), name)
@@ -124,18 +133,14 @@ class PerturbPanel(QWidget):
         self.intensity_spin.setSingleStep(0.05)
         self.intensity_spin.setDecimals(2)
         self.intensity_spin.setSuffix(" ×")
+        self.intensity_spin.setMaximumWidth(104)
         self.intensity_spin.valueChanged.connect(self._on_intensity_spin)
         inten_row.addWidget(self.intensity_slider, 1)
         inten_row.addWidget(self.intensity_spin)
         outer.addLayout(inten_row)
 
-        # 参数区（可滚动）
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
+        # 参数区（外层未自带滚动区时用无边框 QScrollArea，消除「框套框」）
         body = QWidget()
-        vbox = QVBoxLayout(body)
-        vbox.setContentsMargins(0, 0, 0, 0)
-
         self._spin: dict[str, QDoubleSpinBox] = {}
 
         g_char = QGroupBox(tr("字符级扰动"))
@@ -148,7 +153,6 @@ class PerturbPanel(QWidget):
         self._spin["char_shear_sigma"].setToolTip(
             tr("字符整体斜切（x 随 y 线性偏移），让同一字的体态/肩线各不相同；\n"
             "旋转保持正交，产生不了这种形态变化。"))
-        vbox.addWidget(g_char)
 
         g_line = QGroupBox(tr("行级扰动"))
         f2 = QFormLayout(g_line)
@@ -166,7 +170,6 @@ class PerturbPanel(QWidget):
         self._spin["word_gap_em"].setToolTip(
             tr("词与词、标点之后额外留出的空隙（字号的倍数），\n"
             "词内字距自动聚拢——词内紧、词间松。0 = 关闭分组。"))
-        vbox.addWidget(g_line)
 
         # 基线起伏：行尺度的随机缓弧 + 中尺度游走（每行形状都不同、
         # 行尾不回到行首高度）。旧的固定周期正弦波一眼就是机器画的。
@@ -180,7 +183,6 @@ class PerturbPanel(QWidget):
         self._spin["sine_wavelength"].setToolTip(
             tr("行内起伏的空间尺度：越大越接近整行一道缓弧，\n"
             "越小则行内多几个缓和的起伏（仍非周期性波浪）。"))
-        vbox.addWidget(g_sine)
 
         g_stroke = QGroupBox(tr("笔画级扰动"))
         f4 = QFormLayout(g_stroke)
@@ -193,7 +195,6 @@ class PerturbPanel(QWidget):
             tr("单笔画沿自身走向随机伸缩，让笔画长短/舒展程度各不相同。"))
         self._spin["stroke_trim_mm"].setToolTip(
             tr("每条笔画两端各随机剪掉 0~该值，起收笔长短参差、更接近手写。"))
-        vbox.addWidget(g_stroke)
 
         # 线条起伏：只作用于图形线条（矢量图/表格线/边框/签名等），
         # 不作用于文字笔画——弯折文字会让字形变形
@@ -216,7 +217,6 @@ class PerturbPanel(QWidget):
         self._spin["line_tremor"].setToolTip(
             tr("快写时的手部不稳（2~4mm 尺度的小幅波动）：中段运笔快处明显、\n"
             "两端慢处收敛，且成段忽强忽弱；只作用于图形线条。"))
-        vbox.addWidget(g_wobble)
 
         g_misc = QGroupBox(tr("笔锋与平滑"))
         f5 = QFormLayout(g_misc)
@@ -227,7 +227,6 @@ class PerturbPanel(QWidget):
             "0.8~1.5mm 适合 15~20mm 字。只需笔锋也生效（无需启用整体扰动）。"))
         self._spin["smoothing"].setToolTip(
             tr("对扰动后的笔画做邻点平均的轻微平滑，削弱折线毛刺。"))
-        vbox.addWidget(g_misc)
 
         g_out = QGroupBox(tr("输出质量"))
         f7 = QFormLayout(g_out)
@@ -236,15 +235,63 @@ class PerturbPanel(QWidget):
             tr("对扰动输出做 Douglas–Peucker 抽稀（与导出抽稀同类），\n"
             "减少微小线段让高速书写更顺滑；0=不抽稀。0.1~0.3 一般够用，\n"
             "过大会明显失真。"))
-        vbox.addWidget(g_out)
 
-        vbox.addStretch(1)
-        scroll.setWidget(body)
-        outer.addWidget(scroll, 1)
+        if self._vector_only:
+            # 矢量图形（SVG 等）不含字符/行概念：隐藏不适用的文本分组，
+            # 将真正生效的「线条起伏」提到最上方，但保留控件以维持数据往返一致。
+            for unused in (g_char, g_line, g_sine):
+                unused.setParent(body)
+                unused.setVisible(False)
+            if self._columns == 2:
+                cols = QHBoxLayout(body)
+                cols.setContentsMargins(0, 0, 0, 0)
+                cols.setSpacing(8)
+                left, right = QVBoxLayout(), QVBoxLayout()
+                left.addWidget(g_wobble)
+                left.addWidget(g_misc)
+                left.addStretch(1)
+                right.addWidget(g_stroke)
+                right.addWidget(g_out)
+                right.addStretch(1)
+                cols.addLayout(left, 1)
+                cols.addLayout(right, 1)
+            else:
+                vbox = QVBoxLayout(body)
+                vbox.setContentsMargins(0, 0, 0, 0)
+                for g in (g_wobble, g_stroke, g_misc, g_out):
+                    vbox.addWidget(g)
+                vbox.addStretch(1)
+        elif self._columns == 2:
+            # 宽屏对话框双栏布局：避免 600px+ 巨型空心输入框，且一屏浏览全组参数
+            cols = QHBoxLayout(body)
+            cols.setContentsMargins(0, 0, 0, 0)
+            cols.setSpacing(8)
+            left, right = QVBoxLayout(), QVBoxLayout()
+            for g in (g_char, g_stroke, g_misc):
+                left.addWidget(g)
+            left.addStretch(1)
+            for g in (g_line, g_sine, g_wobble, g_out):
+                right.addWidget(g)
+            right.addStretch(1)
+            cols.addLayout(left, 1)
+            cols.addLayout(right, 1)
+        else:
+            vbox = QVBoxLayout(body)
+            vbox.setContentsMargins(0, 0, 0, 0)
+            for g in (g_char, g_line, g_sine, g_stroke, g_wobble, g_misc, g_out):
+                vbox.addWidget(g)
+            vbox.addStretch(1)
+
+        if self._scrollable:
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.NoFrame)
+            scroll.setWidget(body)
+            outer.addWidget(scroll, 1)
+        else:
+            outer.addWidget(body, 1)
         # 与机器控制面板同规格（用户要求各板块观感一致）：
-        # 高度取全局 FIELD_HEIGHT、最小宽 88px、按钮最小高 30px
-        # 80px（而非机器面板的 88px）：英文标签更长，88 时窄停靠栏会多出
-        # 一条 4px 的横向滚动条；80 仍足够显示「0.000 比例」等常用值。
+        # 高度取全局 FIELD_HEIGHT、最小宽 80px、按钮最小高 30px
         unify_inputs(self, min_width=80, button_height=30)
 
     def _add(self, form: QFormLayout, field: str, label: str,
@@ -380,18 +427,20 @@ class PerturbDialog(QDialog):
     """独立的扰动参数对话框（用于矢量/静态对象，非文本）。"""
 
     def __init__(self, params: PerturbParams, title: str | None = None,
-                 size_hint: float = 10.0, parent: Optional[QWidget] = None) -> None:
+                 size_hint: float = 10.0, parent: Optional[QWidget] = None,
+                 vector_only: bool = False) -> None:
         super().__init__(parent)
         self.setWindowTitle(tr(title) if title else tr("手写扰动"))
         root = QVBoxLayout(self)
-        self.panel = PerturbPanel(params=params, size_hint=size_hint)
+        self.panel = PerturbPanel(params=params, size_hint=size_hint,
+                                  columns=2, vector_only=vector_only)
         root.addWidget(self.panel, 1)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
         localize_dialog_buttons(self)
-        fit_dialog_to_screen(self, 430, 620)
+        fit_dialog_to_screen(self, 680, 560)
 
     def result_params(self) -> PerturbParams:
         return self.panel.params()

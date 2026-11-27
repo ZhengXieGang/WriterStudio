@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -48,8 +49,8 @@ from ..fonts.manager import FontManager
 from ..fonts.preview import SAMPLE_CHARS, load_preview
 from . import filedialog
 from .icons import action_icon
-from .style import (ask_yes_no, localize_dialog_buttons, set_role,
-                    unify_inputs)
+from .style import (FIELD_HEIGHT, ask_yes_no, localize_dialog_buttons,
+                    set_role, unify_inputs)
 from .theme import semantic_color
 
 _KIND_LABEL = {
@@ -306,6 +307,7 @@ class FontPanel(QDockWidget):
 
     def __init__(self, manager: FontManager, parent: Optional[QWidget] = None) -> None:
         super().__init__(tr("字体库"), parent)
+        self.setObjectName("dock_fonts")
         self.manager = manager
         self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         self._worker: Optional[_FontInfoWorker] = None
@@ -327,20 +329,37 @@ class FontPanel(QDockWidget):
         body = QWidget()
         layout = QVBoxLayout(body)
         layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
 
-        # 搜索 + 类型过滤
-        filt = QHBoxLayout()
+        # 搜索框独立一行，确保英文占位符完整显示不被类型下拉挤断
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText(tr("搜索字体名…"))
         self.search_edit.setClearButtonEnabled(True)
         self.search_edit.textChanged.connect(lambda _: self._populate())
-        filt.addWidget(self.search_edit, 1)
+        layout.addWidget(self.search_edit)
+
+        # 类型筛选 + 已隐藏 + 重新扫描（紧凑第二行）
+        filt = QHBoxLayout()
+        filt.setSpacing(4)
         self.kind_combo = QComboBox()
+        self.kind_combo.setSizeAdjustPolicy(
+            QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.kind_combo.setMinimumContentsLength(5)
         self.kind_combo.addItem(tr("全部类型"), "")
         for key, label in _KIND_LABEL.items():
             self.kind_combo.addItem(tr(label), key)
         self.kind_combo.currentIndexChanged.connect(self._on_kind_filter)
-        filt.addWidget(self.kind_combo)
+        filt.addWidget(self.kind_combo, 1)
+
+        hidden_btn = QPushButton(tr("已隐藏…"))
+        hidden_btn.setToolTip(tr("查看并恢复已隐藏的字体"))
+        hidden_btn.clicked.connect(self._show_hidden_dialog)
+        filt.addWidget(hidden_btn, 0)
+
+        self._reload_btn = QPushButton()
+        self._reload_btn.setToolTip(tr("重新扫描"))
+        self._reload_btn.clicked.connect(self._rescan)
+        filt.addWidget(self._reload_btn, 0)
         layout.addLayout(filt)
 
         self.info = QLabel(tr("—"))
@@ -352,10 +371,14 @@ class FontPanel(QDockWidget):
         self.list.setIconSize(QSize(_THUMB_W, _THUMB_H))
         self.list.setUniformItemSizes(True)
         self.list.setSpacing(1)
+        self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.list.setTextElideMode(Qt.ElideRight)
         self.list.currentItemChanged.connect(self._on_current)
         layout.addWidget(self.list, 1)
 
+        # 底部按钮规整为 2 行等宽网格（消除三行参差留白，释放字体预览区高度）
         btns = QHBoxLayout()
+        btns.setSpacing(4)
         imp = QPushButton(tr("导入字体…"))
         self._attach_icon(imp, "import_font")
         imp.clicked.connect(self._import)
@@ -368,44 +391,65 @@ class FontPanel(QDockWidget):
         layout.addLayout(btns)
 
         btns2 = QHBoxLayout()
+        btns2.setSpacing(4)
         self.pin_btn = QPushButton(tr("置顶"))
         self.pin_btn.setToolTip(tr("把常用字体排到列表/下拉的最前面，再次点击取消置顶"))
         self._attach_icon(self.pin_btn, "pin")
         self.pin_btn.clicked.connect(self._toggle_pin)
-        hide_btn = QPushButton(tr("隐藏"))
-        hide_btn.setToolTip(tr("在字体库与各下拉列表中隐藏该字体（文件保留在原处）"))
-        self._attach_icon(hide_btn, "hide")
-        hide_btn.clicked.connect(self._hide_current)
-        hidden_btn = QPushButton(tr("已隐藏…"))
-        hidden_btn.setToolTip(tr("查看并恢复已隐藏的字体"))
-        hidden_btn.clicked.connect(self._show_hidden_dialog)
-        rm = QPushButton(tr("移除"))
-        rm.setToolTip(tr("从字体库移除该字体；用户字体删除文件，\n"
+        self._hide_btn = QPushButton(tr("隐藏"))
+        self._hide_btn.setToolTip(tr("在字体库与各下拉列表中隐藏该字体（文件保留在原处）"))
+        self._attach_icon(self._hide_btn, "hide")
+        self._hide_btn.clicked.connect(self._hide_current)
+        self._remove_btn = QPushButton(tr("移除"))
+        self._remove_btn.setToolTip(tr("从字体库移除该字体；用户字体删除文件，\n"
                       "内置字体仅从列表移除（文件保留，可在「已隐藏…」恢复）"))
-        self._attach_icon(rm, "delete")
-        rm.clicked.connect(self._remove)
-        reload_btn = QPushButton(tr("重新扫描"))
-        reload_btn.clicked.connect(self._rescan)
-        self._attach_icon(reload_btn, "rescan")
-        # 五个按钮分两行：挤一行时面板最小宽被撑到 ~450px，远超默认
-        # 停靠宽 280px——Qt 会强制把整列撑宽，画布被挤出画面外
+        self._attach_icon(self._remove_btn, "delete")
+        self._remove_btn.clicked.connect(self._remove)
         btns2.addWidget(self.pin_btn)
-        btns2.addWidget(hide_btn)
-        btns2.addWidget(hidden_btn)
-        btns2.addStretch(1)
+        btns2.addWidget(self._hide_btn)
+        btns2.addWidget(self._remove_btn)
         layout.addLayout(btns2)
-        btns3 = QHBoxLayout()
-        btns3.addWidget(rm)
-        btns3.addWidget(reload_btn)
-        btns3.addStretch(1)
-        layout.addLayout(btns3)
 
         self.setWidget(body)
-        # 只在本面板**实际可见**时才后台加载字形信息。字体面板默认与
-        # 手写扰动/参考层合并为标签组，非当前标签时不可见 → 不加载，避免
-        # 每次打开主窗口都拉起一轮全字库解析（测试/启动都更快）。
+        # 统一控件高度、按钮最小高与聚焦滚轮保护
+        unify_inputs(self, button_height=30)
+        self._style_reload_button()
+
+        # 顶部辅助按钮用 Fixed 策略防越界，底部等宽行用 Ignored 策略防英文撑宽左 Dock
+        fm = self.fontMetrics()
+        hid_w = max(56, fm.horizontalAdvance(hidden_btn.text()) + 16)
+        hidden_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        hidden_btn.setFixedWidth(hid_w)
+        for btn, labels in (
+            (imp, (imp.text(),)),
+            (addir, (addir.text(),)),
+            (self.pin_btn, (tr("置顶"), tr("取消置顶"))),
+            (self._hide_btn, (self._hide_btn.text(),)),
+            (self._remove_btn, (self._remove_btn.text(),)),
+        ):
+            btn.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+            icon_pad = 22 if not btn.icon().isNull() else 0
+            btn.setMinimumWidth(max(fm.horizontalAdvance(t) for t in labels) + 12 + icon_pad)
+
+        # 只在本面板**实际可见**时才后台加载字形信息。
         self._populate()
-        unify_inputs(self)
+        self._update_pin_button(self.list.currentItem())
+
+    def _style_reload_button(self) -> None:
+        """重新扫描按钮：30×30 紧凑图标，无图标库时回退固定宽文字。"""
+        btn = self._reload_btn
+        ic = action_icon("rescan")
+        btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        if ic is not None:
+            btn.setText("")
+            btn.setIcon(ic)
+            btn.setFixedSize(FIELD_HEIGHT, FIELD_HEIGHT)
+        else:
+            btn.setIcon(QIcon())
+            txt = tr("重新扫描")
+            btn.setText(txt)
+            w = max(56, self.fontMetrics().horizontalAdvance(txt) + 16)
+            btn.setFixedSize(w, FIELD_HEIGHT)
 
     def _attach_icon(self, button: QPushButton, key: str) -> None:
         """给按钮挂图标并登记动作键，供切主题时重建（refresh_icons）。"""
@@ -419,6 +463,8 @@ class FontPanel(QDockWidget):
         for button, key in self._icon_buttons:
             ic = action_icon(key)
             button.setIcon(ic if ic is not None else QIcon())
+        if hasattr(self, "_reload_btn"):
+            self._style_reload_button()
 
     # --------------------------------------------------------------- 显示/隐藏
     def showEvent(self, event) -> None:
@@ -650,11 +696,15 @@ class FontPanel(QDockWidget):
 
     # ------------------------------------------------------------- 置顶/隐藏
     def _update_pin_button(self, item: Optional[QListWidgetItem]) -> None:
-        if item is None:
-            self.pin_btn.setEnabled(False)
+        has = item is not None
+        self.pin_btn.setEnabled(has)
+        if hasattr(self, "_hide_btn"):
+            self._hide_btn.setEnabled(has)
+        if hasattr(self, "_remove_btn"):
+            self._remove_btn.setEnabled(has)
+        if not has:
             self.pin_btn.setText(tr("置顶"))
             return
-        self.pin_btn.setEnabled(True)
         self.pin_btn.setText(
             tr('取消置顶') if self.manager.is_pinned(item.data(Qt.UserRole))
             else tr('置顶'))
@@ -710,6 +760,7 @@ class FontPanel(QDockWidget):
         btns.rejected.connect(dlg.reject)
         v.addWidget(btns)
         localize_dialog_buttons(dlg)
+        unify_inputs(dlg, button_height=30)
         if dlg.exec() == QDialog.Accepted:
             restored = [names[lst.row(i)] for i in lst.selectedIndexes()]
             for n in restored:

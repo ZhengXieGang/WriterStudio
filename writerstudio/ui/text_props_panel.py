@@ -41,8 +41,13 @@ class TextPropsPanel(QWidget):
         v.setContentsMargins(0, 0, 0, 0)
         box = QGroupBox(tr("文字属性"))
         form = QFormLayout(box)
+        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        form.setRowWrapPolicy(QFormLayout.WrapLongRows)
 
         self.font_combo = QComboBox()
+        self.font_combo.setSizeAdjustPolicy(
+            QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.font_combo.setMinimumContentsLength(6)
         self.font_combo.currentIndexChanged.connect(
             lambda _i: self._on_change("font"))
         form.addRow(tr("字体"), self.font_combo)
@@ -70,8 +75,8 @@ class TextPropsPanel(QWidget):
         form.addRow(tr("文本框宽度"), self.fw_spin)
 
         v.addWidget(box)
-        # 与同列的手写扰动面板同规格（高度取全局 FIELD_HEIGHT）
-        unify_inputs(self, min_width=88, button_height=30)
+        # 与同列的手写扰动面板同规格（min_width=80，避免英文长标签撑出横向滚动条）
+        unify_inputs(self, min_width=80, button_height=30)
 
     # ------------------------------------------------------------------ 内部
     def _on_change(self, field: str) -> None:

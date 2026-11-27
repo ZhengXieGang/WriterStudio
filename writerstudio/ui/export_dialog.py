@@ -8,7 +8,7 @@ PNG 的 DPI 决定位图像素尺寸（页面物理尺寸固定不变），对�
 from __future__ import annotations
 
 from ..i18n import tr, trf
-from .style import set_role
+from .style import set_role, unify_inputs
 
 from typing import Optional
 
@@ -53,6 +53,7 @@ class ExportOptionsDialog(QDialog):
         root = QVBoxLayout(self)
 
         self.dpi_spin: Optional[QSpinBox] = None
+        self._dpi_buttons: dict[int, QPushButton] = {}
         if is_png:
             row = QHBoxLayout()
             row.addWidget(QLabel(tr("分辨率"), self))
@@ -64,9 +65,12 @@ class ExportOptionsDialog(QDialog):
             row.addWidget(spin, 1)
             for v in PRESET_DPIS:
                 btn = QPushButton(str(v), self)
+                btn.setCheckable(True)
+                btn.setProperty("wsSegment", True)
                 btn.setToolTip(trf('设为 {v0} DPI', v0=v))
                 btn.clicked.connect(lambda _=False, v=v: spin.setValue(v))
                 row.addWidget(btn)
+                self._dpi_buttons[v] = btn
             root.addLayout(row)
             self.dpi_spin = spin
 
@@ -90,6 +94,7 @@ class ExportOptionsDialog(QDialog):
 
         if self.dpi_spin is not None:
             self.dpi_spin.valueChanged.connect(self._refresh)
+        unify_inputs(self, button_height=30)
         self._refresh()
 
     # ------------------------------------------------------------ 逻辑
@@ -109,7 +114,10 @@ class ExportOptionsDialog(QDialog):
             self._size_label.setText(
                 trf('输出尺寸：{v0:g} × {v1:g} mm（矢量图，1 单位 = 1 mm）', v0=self._page.width, v1=self._page.height))
             return
-        w, h = pixel_size(self._page, self.dpi())
+        cur = self.dpi()
+        for v, btn in self._dpi_buttons.items():
+            btn.setChecked(v == cur)
+        w, h = pixel_size(self._page, cur)
         text = (trf('输出尺寸：{v0} × {v1} 像素（页面 {v2:g} × {v3:g} mm）', v0=w, v1=h, v2=self._page.width, v3=self._page.height))
         if w * h > _LARGE_PIXELS:
             set_role(self._size_label, "danger")

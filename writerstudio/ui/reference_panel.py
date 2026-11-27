@@ -17,11 +17,16 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QDockWidget,
     QDoubleSpinBox,
+    QFormLayout,
+    QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSlider,
     QVBoxLayout,
     QWidget,
@@ -32,7 +37,7 @@ from ..i18n import tr, trf
 from ..core.geometry import AffineTransform, BBox
 from ..core.reference import KIND_IMAGE, KIND_SVG, REFERENCE_KINDS, ReferenceItem
 from .controller import DocumentController
-from .style import unify_inputs
+from .style import set_role, unify_inputs
 
 _ALIGN_LABELS = {"fit": "适应页边距", "center": "页面居中"}
 
@@ -52,36 +57,47 @@ class ReferencePanel(QDockWidget):
     def __init__(self, controller: DocumentController,
                  parent: Optional[QWidget] = None) -> None:
         super().__init__(tr("参考层"), parent)
+        self.setObjectName("dock_reference")
         self.controller = controller
         self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         self._loading = False
         self._cached_ids: list[str] = []
 
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         body = QWidget()
         root = QVBoxLayout(body)
         root.setContentsMargins(6, 6, 6, 6)
+        root.setSpacing(6)
 
         self.list = QListWidget()
-        self.list.setMinimumHeight(80)
+        self.list.setMinimumHeight(90)
+        self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.list.setTextElideMode(Qt.ElideRight)
         self.list.itemSelectionChanged.connect(self._on_selection)
         self.list.itemChanged.connect(self._on_item_changed)
         root.addWidget(self.list, 1)
 
-        # 透明度
+        # 透明度与旋转放入同一 QFormLayout，左侧标签对齐
+        form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+
         row = QHBoxLayout()
-        row.addWidget(QLabel(tr("透明度")))
         self.opacity = QSlider(Qt.Horizontal)
         self.opacity.setRange(5, 100)
         self.opacity.setValue(45)
         self.opacity.valueChanged.connect(self._on_opacity)
         row.addWidget(self.opacity, 1)
         self.opacity_label = QLabel("45%")
+        self.opacity_label.setMinimumWidth(38)
+        self.opacity_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         row.addWidget(self.opacity_label)
-        root.addLayout(row)
+        form.addRow(tr("透明度"), row)
 
-        # 旋转角度（精确对齐扫描件）
         arow = QHBoxLayout()
-        arow.addWidget(QLabel(tr("旋转")))
+        arow.setSpacing(4)
         self.angle_spin = QDoubleSpinBox()
         self.angle_spin.setRange(-180.0, 180.0)
         self.angle_spin.setDecimals(2)
@@ -91,10 +107,11 @@ class ReferencePanel(QDockWidget):
         self.angle_spin.editingFinished.connect(self._on_angle)
         self.angle_spin.valueChanged.connect(self._on_angle)
         arow.addWidget(self.angle_spin, 1)
-        reset = QPushButton(tr("归零"))
-        reset.clicked.connect(lambda: self.angle_spin.setValue(0.0))
-        arow.addWidget(reset)
-        root.addLayout(arow)
+        self._reset_angle_btn = QPushButton(tr("归零"))
+        self._reset_angle_btn.clicked.connect(lambda: self.angle_spin.setValue(0.0))
+        arow.addWidget(self._reset_angle_btn)
+        form.addRow(tr("旋转"), arow)
+        root.addLayout(form)
 
         self.lock_check = QCheckBox(tr("锁定（不可拖动/缩放）"))
         self.lock_check.toggled.connect(self._on_lock)
@@ -107,46 +124,72 @@ class ReferencePanel(QDockWidget):
         self.snap_resize_check.toggled.connect(self._on_snap_resize)
         root.addWidget(self.snap_resize_check)
 
-        # 操作按钮
-        grid = QHBoxLayout()
+        # ---- 添加参考层 ----
+        add_row = QHBoxLayout()
+        add_row.setSpacing(4)
         add_img = QPushButton(tr("添加图片…"))
         add_img.clicked.connect(self.addImageRequested.emit)
         add_svg = QPushButton(tr("添加 SVG…"))
         add_svg.clicked.connect(self.addSvgRequested.emit)
-        grid.addWidget(add_img)
-        grid.addWidget(add_svg)
-        root.addLayout(grid)
+        add_row.addWidget(add_img)
+        add_row.addWidget(add_svg)
+        root.addLayout(add_row)
 
-        grid2 = QHBoxLayout()
+        # ---- 对齐定位（2×2 规范网格，避免 3 按钮挤一行在英文下撑爆左栏）----
+        align_grid = QGridLayout()
+        align_grid.setContentsMargins(0, 0, 0, 0)
+        align_grid.setSpacing(4)
         fit = QPushButton(tr("适应页边距"))
         fit.clicked.connect(lambda: self._fit("fit"))
         center = QPushButton(tr("页面居中"))
         center.clicked.connect(lambda: self._fit("center"))
-        rm = QPushButton(tr("删除"))
-        rm.clicked.connect(self._delete)
-        grid2.addWidget(fit)
-        grid2.addWidget(center)
-        grid2.addWidget(rm)
-        root.addLayout(grid2)
-
-        grid3 = QHBoxLayout()
         snap_tl = QPushButton(tr("贴左上角"))
         snap_tl.clicked.connect(lambda: self._snap("top-left"))
         snap_c = QPushButton(tr("贴页中心"))
         snap_c.clicked.connect(lambda: self._snap("center"))
-        grid3.addWidget(snap_tl)
-        grid3.addWidget(snap_c)
-        root.addLayout(grid3)
+        align_grid.addWidget(fit, 0, 0)
+        align_grid.addWidget(center, 0, 1)
+        align_grid.addWidget(snap_tl, 1, 0)
+        align_grid.addWidget(snap_c, 1, 1)
+        align_grid.setColumnStretch(0, 1)
+        align_grid.setColumnStretch(1, 1)
+        root.addLayout(align_grid)
 
+        # ---- 原尺寸与删除 ----
+        bottom_row = QHBoxLayout()
+        bottom_row.setSpacing(4)
         original = QPushButton(tr("原尺寸贴页"))
         original.setToolTip(tr("恢复到文件原始物理尺寸，并把左上角对齐页面原点，"
                             "用于按实际尺寸绘制的对齐模板"))
         original.clicked.connect(self._place_natural)
-        root.addWidget(original)
+        rm = QPushButton(tr("删除"))
+        set_role(rm, "danger")
+        rm.clicked.connect(self._delete)
+        bottom_row.addWidget(original, 2)
+        bottom_row.addWidget(rm, 1)
+        root.addLayout(bottom_row)
 
-        self.setWidget(body)
+        # 需先选中参考图才能点击的操作按钮（联动禁用，避免误点无效）
+        self._selection_buttons = (
+            self._reset_angle_btn, fit, center, snap_tl, snap_c, original, rm,
+        )
+
+        scroll.setWidget(body)
+        self.setWidget(scroll)
+        unify_inputs(self, min_width=72, button_height=30)
+
+        # 同行并排按钮改用 Ignored 水平策略 + 文案最小宽，防止英文文案撑宽左 Dock
+        fm = self.fontMetrics()
+        for b in (add_img, add_svg, fit, center, snap_tl, snap_c, original, rm):
+            b.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+            b.setMinimumWidth(fm.horizontalAdvance(b.text()) + 12)
+        # 归零按钮跟 Expanding 旋钮同行，必须用 Fixed 而非 Ignored 防止越界
+        reset_w = max(44, fm.horizontalAdvance(self._reset_angle_btn.text()) + 16)
+        self._reset_angle_btn.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self._reset_angle_btn.setFixedWidth(reset_w)
+
         self.refresh()
-        unify_inputs(self)
 
     # --------------------------------------------------------------- 列表
     def refresh(self) -> None:
@@ -209,7 +252,10 @@ class ReferencePanel(QDockWidget):
             if it.checkState() != want:
                 it.setCheckState(want)
             size = f"{ref.width_mm:.0f}×{ref.height_mm:.0f}mm"
-            it.setText(f"{ref.name}  [{REFERENCE_KINDS.get(ref.kind, ref.kind)}]  {size}")
+            label = (f"{ref.name}  "
+                     f"[{tr(REFERENCE_KINDS.get(ref.kind, ref.kind))}]  {size}")
+            it.setText(label)
+            it.setToolTip(label)
         self._loading = False
 
     def selected_refs(self) -> list[ReferenceItem]:
@@ -227,6 +273,8 @@ class ReferencePanel(QDockWidget):
         self.lock_check.setEnabled(has)
         self.angle_spin.setEnabled(has)
         self.snap_resize_check.setEnabled(has)
+        for btn in getattr(self, "_selection_buttons", ()):
+            btn.setEnabled(has)
         if not refs:
             return
         ref = refs[0]

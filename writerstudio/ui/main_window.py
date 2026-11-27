@@ -6,12 +6,13 @@ import logging
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, Qt, QTimer
-from PySide6.QtGui import QAction, QActionGroup, QKeySequence
+from PySide6.QtCore import QByteArray, QPoint, Qt, QTimer
+from PySide6.QtGui import QAction, QActionGroup, QFont, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QDockWidget,
     QFileDialog,
+    QFrame,
     QGraphicsView,
     QHBoxLayout,
     QLabel,
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QScrollArea,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -94,7 +96,12 @@ from ..project import (
 )
 from ..settings import Settings
 from .canvas import CanvasView
-from .style import ask_save_discard_cancel, ask_yes_no, fit_dialog_to_screen
+from .style import (
+    ask_save_discard_cancel,
+    ask_yes_no,
+    fit_dialog_to_screen,
+    guard_wheel_until_focused,
+)
 from .theme import THEMES, apply_theme, stroke_bar_qss
 from .theme import available as theme_available
 from .content_dialog import (
@@ -197,17 +204,36 @@ class MainWindow(QMainWindow):
         self.ai_server = None
         self._start_ai_server_from_settings()
 
+        # 状态栏：三段永久信息（纸张 / 坐标 / 缩放）加细分隔线并固定数字宽防抖动
+        mono_status = QFont("monospace")
+        mono_status.setStyleHint(QFont.Monospace)
         self._status_coord = QLabel(tr("—"))
+        self._status_coord.setFont(mono_status)
+        self._status_coord.setMinimumWidth(104)
+        self._status_coord.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self._status_zoom = QLabel(tr("—"))
-        # 纸张尺寸常驻状态栏，并且可点击 → 直接打开页面设置
+        self._status_zoom.setFont(mono_status)
+        self._status_zoom.setMinimumWidth(46)
+        self._status_zoom.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        # 纸张尺寸常驻状态栏，并且可点击 → 直接打开页面设置（悬停高亮提示可点击）
         self._status_page = QLabel(tr("—"))
+        self._status_page.setProperty("wsClickable", True)
         self._status_page.setToolTip(tr("点击修改纸张大小/方向/页边距"))
         self._status_page.setCursor(Qt.PointingHandCursor)
         self._status_page.mousePressEvent = lambda _e: self._page_setup()
+
+        def _status_sep() -> QFrame:
+            sep = QFrame()
+            sep.setFrameShape(QFrame.VLine)
+            sep.setProperty("wsStatusSep", True)
+            return sep
+
         self.statusBar().addPermanentWidget(QLabel(tr("纸张:")))
         self.statusBar().addPermanentWidget(self._status_page)
+        self.statusBar().addPermanentWidget(_status_sep())
         self.statusBar().addPermanentWidget(QLabel(tr("坐标(mm):")))
         self.statusBar().addPermanentWidget(self._status_coord)
+        self.statusBar().addPermanentWidget(_status_sep())
         self.statusBar().addPermanentWidget(QLabel(tr("缩放:")))
         self.statusBar().addPermanentWidget(self._status_zoom)
         self._update_page_status()
@@ -237,6 +263,8 @@ class MainWindow(QMainWindow):
         # 1280×840 在 1366×768 笔记本屏上会顶出屏幕下沿（含标题栏与任务栏）；
         # 按屏幕可用区域收敛，窄屏上画布仍保留完整操作区。
         fit_dialog_to_screen(self, 1280, 840, margin_h=56, margin_v=64)
+        # 全主窗口输入控件兜底启用「仅聚焦时响应滚轮」，防止滚屏误调参数
+        guard_wheel_until_focused(self)
 
     # --------------------------------------------------------------- actions
     def _build_actions(self) -> None:
@@ -466,6 +494,11 @@ class MainWindow(QMainWindow):
         self.act_show_objects.triggered.connect(
             lambda c: self.dock.setVisible(c))
 
+        self.act_toggle_sidebars = QAction(tr("收起/展开侧边栏"), self)
+        self.act_toggle_sidebars.setShortcut("F9")
+        self.act_toggle_sidebars.setToolTip(tr("一键隐藏或恢复所有左右停靠面板，留出最大画布空间（F9）"))
+        self.act_toggle_sidebars.triggered.connect(self._toggle_sidebars)
+
         self.act_ai_settings = QAction(tr("AI 服务设置…"), self)
         self.act_ai_settings.triggered.connect(self._show_ai_settings)
 
@@ -573,8 +606,24 @@ class MainWindow(QMainWindow):
         m_edit.addSeparator()
         m_edit.addAction(self.act_duplicate)
         m_edit.addAction(self.act_delete)
+        m_edit.addAction(self.act_stroke_edit)
         m_edit.addSeparator()
         m_edit.addAction(self.act_select_all)
+
+        # 将原「文本 / 内容 / 参考层」整合进标准的「插入」菜单，精简顶层项
+        m_insert = mb.addMenu(tr("插入(&I)"))
+        m_insert.addAction(self.act_new_text)
+        m_insert.addAction(self.act_edit_text)
+        m_insert.addAction(self.act_import_font)
+        m_insert.addSeparator()
+        m_insert.addAction(self.act_insert_md)
+        m_insert.addAction(self.act_insert_eq)
+        m_insert.addAction(self.act_insert_tex)
+        m_insert.addAction(self.act_insert_tikz)
+        m_insert.addAction(self.act_import_svg)
+        m_insert.addSeparator()
+        m_insert.addAction(self.act_add_ref_image)
+        m_insert.addAction(self.act_add_ref_svg)
 
         m_obj = mb.addMenu(tr("对象(&O)"))
         m_obj.addAction(self.act_raise)
@@ -589,6 +638,10 @@ class MainWindow(QMainWindow):
             m_align.addAction(a)
         m_obj.addAction(self.act_distribute_h)
         m_obj.addAction(self.act_distribute_v)
+        m_obj.addSeparator()
+        m_obj.addAction(self.act_perturb_selected)
+        m_obj.addAction(self.act_reseed_selected)
+        m_obj.addAction(self.act_clear_perturb)
 
         m_view = mb.addMenu(tr("视图(&V)"))
         m_view.addAction(self.act_zoom_in)
@@ -596,6 +649,8 @@ class MainWindow(QMainWindow):
         m_view.addAction(self.act_fit)
         m_view.addAction(self.act_zoom_100)
         m_view.addAction(self.act_zoom_selection)
+        m_view.addSeparator()
+        m_view.addAction(self.act_toggle_sidebars)
         m_view.addSeparator()
         m_view.addAction(self.act_show_fonts)
         m_view.addAction(self.act_show_perturb_panel)
@@ -607,38 +662,6 @@ class MainWindow(QMainWindow):
         m_view.addMenu(self._build_theme_menu())
         m_view.addMenu(self._build_language_menu())
 
-        m_help = mb.addMenu(tr("帮助(&H)"))
-        m_help.addAction(self.act_about)
-
-        m_text = mb.addMenu(tr("文本(&T)"))
-        m_text.addAction(self.act_new_text)
-        m_text.addAction(self.act_edit_text)
-        m_text.addSeparator()
-        m_text.addAction(self.act_import_font)
-        m_text.addAction(self.act_show_fonts)
-
-        m_content = mb.addMenu(tr("内容(&C)"))
-        m_content.addAction(self.act_insert_md)
-        m_content.addAction(self.act_insert_eq)
-        m_content.addAction(self.act_insert_tex)
-        m_content.addAction(self.act_insert_tikz)
-        m_content.addSeparator()
-        m_content.addAction(self.act_import_svg)
-
-        m_ref = mb.addMenu(tr("参考层(&R)"))
-        m_ref.addAction(self.act_add_ref_image)
-        m_ref.addAction(self.act_add_ref_svg)
-        m_ref.addSeparator()
-        m_ref.addAction(self.act_show_reference)
-
-        m_pen = mb.addMenu(tr("扰动(&P)"))
-        m_pen.addAction(self.act_perturb_selected)
-        m_pen.addAction(self.act_reseed_selected)
-        m_pen.addSeparator()
-        m_pen.addAction(self.act_clear_perturb)
-        m_pen.addSeparator()
-        m_pen.addAction(self.act_show_perturb_panel)
-
         m_machine = mb.addMenu(tr("机器(&M)"))
         m_machine.addAction(self.act_gen_gcode)
         m_machine.addAction(self.act_export_gcode)
@@ -649,6 +672,10 @@ class MainWindow(QMainWindow):
 
         m_ai = mb.addMenu(tr("AI 排版(&A)"))
         m_ai.addAction(self.act_ai_settings)
+
+        # 「帮助」固定位于菜单栏最右侧，符合全平台桌面软件规范
+        m_help = mb.addMenu(tr("帮助(&H)"))
+        m_help.addAction(self.act_about)
 
     def _build_language_menu(self) -> QMenu:
         """「语言」子菜单：自动（跟随系统）/ 中文 / English。
@@ -716,13 +743,18 @@ class MainWindow(QMainWindow):
         icons_mod.clear_cache()
         self._apply_action_icons()
         for panel in (getattr(self, "font_panel", None),
-                      getattr(self, "global_perturb", None)):
+                      getattr(self, "global_perturb", None),
+                      getattr(self, "machine_panel", None)):
             refresh = getattr(panel, "refresh_icons", None)
             if refresh is not None:
                 try:
                     refresh()
                 except Exception:
                     pass
+        try:
+            self.canvas.refresh_theme()
+        except Exception:
+            pass
         self._restyle_stroke_bar()
         # 历史面板的文字颜色是逐项写进 QListWidgetItem 的，QSS 重建不会
         # 自动刷新；重画一次，浅色主题下已完成步骤才不会白字白底。
@@ -739,6 +771,7 @@ class MainWindow(QMainWindow):
 
     def _build_toolbar(self) -> None:
         tb = QToolBar(tr("主工具栏"), self)
+        tb.setObjectName("toolbar_main")
         tb.setMovable(False)
         tb.setToolButtonStyle(Qt.ToolButtonIconOnly)   # 图标化（文字进工具提示）
         tb.setToolTip(tr("主工具栏"))
@@ -783,8 +816,11 @@ class MainWindow(QMainWindow):
 
     def _build_object_panel(self) -> None:
         self.dock = QDockWidget(tr("对象"), self)
+        self.dock.setObjectName("dock_objects")
         self.dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         self.obj_list = QListWidget()
+        self.obj_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.obj_list.setTextElideMode(Qt.ElideRight)
         self.obj_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.obj_list.customContextMenuRequested.connect(self._object_panel_menu)
         self.obj_list.itemChanged.connect(self._on_object_item_changed)
@@ -837,23 +873,29 @@ class MainWindow(QMainWindow):
 
     def _build_perturb_panel(self) -> None:
         self.perturb_dock = QDockWidget(tr("手写扰动"), self)
+        self.perturb_dock.setObjectName("dock_perturb")
         self.perturb_dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         # 顶部：选中单个文本对象时出现的「文字属性」区（即改即得）；
-        # 下面是原有的手写扰动参数区
+        # 下面：手写扰动参数区。两者放进同一个无边框滚动区共滚，
+        # 避免 720p 下文字属性把下方扰动滚动区压成极窄缝隙。
         self.text_props = TextPropsPanel(self.font_manager)
         self.text_props.propsChanged.connect(self._on_text_props_changed)
         self.text_props.setVisible(False)
-        self.global_perturb = PerturbPanel(parent=self)
+        self.global_perturb = PerturbPanel(parent=self, scrollable=False)
         self.global_perturb.paramsChanged.connect(self._on_global_perturb_changed)
         wrap = QWidget()
         v = QVBoxLayout(wrap)
-        # 左右 4px：英文参数面板最小宽 249px，280px 停靠区扣除边框后只剩
-        # 248px，6px 边距会挤出 1px 横向滚动条
+        # 左右 4px：英文参数面板在 280px 停靠区内不挤出横向滚动条
         v.setContentsMargins(4, 6, 4, 6)
         v.setSpacing(6)
         v.addWidget(self.text_props)
-        v.addWidget(self.global_perturb, 1)
-        self.perturb_dock.setWidget(wrap)
+        v.addWidget(self.global_perturb)
+        v.addStretch(1)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(wrap)
+        self.perturb_dock.setWidget(scroll)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.perturb_dock)
         self.tabifyDockWidget(self.font_panel, self.perturb_dock)
         self.font_panel.raise_()
@@ -866,6 +908,7 @@ class MainWindow(QMainWindow):
 
     def _build_machine_panel(self) -> None:
         self.machine_dock = QDockWidget(tr("机器控制"), self)
+        self.machine_dock.setObjectName("dock_machine")
         self.machine_dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         self.machine_panel = MachinePanel(parent=self)
         self.machine_panel.generateRequested.connect(self._generate_preview)
@@ -885,14 +928,9 @@ class MainWindow(QMainWindow):
         # 起点模式/坐标/轴映射变化会改变「机器→页面」映射，
         # 需重画画布上的起点标记与机械原点
         self.machine_panel.startPointChanged.connect(self._on_machine_config_changed)
-        # 包一层滚动区：机器面板内容多（连接/笔控/起点/映射/质量…），
-        # 面板被挤压时仍可完整滚动操作，而不是互相叠压
-        from PySide6.QtWidgets import QScrollArea, QFrame
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setWidget(self.machine_panel)
-        self.machine_dock.setWidget(scroll)
+        # MachinePanel 内部已自带三段式单滚动区（顶部分段+中间滚动+底部常驻作业栏），
+        # 外层不再重复包 QScrollArea，彻底消除双层嵌套滚动。
+        self.machine_dock.setWidget(self.machine_panel)
         self.addDockWidget(Qt.RightDockWidgetArea, self.machine_dock)
         self.tabifyDockWidget(self.dock, self.machine_dock)
         self.dock.raise_()
@@ -952,6 +990,27 @@ class MainWindow(QMainWindow):
 
     def _toggle_machine_panel(self, checked: bool) -> None:
         self.machine_dock.setVisible(checked)
+
+    def _toggle_sidebars(self) -> None:
+        """一键收起/恢复左右两侧所有停靠面板，留出全宽画布（快捷键 F9）。"""
+        docks = (
+            self.font_panel,
+            self.perturb_dock,
+            self.reference_dock,
+            self.undo_panel,
+            self.dock,
+            self.machine_dock,
+        )
+        open_docks = [d for d in docks if d is not None and not d.isHidden()]
+        if open_docks:
+            self._saved_open_docks = open_docks
+            for d in open_docks:
+                d.setVisible(False)
+        else:
+            restore = getattr(self, "_saved_open_docks", None) or list(docks)
+            for d in restore:
+                if d is not None:
+                    d.setVisible(True)
 
     def _on_global_perturb_changed(self) -> None:
         """全局面板改动时，实时应用到选中的对象（可撤销，连续拖动合并为一步）。"""
@@ -1569,6 +1628,15 @@ class MainWindow(QMainWindow):
         done.setToolTip(tr("退出笔画编辑（Esc）"))
         done.clicked.connect(self._exit_stroke_edit)
         h.addWidget(done)
+        tip_btn = QToolButton(bar)
+        tip_btn.setFocusPolicy(Qt.NoFocus)
+        tip_btn.setText("?")
+        tip_btn.setToolTip(
+            tr("笔画编辑：鼠标下的笔画自动高亮，点击选中；拖动笔画请按在"
+            "笔画线上（空白处拖动=框选，Shift 追加）；拖动即移动，"
+            "按在笔画旁空白处的角点上缩放、上方手柄旋转（单选）；"
+            "Delete 删除选中；勾选「弯折」后拖点扭曲。Esc 退出。"))
+        h.addWidget(tip_btn)
         self._stroke_bar = bar
         # 配色取自主题语义色（深/浅色主题及热切换都跟随，不再硬编码浅色）
         self._restyle_stroke_bar()
@@ -1595,10 +1663,8 @@ class MainWindow(QMainWindow):
             self._stroke_bar.move(10, 10)
             self._stroke_bar.show()
             self.statusBar().showMessage(
-                tr("笔画编辑：鼠标下的笔画自动高亮，点击选中；拖动笔画请按在"
-                "笔画线上（空白处拖动=框选，Shift 追加）；拖动即移动，"
-                "按在笔画旁空白处的角点上缩放、上方手柄旋转（单选）；"
-                "Delete 删除选中；勾选「弯折」后拖点扭曲。Esc 退出。"), 9000)
+                tr("笔画编辑：点击/框选笔画，拖拽移动/缩放/旋转，Delete 删除，Esc 退出（悬停浮条 ? 查看详解）"),
+                6000)
         else:
             self._exit_stroke_edit()
 
@@ -1896,8 +1962,9 @@ class MainWindow(QMainWindow):
             params = resolve_perturb(obj) or PerturbParams()
             from .perturb_panel import PerturbDialog
             hint = object_reference_size(obj)
+            is_vec = obj.source.kind in ("svg", "static", "tikz")
             dlg = PerturbDialog(params, title=trf('手写扰动 — {v0}', v0=obj.name),
-                                size_hint=hint, parent=self)
+                                size_hint=hint, parent=self, vector_only=is_vec)
             if dlg.exec() != PerturbDialog.Accepted:
                 return
             apply_perturb(obj, dlg.result_params(), self.font_manager)
@@ -2761,6 +2828,16 @@ class MainWindow(QMainWindow):
         self.controller.doc.page.preset_name = self.settings.page_preset_name("")
         self._rebuild_recent_menu()
         self._update_title()
+        # 若用户之前调整并保存过停靠栏布局，则恢复之（否则走首次默认宽度）
+        self._restored_dock_state = False
+        raw_state = self.settings.window_state()
+        if isinstance(raw_state, (bytes, bytearray, QByteArray)) and len(raw_state) > 0:
+            try:
+                ba = raw_state if isinstance(raw_state, QByteArray) else QByteArray(bytes(raw_state))
+                if self.restoreState(ba):
+                    self._restored_dock_state = True
+            except Exception:
+                pass
 
     def _persist_settings(self) -> None:
         dirs = [str(d) for d in getattr(self.font_manager, "_extra_dirs", [])]
@@ -2779,6 +2856,10 @@ class MainWindow(QMainWindow):
             self.settings.set_baud(self.machine_panel.baud())
         except Exception:
             pass
+        try:
+            self.settings.set_window_state(self.saveState())
+        except Exception:
+            pass
         page = self.controller.doc.page
         self.settings.set_page_size(page.width, page.height)
         self.settings.set_page_margin(page.margin)
@@ -2791,19 +2872,20 @@ class MainWindow(QMainWindow):
         # 默认宽度：过早调用会被首次布局覆盖，故挂到事件循环下一拍。
         if not getattr(self, "_dock_widths_applied", False):
             self._dock_widths_applied = True
-            # 带接收者版本：窗口销毁时定时器自动取消，不致回调已删对象
-            QTimer.singleShot(0, self, self._apply_default_dock_widths)
+            if not getattr(self, "_restored_dock_state", False):
+                # 带接收者版本：窗口销毁时定时器自动取消，不致回调已删对象
+                QTimer.singleShot(0, self, self._apply_default_dock_widths)
 
     def _apply_default_dock_widths(self) -> None:
-        # 左侧字体/扰动/参考层标签组与右侧「对象/机器控制」标签组各给一个
+        # 左侧字体/扰动/参考层标签组与右侧「历史/对象/机器控制」各给一个
         # 能完整显示内容的默认宽度：字体面板的 sizeHint 偏大（缩略图列表），
         # 不约束的话默认布局会把右侧挤到需要横向滚动、控件显示不全。
         self.resizeDocks([self.font_panel, self.perturb_dock, self.reference_dock],
                          [280, 280, 280], Qt.Horizontal)
         # 机器面板最宽行约 267px（qdarktheme 默认字体密度下），取 300 留些
-        # 余量；窄屏上用户仍可手动拖窄（内部有滚动区兜底）。
-        self.resizeDocks([self.dock, self.machine_dock], [300, 300],
-                         Qt.Horizontal)
+        # 余量；同步给右侧历史面板，整列宽度一致。
+        self.resizeDocks([self.undo_panel, self.dock, self.machine_dock],
+                         [300, 300, 300], Qt.Horizontal)
 
     def closeEvent(self, event) -> None:
         # 先结束笔画编辑（丢弃未松手的预览），再判断是否未保存

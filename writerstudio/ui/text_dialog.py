@@ -104,12 +104,17 @@ class TextEditDialog(QDialog):
         chain_box.addWidget(QLabel(tr("字体（按顺序回退）：")))
         self.chain_list = QListWidget()
         self.chain_list.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.chain_list.setMinimumHeight(100)   # 至少可见 4~5 项
+        self.chain_list.setMinimumHeight(110)   # 至少可见 4~5 项
+        self.chain_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.chain_list.setTextElideMode(Qt.ElideRight)
         self.chain_list.currentRowChanged.connect(self._on_chain_row_changed)
         chain_box.addWidget(self.chain_list, 1)
 
         ch_btns = QHBoxLayout()
         self.font_combo = QComboBox()
+        self.font_combo.setSizeAdjustPolicy(
+            QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.font_combo.setMinimumContentsLength(8)
         for e in self.manager.visible_entries():
             self.font_combo.addItem(f"{e.display_name}  [{e.kind}]", e.name)
         ch_btns.addWidget(self.font_combo, 1)
@@ -130,6 +135,20 @@ class TextEditDialog(QDialog):
         row.addWidget(del_btn)
         chain_box.addLayout(row)
 
+        # 低频进阶混排选项（权重随机 / 兜底字体 / 逐字符覆盖）收入可折叠区：
+        # 默认折叠让 Tab1 一屏完整呈现无滚动条；展开后仍在文本框正下方，方便选字覆盖。
+        self._adv_toggle = QPushButton()
+        self._adv_toggle.setCheckable(True)
+        self._adv_toggle.setFlat(True)
+        self._adv_toggle.setStyleSheet("text-align: left; padding: 2px 4px;")
+        self._adv_toggle.toggled.connect(self._on_adv_toggled)
+        chain_box.addWidget(self._adv_toggle)
+
+        self._adv_box = QWidget()
+        adv_lay = QVBoxLayout(self._adv_box)
+        adv_lay.setContentsMargins(0, 2, 0, 0)
+        adv_lay.setSpacing(6)
+
         # 选中字体的权重（仅在「按权重随机」时生效）
         wrow = QHBoxLayout()
         wrow.addWidget(QLabel(tr("选中字体权重")))
@@ -144,17 +163,20 @@ class TextEditDialog(QDialog):
         reset_btn = QPushButton(tr("恢复 1.0"))
         reset_btn.clicked.connect(lambda: self.weight_spin.setValue(1.0))
         wrow.addWidget(reset_btn)
-        chain_box.addLayout(wrow)
+        adv_lay.addLayout(wrow)
 
         self.random_check = QCheckBox(tr("按权重随机选用字体"))
         self.random_check.setToolTip(
             tr("在字体链中按权重随机选用（模拟不同字体混写）"))
         self.random_check.toggled.connect(self._update_preview)
-        chain_box.addWidget(self.random_check)
+        adv_lay.addWidget(self.random_check)
 
         fbrow = QHBoxLayout()
         fbrow.addWidget(QLabel(tr("兜底字体")))
         self.fallback_combo = QComboBox()
+        self.fallback_combo.setSizeAdjustPolicy(
+            QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.fallback_combo.setMinimumContentsLength(6)
         self.fallback_combo.setToolTip(
             tr("链中所有字体都缺某个字时，用它补上；\n"
             "（链内字体本身已互相兜底，这里只是最后一道保险）"))
@@ -171,19 +193,21 @@ class TextEditDialog(QDialog):
             self.reseed_font_btn.setIcon(_shf)
         self.reseed_font_btn.clicked.connect(self._reseed_fonts)
         fbrow.addWidget(self.reseed_font_btn)
-        chain_box.addLayout(fbrow)
+        adv_lay.addLayout(fbrow)
 
         # 逐字符字体覆盖：为指定字符单独设置另一套字体（如个别符号）
         ov_label = QLabel(tr("字符字体覆盖："))
         ov_label.setToolTip(tr("在文本内容中选中字符，再设为上方下拉的当前字体；"
                             "每行一条「字符 → 字体」覆盖。"))
-        chain_box.addWidget(ov_label)
+        adv_lay.addWidget(ov_label)
         self.ov_list = QListWidget()
         # 固定高度：只设 setMaximumHeight 会与 QListWidget 自带的
         # minimumSizeHint(~87px) 冲突（min>max，布局未定义行为）
         self.ov_list.setFixedHeight(56)
+        self.ov_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.ov_list.setTextElideMode(Qt.ElideRight)
         self.ov_list.setToolTip(tr("每行一条「字符 → 字体」覆盖；选中后可清除"))
-        chain_box.addWidget(self.ov_list)
+        adv_lay.addWidget(self.ov_list)
         ovrow = QHBoxLayout()
         ovrow.addWidget(QLabel(tr("缩放")))
         self.ov_scale_spin = spin(0.1, 3.0, 1.0, " ×", step=0.05)
@@ -196,7 +220,10 @@ class TextEditDialog(QDialog):
         clr_ov_btn = QPushButton(tr("清除覆盖"))
         clr_ov_btn.clicked.connect(self._clear_selected_override)
         ovrow.addWidget(clr_ov_btn)
-        chain_box.addLayout(ovrow)
+        adv_lay.addLayout(ovrow)
+
+        chain_box.addWidget(self._adv_box)
+        self._on_adv_toggled(False)
         mid.addLayout(chain_box, 3)
 
         # 排版参数
@@ -257,8 +284,9 @@ class TextEditDialog(QDialog):
         param_box.addStretch(1)
         mid.addLayout(param_box, 2)
 
-        # ===== 页签 2：手写扰动 =====
-        self.perturb_panel = PerturbPanel(params=self._spec.perturb, size_hint=10.0)
+        # ===== 页签 2：手写扰动（宽弹窗双栏排布） =====
+        self.perturb_panel = PerturbPanel(
+            params=self._spec.perturb, size_hint=10.0, columns=2)
         self.perturb_panel.paramsChanged.connect(self._update_preview)
         self.perturb_panel.set_size_hint(self.size_spin.value())
         self.tabs.addTab(self.perturb_panel, tr("手写扰动"))
@@ -269,9 +297,16 @@ class TextEditDialog(QDialog):
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
         localize_dialog_buttons(self)
-        unify_inputs(self)
+        unify_inputs(self, button_height=30)
+        # 折叠按钮高度紧凑，不套大按钮最小高度
+        self._adv_toggle.setMinimumHeight(24)
         # 默认给文字框更宽裕的高度；小屏由屏幕可用区域收敛，内容页可滚动。
-        fit_dialog_to_screen(self, 800, 820)
+        fit_dialog_to_screen(self, 800, 760)
+
+    def _on_adv_toggled(self, expanded: bool) -> None:
+        self._adv_box.setVisible(expanded)
+        prefix = "▾ " if expanded else "▸ "
+        self._adv_toggle.setText(prefix + tr("高级混排与字符覆盖"))
 
     # ------------------------------------------------------------- 数据装载
     def _load_spec(self, spec: TextSpec) -> None:
@@ -311,6 +346,9 @@ class TextEditDialog(QDialog):
         self.wsr_spin.setValue(float(getattr(spec, "word_space_random", 0.0)))
         if self.chain_list.count():
             self.chain_list.setCurrentRow(0)
+        # 若对象已启用高级混排/兜底/字符覆盖，自动展开便于直接查看修改
+        has_adv = bool(spec.random_fonts or spec.fallback_font or self._overrides)
+        self._adv_toggle.setChecked(has_adv)
         self._update_preview()
 
     @staticmethod

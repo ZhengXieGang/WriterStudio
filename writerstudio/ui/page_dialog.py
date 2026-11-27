@@ -54,6 +54,7 @@ class PagePresetEditorDialog(QDialog):
 
         root = QVBoxLayout(self)
         form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
 
         self.name_edit = QComboBox()
         self.name_edit.setEditable(True)
@@ -90,7 +91,7 @@ class PagePresetEditorDialog(QDialog):
         btns.rejected.connect(self.reject)
         root.addWidget(btns)
         localize_dialog_buttons(self)
-        unify_inputs(self)
+        unify_inputs(self, button_height=30)
 
     def _on_base_chosen(self, index: int) -> None:
         name = self.name_edit.itemData(index)
@@ -137,23 +138,22 @@ class PageSetupDialog(QDialog):
 
         root = QVBoxLayout(self)
 
-        # ---- 预设 & 方向 ----
-        top = QFormLayout()
+        # ---- 统一单表单：预设 / 方向 / 尺寸 / 边距 / 参考线 / 旋转纸张对齐同一列 ----
+        form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+
         self.preset_combo = QComboBox()
         self._reload_presets()
         self.preset_combo.currentIndexChanged.connect(self._on_preset_changed)
-        top.addRow(tr("纸张预设"), self.preset_combo)
+        form.addRow(tr("纸张预设"), self.preset_combo)
 
         self.orient_combo = QComboBox()
         self.orient_combo.addItem(tr("横向"), True)
         self.orient_combo.addItem(tr("纵向"), False)
         self.orient_combo.setCurrentIndex(0 if self._landscape else 1)
         self.orient_combo.currentIndexChanged.connect(self._on_orientation)
-        top.addRow(tr("方向"), self.orient_combo)
-        root.addLayout(top)
+        form.addRow(tr("方向"), self.orient_combo)
 
-        # ---- 尺寸 & 边距 ----
-        form = QFormLayout()
         self.width_spin = _spin(10.0, 5000.0, page.width)
         self.height_spin = _spin(10.0, 5000.0, page.height)
         srow = QHBoxLayout()
@@ -171,12 +171,10 @@ class PageSetupDialog(QDialog):
         self.guide_check = QCheckBox(tr("显示页边距参考线"))
         self.guide_check.setChecked(bool(guide_visible))
         form.addRow("", self.guide_check)
-        root.addLayout(form)
 
-        # ---- 旋转纸张（连同内容） ----
-        rot_row = QHBoxLayout()
-        rot_row.addWidget(QLabel(tr("旋转纸张")))
+        # ---- 旋转纸张（连同内容，仅提供回调时显示整行） ----
         if on_rotate is not None:
+            rot_row = QHBoxLayout()
             extra = tr("\n坐标映射（原点对齐/对调/反转）随页面坐标系自动换算，"
                        "机械原点标注与书写位置保持一致；撤销时一并还原。")
             for label, direction, tip in (
@@ -191,8 +189,10 @@ class PageSetupDialog(QDialog):
                 b.clicked.connect(
                     lambda _=False, d=direction: self._rotate(d))
                 rot_row.addWidget(b)
-        rot_row.addStretch(1)
-        root.addLayout(rot_row)
+            rot_row.addStretch(1)
+            form.addRow(tr("旋转纸张"), rot_row)
+
+        root.addLayout(form)
 
         # ---- 尺寸信息 ----
         self.info = QLabel(tr("—"))
@@ -216,7 +216,7 @@ class PageSetupDialog(QDialog):
         root.addWidget(btns)
         localize_dialog_buttons(self)
         self._update_info()
-        unify_inputs(self)
+        unify_inputs(self, button_height=30)
 
     # --------------------------------------------------------------- 预设列表
     def _reload_presets(self) -> None:

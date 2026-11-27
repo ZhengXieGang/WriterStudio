@@ -6,6 +6,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
+    QDialogButtonBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -17,7 +18,7 @@ from PySide6.QtWidgets import (
 
 from ..i18n import tr, trf
 from ..settings import Settings
-from ..ui.style import set_role
+from ..ui.style import localize_dialog_buttons, set_role, unify_inputs
 
 #: MCP 客户端通用配置片段（stdio；任何支持 MCP 的 AI 应用同构）
 _CONFIG_TEMPLATE = """\
@@ -31,12 +32,13 @@ _CONFIG_TEMPLATE = """\
 }
 """
 
-_CONFIG_NOTE = """\
-配置加入 AI 应用的 MCP 设置（如 Claude Desktop 的 claude_desktop_config.json）
-后重启该应用即可连接。command 因安装方式而异：Windows 发行版用
-WriterStudioMCP.exe；Linux AppImage 用其文件路径（args 前加 "--mcp"）；
-macOS 用 app 包内的 WriterStudioMCP；源码运行用
-python -m writerstudio.ai.bridge。服务仅监听本机，AI 改动可在软件里撤销。"""
+_CONFIG_NOTE = (
+    "配置加入 AI 应用的 MCP 设置（如 Claude Desktop 的 claude_desktop_config.json）"
+    "后重启该应用即可连接。command 因安装方式而异：Windows 发行版用 "
+    "WriterStudioMCP.exe；Linux AppImage 用其文件路径（args 前加 \"--mcp\"）；"
+    "macOS 用 app 包内的 WriterStudioMCP；源码运行用 "
+    "python -m writerstudio.ai.bridge。服务仅监听本机，AI 改动可在软件里撤销。"
+)
 
 
 def _fill(text: str, port: int) -> str:
@@ -60,6 +62,7 @@ class AiServiceDialog(QDialog):
         layout = QVBoxLayout(self)
 
         self._status = QLabel(self)
+        self._status.setWordWrap(True)
         self._status.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(self._status)
 
@@ -70,33 +73,43 @@ class AiServiceDialog(QDialog):
         row.addWidget(QLabel(tr("端口："), self))
         self._port = QSpinBox(self)
         self._port.setRange(1024, 65535)
+        self._port.setMinimumWidth(92)
+        self._port.setMaximumWidth(116)
         row.addWidget(self._port)
-        layout.addLayout(row)
-
         apply_btn = QPushButton(tr("保存并应用"), self)
+        apply_btn.setAutoDefault(False)
         apply_btn.clicked.connect(self._apply)
         row.addWidget(apply_btn)
+        layout.addLayout(row)
 
         layout.addWidget(QLabel(tr("AI 客户端配置（复制到 Claude Desktop 等）："), self))
         self._config = QTextEdit(self)
         self._config.setReadOnly(True)
+        self._config.setMinimumHeight(170)
         font = self._config.font()
         font.setFamily("monospace")
         self._config.setFont(font)
         layout.addWidget(self._config, 1)
-
-        copy_row = QHBoxLayout()
-        copy_row.addStretch(1)
-        copy_btn = QPushButton(tr("复制配置"), self)
-        copy_btn.clicked.connect(self._copy_config)
-        copy_row.addWidget(copy_btn)
-        layout.addLayout(copy_row)
 
         note = QLabel(tr(_CONFIG_NOTE), self)
         note.setWordWrap(True)
         set_role(note, "muted")
         layout.addWidget(note)
 
+        bottom = QHBoxLayout()
+        copy_btn = QPushButton(tr("复制配置"), self)
+        copy_btn.setAutoDefault(False)
+        copy_btn.clicked.connect(self._copy_config)
+        bottom.addWidget(copy_btn)
+        bottom.addStretch(1)
+        btns = QDialogButtonBox(QDialogButtonBox.Close, self)
+        btns.rejected.connect(self.reject)
+        btns.accepted.connect(self.accept)
+        bottom.addWidget(btns)
+        layout.addLayout(bottom)
+
+        localize_dialog_buttons(self)
+        unify_inputs(self, button_height=30)
         self._refresh()
 
     # ------------------------------------------------------------ 逻辑
@@ -109,8 +122,10 @@ class AiServiceDialog(QDialog):
         if server is not None and server.port is not None:
             self._status.setText(
                 trf('状态：运行中 — 127.0.0.1:{v0}（共 {v1} 个工具可用）', v0=server.port, v1=len(server._tools.names())))
+            set_role(self._status, "success")
         else:
             self._status.setText(tr("状态：已停止"))
+            set_role(self._status, "muted")
         # 框内只放配置本身（可直接整段复制）；使用说明放在框外
         self._config.setPlainText(_fill(_CONFIG_TEMPLATE, port))
 

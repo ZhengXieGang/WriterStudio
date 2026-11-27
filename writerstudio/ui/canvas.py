@@ -33,8 +33,14 @@ from .items import (
     ReferenceGraphicsItem,
     take_display_cache,
 )
+from .theme import semantic_color
 
 COLOR_BG = QColor(96, 99, 106)
+
+
+def _bg_color() -> QColor:
+    """画布工作台背景色：随当前深/浅主题自动联动。"""
+    return QColor(semantic_color("canvas_bg"))
 COLOR_PAPER = QColor(255, 255, 255)
 COLOR_PAGE_BORDER = QColor(70, 70, 78)
 COLOR_GRID_MINOR = QColor(0, 0, 0, 16)
@@ -105,7 +111,7 @@ class CanvasView(QGraphicsView):
         # 在旧位置、与场景错位）——由下面的 scrollContentsBy 失效。
         self.setCacheMode(QGraphicsView.CacheBackground)
         self.setMouseTracking(True)
-        self.setBackgroundBrush(COLOR_BG)
+        self.setBackgroundBrush(_bg_color())
 
         self._items: dict[str, ObjectGraphicsItem] = {}
         self._ref_items: dict[str, ReferenceGraphicsItem] = {}
@@ -338,8 +344,14 @@ class CanvasView(QGraphicsView):
                 and abs(view_pos.y() - p.y()) <= MARKER_HIT_PX)
 
     # ----------------------------------------------------------------- 背景
+    def refresh_theme(self) -> None:
+        """主题热切换时更新工作台底色并失效背景缓存。"""
+        self.setBackgroundBrush(_bg_color())
+        self.resetCachedContent()
+        self.viewport().update()
+
     def drawBackground(self, painter: QPainter, rect: QRectF) -> None:
-        painter.fillRect(rect, COLOR_BG)
+        painter.fillRect(rect, _bg_color())
 
         page = self.controller.doc.page
         page_rect = QRectF(0.0, 0.0, page.width, page.height)

@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -27,13 +28,14 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QStackedWidget,
+    QTabWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
 
-from ..i18n import tr, trf
+from ..i18n import is_english, tr, trf
 from ..content import (
     render_equation,
     render_markdown,
@@ -148,43 +150,41 @@ class ContentDialog(QDialog):
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
         localize_dialog_buttons(self)
-        unify_inputs(self)
+        unify_inputs(self, button_height=30)
 
     # -- Markdown 页 -------------------------------------------------------
     def _build_markdown_page(self) -> None:
+        # 拆为「内容 / 参数」与「手写扰动」双页签，彻底消除 QScrollArea 双层嵌套
+        tabs = QTabWidget()
         page = QWidget()
         lay = QVBoxLayout(page)
         md_hint = QLabel(tr("Markdown 内容（表格 / $公式$）："))
         md_hint.setToolTip(tr("支持标题、列表、引用、代码块、表格与 $公式$。"))
         lay.addWidget(md_hint)
         self.md_edit = QTextEdit()
-        self.md_edit.setMinimumHeight(240)   # 至少 12 行，编辑/预览都够用
+        self.md_edit.setMinimumHeight(235)   # 至少 12 行，编辑/预览都够用
         self.md_edit.setPlainText(_MD_SAMPLE)
         self.md_edit.setFont(self._mono())
         self.md_edit.textChanged.connect(self._update_preview)
         lay.addWidget(self.md_edit, 1)
 
-        form = QFormLayout()
+        # 两栏参数网格：取代单列 620px 超宽空条，减少垂直占用且对齐工整
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(6)
         self.md_size = spin(1.0, 30.0, 4.0, " mm", 0.5)
         self.md_size.valueChanged.connect(self._update_preview)
-        form.addRow(tr("正文字号"), self.md_size)
         self.md_cs = spin(-5.0, 20.0, 0.0, " mm", 0.1)
         self.md_cs.setToolTip(tr("额外字距：均匀加在每个字符的步距上"))
         self.md_cs.valueChanged.connect(self._update_preview)
-        form.addRow(tr("字距"), self.md_cs)
         self.md_wrap = spin(20.0, 400.0, 120.0, " mm", 5.0)
         self.md_wrap.valueChanged.connect(self._update_preview)
-        form.addRow(tr("换行宽度"), self.md_wrap)
         self.md_table_w = spin(0.0, 1000.0, 0.0, " mm", 5.0)
         self.md_table_w.setToolTip(
             tr("表格整体宽度：0 = 按内容自适应。\n"
             "设了宽度后各列按该总宽缩放、过宽的单元格自动折行——\n"
             "也可在画布上直接拖动表格左右缘手柄调整（与文本框同手感）。"))
         self.md_table_w.valueChanged.connect(self._update_preview)
-        form.addRow(tr("表格宽度"), self.md_table_w)
-        # 表格随机化（手绘感）：默认线端轻偏移+出头（网格仍对齐），
-        # 行/列界抖动默认关——需要「画出来」的表格再开
-        jrow1 = QHBoxLayout()
         self.md_tab_ej = spin(0.0, 3.0, 0.5, " mm", 0.1, 2)
         self.md_tab_ej.setToolTip(
             tr("线端随机偏移 σ：每条表格线的两端沿轴向随机平移，并带垂直分量\n"
@@ -193,13 +193,6 @@ class ContentDialog(QDialog):
         self.md_tab_os.setToolTip(
             tr("线端出头上限：线端随机越过相交线一点，手绘表格的「过线」笔感。\n"
             "0 = 不出头。"))
-        jrow1.addWidget(QLabel(tr("偏移")))
-        jrow1.addWidget(self.md_tab_ej)
-        jrow1.addWidget(QLabel(tr("出头")))
-        jrow1.addWidget(self.md_tab_os)
-        jrow1.addStretch(1)
-        form.addRow(tr("线端随机"), jrow1)
-        jrow2 = QHBoxLayout()
         self.md_tab_rj = spin(0.0, 3.0, 0.0, " mm", 0.1, 2)
         self.md_tab_rj.setToolTip(
             tr("行界随机偏移 σ：各行高度不再一致（顶/底界与外框不动，\n"
@@ -208,26 +201,36 @@ class ContentDialog(QDialog):
         self.md_tab_cj.setToolTip(
             tr("列界随机偏移 σ：各列宽度不再一致（外框不动；折行走抖动后的\n"
             "列宽，文字不会越过列线）。0 = 列宽规整。"))
-        jrow2.addWidget(QLabel(tr("行界")))
-        jrow2.addWidget(self.md_tab_rj)
-        jrow2.addWidget(QLabel(tr("列界")))
-        jrow2.addWidget(self.md_tab_cj)
-        jrow2.addStretch(1)
-        form.addRow(tr("网格抖动"), jrow2)
         for w in (self.md_tab_ej, self.md_tab_os, self.md_tab_rj,
                   self.md_tab_cj):
             w.valueChanged.connect(self._update_preview)
-        self.md_perturb = PerturbPanel()
-        self.md_perturb.paramsChanged.connect(self._update_preview)
-        lay.addLayout(form)
+
+        pairs = (
+            (tr("正文字号"), self.md_size, tr("字距"), self.md_cs),
+            (tr("换行宽度"), self.md_wrap, tr("表格宽度"), self.md_table_w),
+            (tr("线端偏移"), self.md_tab_ej, tr("线端出头"), self.md_tab_os),
+            (tr("行界抖动"), self.md_tab_rj, tr("列界抖动"), self.md_tab_cj),
+        )
+        for r, (l1, w1, l2, w2) in enumerate(pairs):
+            grid.addWidget(QLabel(l1), r, 0)
+            grid.addWidget(w1, r, 1)
+            grid.addWidget(QLabel(l2), r, 2)
+            grid.addWidget(w2, r, 3)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
+        lay.addLayout(grid)
 
         self.md_fonts = _FontChainWidget(self.manager)
         if self._default_font_chain:
             self.md_fonts.set_names(self._default_font_chain)
         self.md_fonts.changed.connect(self._update_preview)
         lay.addWidget(self.md_fonts)
-        lay.addWidget(self.md_perturb)
-        self.stack.addWidget(self._scroll_page(page))
+        tabs.addTab(self._scroll_page(page), tr("内容 / 参数"))
+
+        self.md_perturb = PerturbPanel(columns=2)
+        self.md_perturb.paramsChanged.connect(self._update_preview)
+        tabs.addTab(self.md_perturb, tr("手写扰动"))
+        self.stack.addWidget(tabs)
 
     # -- 公式页 ------------------------------------------------------------
     def _build_equation_page(self) -> None:
@@ -235,22 +238,27 @@ class ContentDialog(QDialog):
         lay = QVBoxLayout(page)
         lay.addWidget(QLabel(tr("LaTeX 公式（无需安装 TeX，使用内置 mathtext 渲染）：")))
         self.eq_edit = QTextEdit()
-        self.eq_edit.setMinimumHeight(240)
+        self.eq_edit.setMinimumHeight(140)
         self.eq_edit.setPlainText(_EQ_SAMPLE)
         self.eq_edit.setFont(self._mono())
         self.eq_edit.textChanged.connect(self._update_preview)
         lay.addWidget(self.eq_edit, 2)
 
-        form = QFormLayout()
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
         self.eq_size = spin(1.0, 60.0, 6.0, " mm", 0.5)
         self.eq_size.valueChanged.connect(self._update_preview)
-        form.addRow(tr("公式字号"), self.eq_size)
         self.eq_text_scale = spin(0.2, 5.0, 1.0, " ×", 0.05)
         self.eq_text_scale.setToolTip(
             tr("替换文字的字号微调（相对 mathtext 排版得到的字号）"))
-        form.addRow(tr("文字字号"), self.eq_text_scale)
         self.eq_text_scale.valueChanged.connect(self._update_preview)
-        lay.addLayout(form)
+        grid.addWidget(QLabel(tr("公式字号")), 0, 0)
+        grid.addWidget(self.eq_size, 0, 1)
+        grid.addWidget(QLabel(tr("文字字号")), 0, 2)
+        grid.addWidget(self.eq_text_scale, 0, 3)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
+        lay.addLayout(grid)
 
         # 公式字体链：字母/数字等链上画得出的字符改用本软件字体（手写
         # 字迹）重排，位置与字号由 mathtext 保证；链画不出的数学符号
@@ -332,14 +340,19 @@ class ContentDialog(QDialog):
         self.tikz_edit.setFont(self._mono())
         lay.addWidget(self.tikz_edit, 1)
 
-        form = QFormLayout()
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
         self.tikz_width = spin(0.0, 500.0, 0.0, tr(" mm (0=原始尺寸)"), 5.0)
-        form.addRow(tr("目标宽度"), self.tikz_width)
         self.tikz_text_scale = spin(0.2, 5.0, 1.0, " ×", 0.05)
         self.tikz_text_scale.setToolTip(
             tr("替换文字的字号微调（相对 TeX 排版得到的字号）"))
-        form.addRow(tr("文字字号"), self.tikz_text_scale)
-        lay.addLayout(form)
+        grid.addWidget(QLabel(tr("目标宽度")), 0, 0)
+        grid.addWidget(self.tikz_width, 0, 1)
+        grid.addWidget(QLabel(tr("文字字号")), 0, 2)
+        grid.addWidget(self.tikz_text_scale, 0, 3)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
+        lay.addLayout(grid)
 
         # 文字字体：TikZ 节点/标注文字改用**本软件的字体**（如自己的手写真迹）
         # 重排——TeX 只负责把图形画准，文字笔画由本软件生成。
@@ -353,6 +366,8 @@ class ContentDialog(QDialog):
 
     # -- SVG 页 ------------------------------------------------------------
     def _build_svg_page(self) -> None:
+        # 拆为「文件 / 参数」与「手写扰动（矢量）」双页签，消灭嵌套滚动区并隐藏字符级参数
+        tabs = QTabWidget()
         page = QWidget()
         lay = QVBoxLayout(page)
         if not svg_available():
@@ -369,26 +384,33 @@ class ContentDialog(QDialog):
         row.addWidget(browse)
         lay.addLayout(row)
 
-        form = QFormLayout()
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(6)
         self.svg_width = QDoubleSpinBox()
         self.svg_width.setRange(0.0, 500.0)
         self.svg_width.setValue(0.0)
         self.svg_width.setSuffix(tr(" mm (0=原始尺寸)"))
         self.svg_width.setDecimals(1)
-        form.addRow(tr("目标宽度"), self.svg_width)
         self.svg_wobble = spin(0.0, 5.0, 0.0, " mm", 0.05, 2)
         self.svg_wobble.setToolTip(tr("给线条叠加多频正弦抖动，产生手绘感"))
         self.svg_wobble.valueChanged.connect(self._update_preview)
-        form.addRow(tr("手绘抖动幅度"), self.svg_wobble)
         self.svg_wl = spin(2.0, 200.0, 20.0, " mm", 2.0)
-        form.addRow(tr("抖动波长"), self.svg_wl)
-        lay.addLayout(form)
-
-        lay.addWidget(QLabel(tr("整笔扰动（可选）：")))
-        self.svg_perturb = PerturbPanel()
-        lay.addWidget(self.svg_perturb)
+        grid.addWidget(QLabel(tr("目标宽度")), 0, 0)
+        grid.addWidget(self.svg_width, 0, 1, 1, 3)
+        grid.addWidget(QLabel(tr("手绘抖动幅度")), 1, 0)
+        grid.addWidget(self.svg_wobble, 1, 1)
+        grid.addWidget(QLabel(tr("抖动波长")), 1, 2)
+        grid.addWidget(self.svg_wl, 1, 3)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
+        lay.addLayout(grid)
         lay.addStretch(1)
-        self.stack.addWidget(self._scroll_page(page))
+        tabs.addTab(self._scroll_page(page), tr("文件 / 参数"))
+
+        self.svg_perturb = PerturbPanel(columns=2, vector_only=True)
+        tabs.addTab(self.svg_perturb, tr("手写扰动"))
+        self.stack.addWidget(tabs)
 
     # --------------------------------------------------------------- 工具
     def _mono(self) -> QFont:
@@ -426,10 +448,11 @@ class ContentDialog(QDialog):
                         tr("工具链就绪，点击确定开始编译（可能需要数秒）。"))
                 else:
                     nfonts = len(self.tex_fonts.names())
+                    sep = " " if is_english() else ""
                     self.preview_label.setText(
                         tr("未检测到 TeX：将用内置排版引擎渲染常用子集"
                            "（标题/章节/列表/公式/简单表格），点击确定即插入。")
-                        + (trf('文字将用所选 {v0} 款本软件字体重排。', v0=nfonts)
+                        + (sep + trf('文字将用所选 {v0} 款本软件字体重排。', v0=nfonts)
                            if nfonts else ""))
             elif kind == KIND_TIKZ:
                 rep = tikz_report()
@@ -439,8 +462,10 @@ class ContentDialog(QDialog):
                         + tr("；").join(tr(note) for note in rep["notes"]))
                 else:
                     nfonts = len(self.tikz_fonts.names())
+                    sep = " " if is_english() else ""
                     self.preview_label.setText(
                         tr("TikZ 就绪，点击确定开始编译（可能需要数秒）。")
+                        + sep
                         + (trf('节点文字将用所选 {v0} 款本软件字体重排。', v0=nfonts)
                            if nfonts else
                            tr('未选字体：节点文字保留 TeX 轮廓。')))
@@ -635,10 +660,15 @@ class _FontChainWidget(QWidget):
         # 固定高度：只设 setMaximumHeight 会与 QListWidget 自带的
         # minimumSizeHint(~87px) 冲突（min>max，布局未定义行为）
         self.list.setFixedHeight(88)
+        self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.list.setTextElideMode(Qt.ElideRight)
         lay.addWidget(self.list)
 
         row = QHBoxLayout()
         self.combo = QComboBox()
+        self.combo.setSizeAdjustPolicy(
+            QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.combo.setMinimumContentsLength(8)
         for e in manager.visible_entries():
             self.combo.addItem(f"{e.display_name}  [{e.kind}]", e.name)
         row.addWidget(self.combo, 1)

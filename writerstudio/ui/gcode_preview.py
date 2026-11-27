@@ -9,6 +9,7 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
+    QHBoxLayout,
     QLabel,
     QPlainTextEdit,
     QSplitter,
@@ -20,7 +21,8 @@ from PySide6.QtWidgets import (
 from ..i18n import tr, trf
 from ..core.strokes import Stroke
 from ..machine.gcode_gen import GCodeResult, format_duration
-from .style import fit_dialog_to_screen, localize_dialog_buttons
+from .style import fit_dialog_to_screen, localize_dialog_buttons, set_role
+from .theme import semantic_color
 
 
 class GCodePreview(QWidget):
@@ -124,6 +126,11 @@ class GCodePreview(QWidget):
             p.setPen(Qt.NoPen)
             p.drawEllipse(QPointF(fx, fy), 4, 4)
 
+        # 外框细边框：深浅主题下均清晰区分预览画布边界
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(QColor(semantic_color("preview_border")), 1))
+        p.drawRect(0, 0, self.width() - 1, self.height() - 1)
+
 
 class GCodePreviewDialog(QDialog):
     def __init__(self, result: GCodeResult, strokes: list[Stroke],
@@ -161,9 +168,31 @@ class GCodePreviewDialog(QDialog):
         info.setWordWrap(True)
         root.addWidget(info)
 
+        # 图例条：蓝线绘制 / 红虚线空程 / 绿点起点
+        legend_row = QHBoxLayout()
+        legend_row.setContentsMargins(0, 0, 0, 0)
+        legend_row.setSpacing(14)
+        for swatch, color, text in (
+            ("━", "#1e3ca0", tr("绘制路径")),
+            ("┄", "#c87878", tr("空程移动")),
+            ("●", "#00a000", tr("起点")),
+        ):
+            item = QHBoxLayout()
+            item.setContentsMargins(0, 0, 0, 0)
+            item.setSpacing(4)
+            mark = QLabel(swatch)
+            mark.setStyleSheet(f"color: {color}; font-weight: bold;")
+            lab = QLabel(text)
+            set_role(lab, "muted")
+            item.addWidget(mark)
+            item.addWidget(lab)
+            legend_row.addLayout(item)
+        legend_row.addStretch(1)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         buttons.rejected.connect(self.reject)
         buttons.accepted.connect(self.accept)
-        root.addWidget(buttons)
+        legend_row.addWidget(buttons)
+        root.addLayout(legend_row)
         localize_dialog_buttons(self)
         fit_dialog_to_screen(self, 900, 620)

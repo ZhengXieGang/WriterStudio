@@ -25,10 +25,13 @@ class UndoPanel(QDockWidget):
     def __init__(self, controller: DocumentController,
                  parent: Optional[QWidget] = None) -> None:
         super().__init__(tr("历史"), parent)
+        self.setObjectName("dock_undo")
         self.controller = controller
         self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
 
         self.list = QListWidget()
+        self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.list.setTextElideMode(Qt.ElideRight)
         self.list.itemClicked.connect(self._on_click)
         self.setWidget(self.list)
 

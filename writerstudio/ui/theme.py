@@ -41,21 +41,41 @@ _ROLE_COLORS = {
         "text": "#ffffff",
         "muted": "#9a9a9a",
         "danger": "#ff7b72",
+        "danger_hover": "rgba(255,123,114,34)",
         "success": "#7ee787",
         "bar_bg": "rgba(45,45,48,235)",
         "bar_border": "#5a5a5e",
         "highlight": "#3d6fa8",
         "highlight_text": "#ffffff",
+        "field_border": "#4e5258",
+        "field_bg": "#2b2d30",
+        "field_disabled_border": "#3a3d42",
+        "canvas_bg": "#3f434a",
+        "separator": "#4a4e56",
+        "chip_hover": "rgba(255,255,255,26)",
+        "segment_bg": "#2b2d30",
+        "segment_border": "#464a50",
+        "preview_border": "#4e5258",
     },
     THEME_LIGHT: {
         "text": "#1f1f1f",
         "muted": "#5f6368",
         "danger": "#b3261e",
+        "danger_hover": "rgba(179,38,30,22)",
         "success": "#1a7f37",
         "bar_bg": "rgba(250,250,252,235)",
         "bar_border": "#b8c4d0",
         "highlight": "#2f6fbf",
         "highlight_text": "#ffffff",
+        "field_border": "#bfc6d0",
+        "field_bg": "#ffffff",
+        "field_disabled_border": "#dce0e6",
+        "canvas_bg": "#d8dde5",
+        "separator": "#c5ccd6",
+        "chip_hover": "rgba(0,0,0,16)",
+        "segment_bg": "#eef1f5",
+        "segment_border": "#cbd2dc",
+        "preview_border": "#c4c9d0",
     },
 }
 
@@ -76,18 +96,66 @@ def semantic_color(role: str) -> str:
         role, _ROLE_COLORS[DEFAULT_THEME].get(role, "#808080"))
 
 
+#: 最近一次 apply_theme 是否成功挂载 qdarktheme（用于原生降级样式判断）。
+_THEME_ACTIVE = False
+
+
+def theme_active() -> bool:
+    """当前应用是否已通过 qdarktheme 套用主题样式表。"""
+    app = QApplication.instance()
+    return _THEME_ACTIVE and app is not None and bool(app.styleSheet())
+
+
 def _role_qss(theme: str) -> str:
-    """让内联 ``wsRole`` 属性跟随主题的全局规则。
+    """让内联 ``wsRole`` / ``wsField`` / ``wsSegment`` 等语义属性跟随主题。
 
     qdarktheme 的 QSS 里 QLabel 默认文字色是浅色，但硬编码
     ``color:#666`` 的说明文字在深色背景上几乎看不见（对比度约 2:1）。
-    改用属性选择器后，切主题时整条 QSS 重建，所有标签自动换色。
+    改用属性选择器后，切主题时整条 QSS 重建，所有标签、输入控件边框、
+    分段按钮与分隔线自动换色。
     """
     c = _ROLE_COLORS[normalize_theme(theme)]
+    field_classes = ("QSpinBox", "QDoubleSpinBox", "QComboBox", "QLineEdit")
+    fields = ", ".join(f'{cls}[wsField="true"]' for cls in field_classes)
+    fields_focus = ", ".join(f'{cls}[wsField="true"]:focus' for cls in field_classes)
+    fields_disabled = ", ".join(f'{cls}[wsField="true"]:disabled' for cls in field_classes)
     return (
         f'QLabel[wsRole="muted"] {{ color: {c["muted"]}; }}'
         f'QLabel[wsRole="danger"] {{ color: {c["danger"]}; }}'
         f'QLabel[wsRole="success"] {{ color: {c["success"]}; }}'
+        f'QPushButton[wsRole="danger"] {{'
+        f' color: {c["danger"]}; border: 1px solid {c["danger"]}; }}'
+        f'QPushButton[wsRole="danger"]:hover {{ background: {c["danger_hover"]}; }}'
+        f'QPushButton[wsRole="danger"]:disabled {{'
+        f' color: {c["muted"]}; border-color: {c["field_disabled_border"]};'
+        f' background: transparent; }}'
+        f'QPushButton[wsSegment="true"] {{'
+        f' background: {c["segment_bg"]};'
+        f' border: 1px solid {c["segment_border"]};'
+        f' border-radius: 4px; padding: 3px 8px; }}'
+        f'QPushButton[wsSegment="true"]:checked {{'
+        f' background: {c["highlight"]};'
+        f' border-color: {c["highlight"]};'
+        f' color: {c["highlight_text"]}; font-weight: bold; }}'
+        f'QLabel[wsClickable="true"] {{'
+        f' padding: 1px 6px; border-radius: 4px; }}'
+        f'QLabel[wsClickable="true"]:hover {{'
+        f' background: {c["chip_hover"]}; color: {c["highlight"]}; }}'
+        f'QToolBar::separator {{'
+        f' background: {c["separator"]}; width: 1px; margin: 5px 5px; }}'
+        f'QFrame[wsStatusSep="true"] {{'
+        f' color: {c["separator"]}; max-width: 1px; margin: 3px 4px; }}'
+        f'{fields} {{'
+        f' border: 1px solid {c["field_border"]};'
+        f' background-color: {c["field_bg"]};'
+        f' border-radius: 4px; }}'
+        f'QComboBox[wsField="true"] QLineEdit {{'
+        f' border: none; background: transparent; padding: 0;'
+        f' min-height: 0px; max-height: 16777215px; }}'
+        f'{fields_disabled} {{'
+        f' border: 1px solid {c["field_disabled_border"]}; }}'
+        f'{fields_focus} {{'
+        f' border: 1px solid palette(highlight); }}'
     )
 
 
@@ -135,12 +203,18 @@ def apply_theme(app: QApplication, theme: Optional[str]) -> bool:
     """
     if app is None:
         return False
-    global _CURRENT_THEME
+    global _CURRENT_THEME, _THEME_ACTIVE
     name = normalize_theme(theme)
     try:
         import qdarktheme
         qdarktheme.setup_theme(name, additional_qss=_role_qss(name))
         _CURRENT_THEME = name
+        _THEME_ACTIVE = True
+        try:
+            from .style import refresh_field_styles
+            refresh_field_styles()
+        except Exception:
+            pass
         return True
     except Exception:
         return False

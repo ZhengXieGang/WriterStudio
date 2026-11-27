@@ -56,6 +56,7 @@ K_AI_PORT = "ai/mcp_port"          # AI 排版服务端口
 K_EXPORT_DPI = "export/png_dpi"    # PNG 导出分辨率（记住上次使用值）
 K_EXPORT_TRANSPARENT = "export/transparent"   # 导出透明背景（PNG/SVG 共用）
 K_GEOMETRY = "ui/geometry"
+K_WINDOW_STATE = "ui/window_state"
 K_UI_THEME = "ui/theme"
 K_UI_LANGUAGE = "ui/language"     # auto / zh / en（auto = 跟随系统 locale）
 K_MAX_RECENT = 10
@@ -394,6 +395,13 @@ class Settings:
     def set_window_geometry(self, geometry) -> None:
         if geometry is not None:
             self.set(K_GEOMETRY, geometry)
+
+    def window_state(self):
+        return self.get(K_WINDOW_STATE, None)
+
+    def set_window_state(self, state) -> None:
+        if state is not None:
+            self.set(K_WINDOW_STATE, state)
 
     def ui_theme(self) -> str:
         """界面主题（dark/light；缺省深色）。"""
