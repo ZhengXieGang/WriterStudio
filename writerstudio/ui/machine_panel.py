@@ -132,14 +132,16 @@ class MachinePanel(QWidget):
         lines_row.addStretch(1)
         cf.addRow(tr("串口电平"), lines_row)
 
-        btns = QHBoxLayout()
+        # 连接为主按钮独占一行，回零/解锁两列并排：避免三按钮在英文宽字体下
+        # 撑出横向滚动条，同时主操作更醒目。
         self.connect_btn = QPushButton(tr("连接"))
         self.connect_btn.clicked.connect(self._toggle_connect)
+        cf.addRow(self.connect_btn)
+        btns = QHBoxLayout()
         self.home_btn = QPushButton(tr("回零"))
         self.home_btn.clicked.connect(lambda: self._guarded(self.link.home))
         self.unlock_btn = QPushButton(tr("解锁"))
         self.unlock_btn.clicked.connect(lambda: self._guarded(self.link.unlock))
-        btns.addWidget(self.connect_btn)
         btns.addWidget(self.home_btn)
         btns.addWidget(self.unlock_btn)
         cf.addRow(btns)
@@ -308,17 +310,14 @@ class MachinePanel(QWidget):
             "机械原点仍在纸张左上角，只是 X 轴改为沿纸边向下、Y 轴沿顶边向右。"))
         self.swap_xy_check.toggled.connect(self._on_axis_changed)
         axv.addWidget(self.swap_xy_check)
-        irow = QHBoxLayout()
         self.invert_x_check = QCheckBox(tr("反转 X 轴"))
         self.invert_x_check.setToolTip(tr("X 轴方向取反：原点在纸的右上角一侧的机型用"))
         self.invert_x_check.toggled.connect(self._on_axis_changed)
         self.invert_y_check = QCheckBox(tr("反转 Y 轴"))
         self.invert_y_check.setToolTip(tr("Y 轴方向取反：原点在纸的左下角一侧的机型用"))
         self.invert_y_check.toggled.connect(self._on_axis_changed)
-        irow.addWidget(self.invert_x_check)
-        irow.addWidget(self.invert_y_check)
-        irow.addStretch(1)
-        axv.addLayout(irow)
+        axv.addWidget(self.invert_x_check)
+        axv.addWidget(self.invert_y_check)
         root.addWidget(ax)
 
         # ---- 写字起点 ----
@@ -469,7 +468,6 @@ class MachinePanel(QWidget):
         fm = self.fontMetrics()
         compact: list[tuple[QPushButton, tuple[str, ...]]] = [
             (self._refresh_btn, (self._refresh_btn.text(),)),
-            (self.connect_btn, (tr("连接"), tr("断开"))),
             (self.home_btn, (self.home_btn.text(),)),
             (self.unlock_btn, (self.unlock_btn.text(),)),
             (self.send_btn, (self.send_btn.text(),)),
@@ -480,7 +478,7 @@ class MachinePanel(QWidget):
         for btn, labels in compact:
             btn.setSizePolicy(QSizePolicy.Policy.Ignored,
                               QSizePolicy.Policy.Fixed)
-            min_w = max(fm.horizontalAdvance(t) for t in labels) + 16
+            min_w = max(fm.horizontalAdvance(t) for t in labels) + 12
             btn.setMinimumWidth(min_w)
 
     # --------------------------------------------------------------- 端口

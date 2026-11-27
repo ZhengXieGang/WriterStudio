@@ -89,3 +89,34 @@ def test_iff_has_heads_on_both_sides():
     assert len(strokes) == 3          # 杆 + 左尖 + 右尖
     ys = [p[1] for s in strokes for p in s.points]
     assert max(ys) - min(ys) > 1.0    # 有张角，不是一条线
+
+
+def test_mathtext_glyph_unpack_supports_mpl_310_and_311():
+    """兼容 matplotlib <=3.10 的 5 元组与 3.11+ 的 6 元组 glyph 记录。"""
+    calls = []
+
+    class _FakeFont:
+        def clear(self):
+            calls.append(("clear",))
+
+        def set_size(self, size, dpi):
+            calls.append(("size", size, dpi))
+
+        def load_char(self, ccode, flags=0):
+            calls.append(("load_char", ccode))
+
+        def load_glyph(self, glyph_index, flags=0):
+            calls.append(("load_glyph", glyph_index))
+
+        def get_path(self):
+            return ([(0.0, 0.0)], [1])
+
+    f = _FakeFont()
+    assert E._unpack_glyph((f, 12.0, 65, 1.0, 2.0)) == (f, 12.0, 65, None, 1.0, 2.0)
+    assert E._unpack_glyph((f, 12.0, 65, 7, 1.0, 2.0)) == (f, 12.0, 65, 7, 1.0, 2.0)
+
+    E._load_glyph_path(f, 12.0, 65, None)
+    assert ("load_char", 65) in calls
+    calls.clear()
+    E._load_glyph_path(f, 12.0, 65, 7)
+    assert ("load_glyph", 7) in calls

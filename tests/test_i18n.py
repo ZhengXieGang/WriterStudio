@@ -252,11 +252,14 @@ def test_english_machine_panel_fits_default_dock(qapp, monkeypatch):
         win.machine_dock.raise_()
         qapp.processEvents()
         qapp.processEvents()
-        body = win.machine_panel.findChild(QScrollArea).widget()
+        sa = win.machine_panel.findChild(QScrollArea)
+        body = sa.widget()
         assert body.minimumSizeHint().width() <= 300
         assert win.machine_dock.width() >= 280
-        assert not win.machine_panel.findChild(
-            QScrollArea).horizontalScrollBar().isVisible()
+        assert not sa.horizontalScrollBar().isVisible(), (
+            f"body.minW={body.minimumSizeHint().width()}, "
+            f"vpW={sa.viewport().width()}, dockW={win.machine_dock.width()}"
+        )
     finally:
         win.close()
         _use(monkeypatch, "zh")

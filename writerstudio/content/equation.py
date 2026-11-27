@@ -598,7 +598,34 @@ def _collapse_flat_rect(pts: list) -> Optional[list]:
     return [(xm, min(ys)), (xm, max(ys))]
 
 
-def _glyph_ink_box(font, fontsize: float, glyph_index: int,
+def _unpack_glyph(item) -> tuple[Any, float, int, Optional[int], float, float]:
+    """兼容 matplotlib <=3.10 的 5 元组与 3.11+ 的 6 元组 VectorParse.glyphs。
+
+    matplotlib 3.10 及更早版本（Python 3.10 与 Linux AppImage 打包容器使用
+    3.10.x）返回 ``(font, fontsize, ccode, ox, oy)``；3.11 起新增了
+    ``glyph_index`` 字段，变为 ``(font, fontsize, ccode, glyph_index, ox, oy)``。
+    """
+    if len(item) == 6:
+        font, fontsize, ccode, glyph_index, ox, oy = item
+        return font, fontsize, ccode, glyph_index, ox, oy
+    font, fontsize, ccode, ox, oy = item
+    return font, fontsize, ccode, None, ox, oy
+
+
+def _load_glyph_path(font, fontsize: float, ccode: int,
+                     glyph_index: Optional[int]):
+    """加载字形轮廓路径：有 glyph_index 走 load_glyph，老版本回退 load_char。"""
+    font.clear()
+    font.set_size(fontsize, 72)
+    if glyph_index is not None:
+        font.load_glyph(glyph_index, flags=_load_flags.NO_HINTING)
+    else:
+        font.load_char(ccode, flags=_load_flags.NO_HINTING)
+    return font.get_path()
+
+
+def _glyph_ink_box(font, fontsize: float, ccode: int,
+                   glyph_index: Optional[int],
                    ox: float, oy: float, scale: float) -> Optional[BBox]:
     """字形墨迹在页面坐标（mm）里的包围盒；取不到返回 None。
 
@@ -607,10 +634,7 @@ def _glyph_ink_box(font, fontsize: float, glyph_index: int,
     """
     from matplotlib.path import Path as MplPath
 
-    font.clear()
-    font.set_size(fontsize, 72)
-    font.load_glyph(glyph_index, flags=_load_flags.NO_HINTING)
-    verts, codes = font.get_path()
+    verts, codes = _load_glyph_path(font, fontsize, ccode, glyph_index)
     box = BBox()
     for poly in MplPath(verts, codes).to_polygons(closed_only=False):
         for px, py in poly:
@@ -732,7 +756,6 @@ def _render_with_fonts(latex: str, size_mm: float, fonts, text_scale: float,
     from matplotlib.path import Path as MplPath
 
     parser = _get_mathtext_parser()
-    LoadFlags = _load_flags
     text = wrap_math(latex)
     if not text:
         return []
@@ -755,7 +778,8 @@ def _render_with_fonts(latex: str, size_mm: float, fonts, text_scale: float,
     scale = PT_TO_MM
     strokes: list[Stroke] = []
     radicals: list[BBox] = []          # 根号墨迹盒：顶线要按它配对（见下）
-    for font, fontsize, ccode, glyph_index, ox, oy in glyphs:
+    for item in glyphs:
+        font, fontsize, ccode, glyph_index, ox, oy = _unpack_glyph(item)
         ch = chr(int(ccode))
         # 链上没有 U+2212（数学减号）但有 ASCII '-' 时按 '-' 走字体链：
         # mathtext 把 '-' 一律画成数学减号，手写字体链通常只有后者；
@@ -776,21 +800,21 @@ def _render_with_fonts(latex: str, size_mm: float, fonts, text_scale: float,
         # 字号/位置仍取 mathtext 的排版结果——大根号会被拉高，字形墨迹盒
         # 就是它该占的范围，顶线随后按位置配对。
         if ch == "\u221a":
-            box = _glyph_ink_box(font, fontsize, glyph_index, ox, oy, scale)
+            box = _glyph_ink_box(font, fontsize, ccode, glyph_index, ox, oy, scale)
             if box is not None:
                 radicals.append(box)
                 continue
         # 逻辑联结词 ¬ ∧ ∨ ∃：Hershey 没键位（∃ 的键位是细楔形轮廓），
         # mathtext 只剩填充轮廓——按字形墨迹框画单线。
         if ch in _BOX_SYMBOLS:
-            box = _glyph_ink_box(font, fontsize, glyph_index, ox, oy, scale)
+            box = _glyph_ink_box(font, fontsize, ccode, glyph_index, ox, oy, scale)
             if box is not None:
                 strokes.extend(_draw_box_symbol(ch, box))
                 continue
         # 长双箭头 ⟹ ⟸ ⟺：⇒ 的加长版，宽度取字形墨迹框（固定 0.62em
         # 会短一截，与 mathtext 留出的空档对不上）。
         if ch in _LONG_ARROWS:
-            box = _glyph_ink_box(font, fontsize, glyph_index, ox, oy, scale)
+            box = _glyph_ink_box(font, fontsize, ccode, glyph_index, ox, oy, scale)
             if box is not None:
                 strokes.extend(_draw_procedural_symbol(
                     ch, ox * scale, oy * scale, fontsize * scale, box))
@@ -819,10 +843,7 @@ def _render_with_fonts(latex: str, size_mm: float, fonts, text_scale: float,
         # 保留 mathtext 轮廓：按字形索引取出路径，散化为折线。
         # 数学字体的减号/正负号横杠等是**扁平矩形**（约 2.2×0.29mm），
         # 描轮廓在笔尖下会叠成一个方框——折叠成中线单笔
-        font.clear()
-        font.set_size(fontsize, 72)
-        font.load_glyph(glyph_index, flags=LoadFlags.NO_HINTING)
-        verts, codes = font.get_path()
+        verts, codes = _load_glyph_path(font, fontsize, ccode, glyph_index)
         for poly in MplPath(verts, codes).to_polygons(closed_only=False):
             if len(poly) < 2:
                 continue
