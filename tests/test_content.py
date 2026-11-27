@@ -691,16 +691,19 @@ def test_missing_engine_message_actionable():
 
 
 def test_latex_document_graceful_failure_when_unavailable():
-    """工具链不可用时应优雅返回 ok=False 而非抛异常。"""
+    """工具链不可用时不应抛异常：常用子集走内置回退，无法渲染时优雅返回 ok=False。"""
     from writerstudio.content.latex_doc import (
         latex_toolchain_available,
         render_latex_document,
     )
     if latex_toolchain_available():
-        pytest.skip("本机工具链可用，跳过失败路径测试")
+        pytest.skip("本机工具链可用，跳过无工具链路径测试")
     r = render_latex_document(r"\section*{T} $x^2$", timeout=20)
-    assert r.ok is False
+    assert r.ok is True and r.native is True
     assert r.log
+    r_empty = render_latex_document(r"\begin{document}\end{document}", timeout=20)
+    assert r_empty.ok is False
+    assert r_empty.log
 
 
 # ==================================== TikZ
@@ -1117,8 +1120,9 @@ def test_tikz_text_uses_app_font_not_outline(manager):
 
 
 # ==================================== TikZ 文字重排（tikz_text）
-def test_tikz_text_extract_words_parses_bboxxml():
+def test_tikz_text_extract_words_parses_bboxxml(monkeypatch):
     """extract_words 解析 pdftotext -bbox 的 XML 并反转义实体。"""
+    import shutil as _shutil
     import subprocess as _sp
     from writerstudio.content import tikz_text
     xml = ('<word xMin="1.5" yMin="2.0" xMax="10.0" yMax="8.0">A&amp;B</word>'
@@ -1128,12 +1132,9 @@ def test_tikz_text_extract_words_parses_bboxxml():
         returncode = 0
         stdout = xml
 
-    orig = _sp.run
-    _sp.run = lambda *a, **k: _P()
-    try:
-        ws = tikz_text.extract_words("/nonexistent.pdf")
-    finally:
-        _sp.run = orig
+    monkeypatch.setattr(_shutil, "which", lambda name: "/usr/bin/pdftotext")
+    monkeypatch.setattr(_sp, "run", lambda *a, **k: _P())
+    ws = tikz_text.extract_words("/nonexistent.pdf")
     assert [w.text for w in ws] == ["A&B", "中文"]
     assert ws[0].x0 == 1.5 and ws[0].width == pytest.approx(8.5)
 
@@ -1231,6 +1232,9 @@ def test_tikz_appfont_same_overall_size_when_all_chars_drawable(manager):
     assert a.width == pytest.approx(n.width, rel=0.05)
 
 
+@pytest.mark.skipif(not __import__("writerstudio.content.tikz",
+                                    fromlist=["tikz_available"]).tikz_available(),
+                    reason="TikZ 工具链不可用")
 def test_tikz_reports_missing_chars(manager):
     """字体链画不出的字符应被记入 missing_chars（供界面提示）。"""
     from writerstudio.content.tikz import render_tikz
@@ -1246,6 +1250,9 @@ def test_tikz_reports_missing_chars(manager):
 
 
 # ============================================================ 渲染缓存
+@pytest.mark.skipif(not __import__("writerstudio.content.tikz",
+                                    fromlist=["tikz_available"]).tikz_available(),
+                    reason="TikZ 工具链不可用")
 def test_perturb_change_reuses_render_cache(manager, monkeypatch):
     """只调扰动参数时命中渲染缓存，不再重渲染（TikZ 免重编译）。"""
     from writerstudio.content import builder
@@ -1278,6 +1285,9 @@ def test_perturb_change_reuses_render_cache(manager, monkeypatch):
     assert changed
 
 
+@pytest.mark.skipif(not __import__("writerstudio.content.tikz",
+                                    fromlist=["tikz_available"]).tikz_available(),
+                    reason="TikZ 工具链不可用")
 def test_render_cache_invalidated_on_source_change(manager, monkeypatch):
     """源渲染输入变化（target_width）→ 缓存失效，重渲染并刷新缓存。"""
     from writerstudio.content import builder

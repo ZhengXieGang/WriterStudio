@@ -1,0 +1,10 @@
+# 自动追踪 GitHub Actions 版本更新，避免官方 Action 运行时（如 Node.js）长期落后
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"

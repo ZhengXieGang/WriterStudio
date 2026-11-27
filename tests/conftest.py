@@ -26,12 +26,16 @@ os.environ["WRITERSTUDIO_LANG"] = "zh"
 
 @pytest.fixture(autouse=True)
 def _isolated_settings(monkeypatch):
-    """每个测试用独立的内存设置后端。
+    """每个测试用独立的内存设置后端，并在结束时回收本用例残留的 Qt 顶级窗口。
 
     QSettings 已重定向到临时目录，但同一次 pytest 会话内所有测试共享一个
     配置文件；主窗口关闭时会回写机器参数（含起点标记），先跑的测试会把
     「手动标记点」泄漏给后面的测试。换成每测试独立的内存后端，测试顺序
     不再影响结果。
+
+    另外，大量 UI 用例只调用了 ``win.close()`` 而未销毁对象，残留的上百个
+    隐藏窗口会在后续调用 ``qapp.setStyleSheet()`` 时全部被重新计算样式，
+    导致 ``test_i18n.py`` 等主题相关用例耗时膨胀 30 倍以上、内存飙升至 GB 级。
     """
     from writerstudio import i18n
     from writerstudio import settings as _settings
@@ -39,3 +43,34 @@ def _isolated_settings(monkeypatch):
     i18n.update()               # 清掉上一个用例可能留下的语言缓存
     monkeypatch.setattr(_settings, "_QSettingsBackend",
                         _settings._MemoryBackend)
+
+    app = None
+    before_ids: set[int] = set()
+    try:
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app is not None:
+            before_ids = {id(w) for w in app.topLevelWidgets()}
+    except Exception:
+        pass
+
+    yield
+
+    if app is None:
+        try:
+            from PySide6.QtWidgets import QApplication
+            app = QApplication.instance()
+        except Exception:
+            app = None
+    if app is not None:
+        orphans = [w for w in app.topLevelWidgets() if id(w) not in before_ids]
+        for w in orphans:
+            try:
+                w.close()
+                w.deleteLater()
+            except Exception:
+                pass
+        if orphans:
+            from PySide6.QtCore import QCoreApplication, QEvent
+            QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+            app.processEvents()

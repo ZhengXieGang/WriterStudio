@@ -1,11 +1,11 @@
 name: build
 
-# 多平台打包 + 自动发布。PyInstaller 不能交叉编译，三个平台各自原生构建；
-# 产物全部自带 Python 解释器与依赖——用户机器零安装直接运行。
+# 多平台打包 + 冒烟自检 + 自动发布。PyInstaller 不能交叉编译，三个平台各自原生构建；
+# 产物全部自带 Python 解释器、GUI 依赖与 AI（MCP）桥依赖——用户机器零安装直接运行。
 #
-#   * 手动触发（workflow_dispatch）：只出构建产物，在运行页下载，不发 Release；
-#   * 推 v* 标签：门禁测试 → 三平台构建 → 自动创建 GitHub Release
-#     （附全部产物 + SHA256SUMS.txt，发布说明只写下载用法，保持极简）。
+#   * 手动触发（workflow_dispatch）：跑完整门禁 + 三平台构建与冒烟自检，出构建产物，不发 Release；
+#   * 推 v* 标签：静态检查与版本强校验 + 全量门禁测试 → 三平台并行构建与冒烟验证 → 自动创建/更新
+#     GitHub Release（附全部产物 + SHA256SUMS.txt；含 "-" 的预发布标签自动标记 prerelease）。
 #
 # Linux 产物要在旧发行版上跑：在 ubuntu-latest runner 里用 ubuntu:22.04
 # **容器**构建（glibc 2.35 基线）。不直接用 ubuntu-22.04 虚拟机镜像，因为
@@ -23,57 +23,57 @@ concurrency:
   cancel-in-progress: false    # 发布流程不互相取消
 
 jobs:
+  preflight:
+    # 极速前置门禁（~10s）：静态检查 + 版本号一致性校验（tag 触发时不一致直接阻断）
+    name: 静态检查与版本核对
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: 安装 pyflakes
+        run: python -m pip install "pyflakes>=3.2"
+      - name: 运行 pyflakes
+        run: python -m pyflakes writerstudio/ scripts/ tests/ tools/ main.py
+      - name: 核对版本号一致性
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            python scripts/check_version.py --tag "$GITHUB_REF_NAME"
+          else
+            python scripts/check_version.py
+          fi
+
   test:
-    # 发布门禁：标签/手动构建前先全量测试（与 ci.yml 同环境）
+    # 发布门禁：标签/手动构建前先跑全量测试（与 ci.yml 共用同一环境定义，含 MCP 桥端到端测试）
     name: 门禁测试
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       QT_QPA_PLATFORM: offscreen
     steps:
-      - uses: actions/checkout@v4
-      - name: Qt 运行时系统库 + TeX/poppler（与开发环境对齐，测试用到真实编译链）
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1 \
-            poppler-utils \
-            texlive-latex-base texlive-latex-recommended \
-            texlive-fonts-recommended texlive-pictures \
-            texlive-xetex fonts-noto-cjk
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-test-env
         with:
           python-version: "3.12"
-          cache: pip
-      - name: Install
-        run: pip install . pytest
-      - name: Run tests
-        run: python -m pytest tests/ -q
+      - name: 运行测试
+        run: python -m pytest tests/ -q --durations=10
 
-  build:
-    needs: test
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            artifact: WriterStudio-linux64
-            container: "ubuntu:22.04"
-            py: python3            # 容器自带 3.10（setup-python 的构建要新 glibc）
-          - os: windows-latest
-            artifact: WriterStudio-win64-portable
-            py: python
-          - os: macos-latest
-            artifact: WriterStudio-macos
-            py: python3
-    runs-on: ${{ matrix.os }}
-    container: ${{ matrix.container }}   # 仅 Linux 条目定义；空值=宿主机
+  build-linux:
+    name: 构建（Linux x86_64）
+    needs: [preflight, test]
+    runs-on: ubuntu-latest
+    container: "ubuntu:22.04"
     timeout-minutes: 45
+    env:
+      # 容器以 root 运行而 /github/home 属主是宿主机 runner，pip 默认会禁用缓存并刷警告；
+      # 显式指到可写缓存目录并配合 actions/cache 复用下载好的 wheel
+      PIP_CACHE_DIR: /tmp/pip-cache
+      PIP_ROOT_USER_ACTION: ignore
     steps:
-      - uses: actions/checkout@v4
-      - name: 容器基础工具（checkout 需 git；file 供 appimagetool 校验；
-              Qt 系统库供 PyInstaller 收集钩子导入 PySide6；python3/pip 供构建）
-        if: runner.os == 'Linux'
+      - uses: actions/checkout@v7
+      - name: 容器基础工具与 Qt 系统库（PyInstaller 收集钩子与 AppImage ldd 闭包必需）
         run: |
           # 缺 libglib 时 PyInstaller 探测 Qt 路径的子进程会 ImportError，
           # 它只在日志里留一行 WARNING 就跳过**全部** Qt 插件目录——打出来的
@@ -91,34 +91,54 @@ jobs:
             libxcb-render-util0 libxcb-shape0 libxcb-xkb1 libxcb-xinerama0 \
             libxcb-xinput0 libxcb1 libxcb-util1 libxcb-render0 libxcb-shm0 \
             libxcb-randr0 libxcb-xfixes0 libxcb-sync1
-      - uses: actions/setup-python@v5
-        if: "!matrix.container"   # 容器：CPython 工具缓存要 GLIBC 2.38，22.04 只有 2.35，改用系统 python3
+      - name: 缓存 pip 下载目录
+        uses: actions/cache@v6
         with:
-          python-version: "3.12"
-      - name: Install
-        # 容器的 pip 22 构建隔离会装到读不懂 [project] 元数据的老
-        # setuptools，项目被装成 UNKNOWN-0.0.0、依赖全丢——先升级
+          path: /tmp/pip-cache
+          key: pip-build-linux-py310-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            pip-build-linux-py310-
+      - name: 安装项目、AI（MCP）与 PyInstaller
+        # 容器自带的 pip 22 构建隔离会装到读不懂 [project] 元数据的老 setuptools，
+        # 项目被装成 UNKNOWN-0.0.0、依赖全丢——先升级。
+        # 必须装 .[ai]，否则 WriterStudioMCP 会缺少 mcp/pydantic/anyio 成为空壳。
         run: |
-          ${{ matrix.py }} -m pip install -U pip setuptools wheel
-          ${{ matrix.py }} -m pip install . pyinstaller
-      - name: Build
-        run: ${{ matrix.py }} -m PyInstaller writerstudio.spec
-      - name: AppImage（Linux 零安装格式，随身携带全部系统依赖库）
-        if: runner.os == 'Linux'
+          python3 -m pip install -U pip setuptools wheel
+          python3 -m pip install ".[ai]" "pyinstaller>=6.10"
+      - name: PyInstaller 打包
+        run: python3 -m PyInstaller writerstudio.spec
+      - name: AppImage（Linux 零安装格式，锁定 appimagetool 1.9.1 并校验 SHA256）
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"   # CI 容器无 FUSE，解压方式运行
         run: |
-          ${{ matrix.py }} - <<'EOF'
-          import urllib.request
-          urllib.request.urlretrieve(
-              "https://github.com/AppImage/appimagetool/releases/download"
-              "/continuous/appimagetool-x86_64.AppImage",
-              "/tmp/appimagetool")
+          python3 - <<'EOF'
+          import hashlib, time, urllib.request
+
+          url = (
+              "https://github.com/AppImage/appimagetool/releases/download/"
+              "1.9.1/appimagetool-x86_64.AppImage"
+          )
+          expected = "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"
+          dest = "/tmp/appimagetool"
+
+          for attempt in range(1, 4):
+              try:
+                  urllib.request.urlretrieve(url, dest)
+                  break
+              except Exception as exc:
+                  if attempt == 3:
+                      raise
+                  print(f"appimagetool 下载失败（第 {attempt} 次），稍后重试：{exc}", flush=True)
+                  time.sleep(attempt * 2)
+
+          actual = hashlib.sha256(open(dest, "rb").read()).hexdigest()
+          if actual != expected:
+              raise SystemExit(f"appimagetool SHA256 校验失败: got {actual}, want {expected}")
+          print(f"appimagetool 1.9.1 SHA256 校验通过: {actual}")
           EOF
           chmod +x /tmp/appimagetool
-          ${{ matrix.py }} scripts/make_appimage.py --appimagetool /tmp/appimagetool
-      - name: AppImage 完整性自检（Qt 插件确实进包，且依赖齐全）
-        if: runner.os == 'Linux'
+          python3 scripts/make_appimage.py --appimagetool /tmp/appimagetool --require-tool
+      - name: AppImage 完整性自检（Qt 插件与 MCP 桥齐全，且无缺失动态库）
         run: |
           QXCB=$(find dist/AppDir/opt/WriterStudio -path '*/Qt/plugins/platforms/libqxcb.so' | head -n 1)
           QOFF=$(find dist/AppDir/opt/WriterStudio -path '*/Qt/plugins/platforms/libqoffscreen.so' | head -n 1)
@@ -132,81 +152,163 @@ jobs:
             echo "ERROR: xcb 插件仍有未打包的依赖（干净系统上会加载失败）" >&2
             exit 1
           fi
-      - name: Ad-hoc 签名（macOS 未经签名无法启动）
-        if: runner.os == 'macOS'
-        run: codesign --deep --force -s - dist/WriterStudio.app
-      - name: Package (linux)
-        if: runner.os == 'Linux'
-        run: tar czf ${{ matrix.artifact }}.tar.gz -C dist WriterStudio
-      - name: Package (macos)
-        if: runner.os == 'macOS'
-        run: cd dist && ditto -c -k --keepParent WriterStudio.app ../${{ matrix.artifact }}.zip
-      - name: Upload
-        uses: actions/upload-artifact@v4
+          test -x dist/AppDir/opt/WriterStudio/WriterStudioMCP
+          test -f dist/WriterStudio-x86_64.AppImage
+      - name: 打包 Linux 目录版（tar.gz）
+        run: tar czf WriterStudio-linux64.tar.gz -C dist WriterStudio
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.artifact }}
+          name: WriterStudio-linux64
+          retention-days: 14
           path: |
-            WriterStudio-*.tar.gz
-            WriterStudio-*.zip
-            dist/*.AppImage
-            dist/WriterStudio.exe
-            dist/WriterStudioMCP.exe
+            WriterStudio-linux64.tar.gz
+            dist/WriterStudio-x86_64.AppImage
           if-no-files-found: error
 
-  smoke:
-    # 干净容器里真的把 AppImage 跑起来。构建容器装了全套系统库，在那里测
-    # “自带全部依赖”永远测不出漏打包；这里只有 ubuntu:22.04 本体。
-    needs: build
+  smoke-linux:
+    # 干净容器里把 AppImage（GUI + MCP）与目录版 MCP 桥真正跑起来。
+    # 仅依赖 build-linux，不必等最慢的 Windows 构建完成才启动。
+    name: 冒烟自检（干净 Linux 容器）
+    needs: build-linux
     runs-on: ubuntu-latest
     container: "ubuntu:22.04"
     timeout-minutes: 10
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: WriterStudio-linux64
-      - name: 无桌面启动自检（Qt 平台插件 / 依赖是否真的在包里）
+      - name: AppImage 无桌面启动自检（GUI + MCP 桥）
         run: |
           APP=$(find . -name 'WriterStudio-*.AppImage' | head -n 1)
-          echo "Testing $APP"
+          test -n "$APP"
           chmod +x "$APP"
+          echo "Testing AppImage GUI: $APP"
           APPIMAGE_EXTRACT_AND_RUN=1 QT_QPA_PLATFORM=offscreen \
             timeout 120 "$APP" --self-check
+          echo "Testing AppImage MCP bridge: $APP --mcp"
+          APPIMAGE_EXTRACT_AND_RUN=1 \
+            timeout 60 "$APP" --mcp --self-check
+      - name: 目录版 MCP 桥离线自检（tar.gz）
+        run: |
+          TAR=$(find . -name 'WriterStudio-linux64.tar.gz' | head -n 1)
+          test -n "$TAR"
+          tar xzf "$TAR" -C /tmp
+          timeout 60 /tmp/WriterStudio/WriterStudioMCP --self-check
+
+  build-windows:
+    name: 构建与冒烟（Windows x64）
+    needs: [preflight, test]
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: 安装项目、AI（MCP）与 PyInstaller
+        run: |
+          python -m pip install -U pip setuptools wheel
+          python -m pip install ".[ai]" "pyinstaller>=6.10"
+      - name: PyInstaller 打包
+        run: python -m PyInstaller writerstudio.spec
+      - name: Windows 产物冒烟自检（GUI + MCP 桥）
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -c "import subprocess; subprocess.run(['dist/WriterStudio.exe', '--self-check'], timeout=120, check=True)"
+          python -c "import subprocess; subprocess.run(['dist/WriterStudioMCP.exe', '--self-check'], timeout=60, check=True)"
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v7
+        with:
+          name: WriterStudio-win64-portable
+          retention-days: 14
+          path: |
+            dist/WriterStudio.exe
+            dist/WriterStudioMCP.exe
+          if-no-files-found: error
+
+  build-macos:
+    name: 构建与冒烟（macOS）
+    needs: [preflight, test]
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: 安装项目、AI（MCP）与 PyInstaller
+        run: |
+          python3 -m pip install -U pip setuptools wheel
+          python3 -m pip install ".[ai]" "pyinstaller>=6.10"
+      - name: PyInstaller 打包
+        run: python3 -m PyInstaller writerstudio.spec
+      - name: Ad-hoc 签名并校验（macOS 未经签名无法启动）
+        run: |
+          codesign --deep --force -s - dist/WriterStudio.app
+          codesign --verify --deep --verbose=2 dist/WriterStudio.app
+      - name: macOS 产物冒烟自检（GUI + MCP 桥）
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python3 -c "import subprocess; subprocess.run(['dist/WriterStudio.app/Contents/MacOS/WriterStudio', '--self-check'], timeout=120, check=True)"
+          python3 -c "import subprocess; subprocess.run(['dist/WriterStudio.app/Contents/MacOS/WriterStudioMCP', '--self-check'], timeout=60, check=True)"
+      - name: 打包 macOS 压缩包（zip）
+        run: cd dist && ditto -c -k --keepParent WriterStudio.app ../WriterStudio-macos.zip
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v7
+        with:
+          name: WriterStudio-macos
+          retention-days: 14
+          path: WriterStudio-macos.zip
+          if-no-files-found: error
 
   release:
-    # 仅标签触发：汇总产物并发布 GitHub Release
+    # 仅标签触发：汇总产物、核验齐全、生成校验和并创建/幂等更新 GitHub Release
+    name: 发布 GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, smoke]
+    needs: [build-linux, smoke-linux, build-windows, build-macos]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write          # 创建 Release 的唯一写权限点
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0       # 发布说明取自标签注释，需要完整标签对象
-      - name: 版本核对（tag 与 pyproject 不一致仅提醒，不阻断）
-        run: |
-          PROJ_VER=$(python3 -c \
-            "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
-          TAG_VER="${GITHUB_REF_NAME#v}"
-          if [ "$PROJ_VER" != "$TAG_VER" ]; then
-            echo "::warning::pyproject.toml 版本 ($PROJ_VER) 与标签 ($TAG_VER) 不一致——发布前建议把 pyproject 版本一并更新"
-          fi
       - name: 汇总产物
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: relpkg
           merge-multiple: true
-      - name: SHA256 校验和
+      - name: 产物完整性核验与 SHA256 校验和
         run: |
           cd relpkg
-          # upload-artifact 会保留 dist/ 前缀（如 dist/*.AppImage），先扁平化
+          # upload-artifact 在多文件或嵌套路径下可能保留子目录前缀，先扁平化
           find . -mindepth 2 -type f -exec mv -f {} . \;
           find . -mindepth 1 -type d -empty -delete
-          ls -l
-          sha256sum ./* > SHA256SUMS.txt
+          for f in \
+            WriterStudio-linux64.tar.gz \
+            WriterStudio-x86_64.AppImage \
+            WriterStudio-macos.zip \
+            WriterStudio.exe \
+            WriterStudioMCP.exe; do
+            if [ ! -f "$f" ]; then
+              echo "ERROR: 缺少预期发布产物 $f" >&2
+              exit 1
+            fi
+          done
+          # 先写到临时文件再移回，既去掉 "./" 前缀也避免校验文件把自己算进去
+          sha256sum -- * > /tmp/SHA256SUMS.txt
+          mv /tmp/SHA256SUMS.txt SHA256SUMS.txt
+          ls -lh
           cat SHA256SUMS.txt
-      - name: 创建 GitHub Release
+      - name: 创建或更新 GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -216,14 +318,33 @@ jobs:
           git fetch --force origin \
             "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
           git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > /tmp/relnotes.md
-          if [ -s /tmp/relnotes.md ]; then
+
+          EXTRA_ARGS=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            EXTRA_ARGS+=(--prerelease)
+          fi
+
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME 已存在，覆盖上传产物（幂等重试）"
+            gh release upload "$GITHUB_REF_NAME" relpkg/* \
+              --repo "$GITHUB_REPOSITORY" --clobber
+            if [ -s /tmp/relnotes.md ]; then
+              gh release edit "$GITHUB_REF_NAME" \
+                --repo "$GITHUB_REPOSITORY" \
+                --title "WriterStudio $GITHUB_REF_NAME" \
+                --notes-file /tmp/relnotes.md \
+                "${EXTRA_ARGS[@]}"
+            fi
+          elif [ -s /tmp/relnotes.md ]; then
             gh release create "$GITHUB_REF_NAME" relpkg/* \
               --repo "$GITHUB_REPOSITORY" \
               --title "WriterStudio $GITHUB_REF_NAME" \
-              --notes-file /tmp/relnotes.md
+              --notes-file /tmp/relnotes.md \
+              "${EXTRA_ARGS[@]}"
           else
             gh release create "$GITHUB_REF_NAME" relpkg/* \
               --repo "$GITHUB_REPOSITORY" \
               --title "WriterStudio $GITHUB_REF_NAME" \
-              --generate-notes
+              --generate-notes \
+              "${EXTRA_ARGS[@]}"
           fi

@@ -306,6 +306,15 @@ def test_bridge_error_mentions_disabled_service(qapp, tmp_path):
     _run_with_qt_pump(qapp, scenario(), 60)
 
 
+def test_bridge_self_check(capsys):
+    """--self-check 离线验证 MCP SDK 与全部工具注册，不连 GUI、直接返回 0。"""
+    from writerstudio.ai.bridge import main as bridge_main
+
+    assert bridge_main(["--self-check"]) == 0
+    out = capsys.readouterr().out
+    assert "mcp self-check: ok" in out
+
+
 def _free_port() -> int:
     import socket
     s = socket.socket()

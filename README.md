@@ -129,7 +129,7 @@ python -m pytest -q               # 运行测试（无需显示器）
 PyInstaller 不能交叉编译，三个平台各自原生构建：
 
 ```bash
-pip install pyinstaller
+pip install ".[ai]" pyinstaller  # 含 AI 排版桥（MCP）依赖
 pyinstaller writerstudio.spec    # Windows 出单文件便携 exe；Linux/macOS 出目录版
 python scripts/make_appimage.py  # Linux：把目录版组装成 AppImage（零安装分发）
 ```

@@ -19,6 +19,7 @@ import platform
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 # glibc 核心族永远不打包——必须用目标机内核/加载器配套的版本
@@ -120,6 +121,8 @@ def main() -> None:
     ap.add_argument("--dist", default="dist/WriterStudio")
     ap.add_argument("--out", default="dist")
     ap.add_argument("--appimagetool", default="appimagetool")
+    ap.add_argument("--require-tool", action="store_true",
+                    help="要求 appimagetool 存在并成功生成 AppImage，否则返回非零退出码（CI 用）")
     args = ap.parse_args()
 
     dist = Path(args.dist).resolve()
@@ -153,9 +156,17 @@ def main() -> None:
     try:
         subprocess.run(cmd, check=True)
         print(f"完成：{out / name}")
-    except (OSError, subprocess.CalledProcessError):
+    except FileNotFoundError:
+        if args.require_tool:
+            print(f"ERROR: 未找到 appimagetool：{tool}", file=sys.stderr)
+            raise SystemExit(1)
         print(f"appimagetool 不可用——AppDir 已就绪：{appdir}\n"
               f"手工出包：{tool} {appdir} {out / name}")
+    except subprocess.CalledProcessError as exc:
+        # 工具已存在但执行失败不能静默吞掉，否则 CI 会带着损坏/缺失的包继续往下走
+        print(f"ERROR: appimagetool 执行失败（退出码 {exc.returncode}）",
+              file=sys.stderr)
+        raise SystemExit(exc.returncode or 1)
 
 
 if __name__ == "__main__":

@@ -551,6 +551,36 @@ def _build_server(port: int):
     return mcp
 
 
+def _self_check(port: int) -> int:
+    """离线打包冒烟：验证 MCP SDK、pydantic_core、anyio 与工具注册链均可用。
+
+    与 GUI 的 ``--self-check`` 对称——不连 GUI、不阻塞 stdin、毫秒级退出。
+    CI 在三平台打包产物上跑这一步，能抓住漏装 ``.[ai]`` 或 PyInstaller 漏收
+    pydantic_core / anyio 后端等动态依赖的问题。
+    """
+    import traceback
+
+    try:
+        import anyio
+        import pydantic_core
+        from mcp.server import stdio as _mcp_stdio
+
+        if getattr(_mcp_stdio, "stdio_server", None) is None:
+            raise RuntimeError("mcp.server.stdio.stdio_server 不可用")
+        if not getattr(pydantic_core, "__version__", ""):
+            raise RuntimeError("pydantic_core 未正确加载")
+        server = _build_server(port)
+        tools = anyio.run(server.list_tools)
+        if not tools:
+            print("mcp self-check: no tools registered", file=sys.stderr)
+            return 1
+        print(f"mcp self-check: ok (tools={len(tools)})")
+        return 0
+    except Exception:
+        traceback.print_exc()
+        return 1
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="writerstudio-mcp",
@@ -560,12 +590,17 @@ def main(argv: Optional[list[str]] = None) -> int:
                                                    DEFAULT_PORT)),
                         help=f"WriterStudio GUI 服务端口（默认 {DEFAULT_PORT}，"
                              "也可用环境变量 WRITERSTUDIO_MCP_PORT）")
+    parser.add_argument("--self-check", action="store_true",
+                        help="离线自检 MCP 依赖与工具注册后退出（打包冒烟用）")
     args = parser.parse_args(argv)
+    if args.self_check:
+        return _self_check(args.port)
     try:
         from mcp.server.fastmcp import FastMCP as _mcp_probe
         _mcp_probe  # 可用性探测（引用以通过静态检查）
     except ImportError as exc:
-        print("缺少 MCP SDK，请先安装：pip install mcp", file=sys.stderr)
+        print("缺少 MCP SDK，请先安装：pip install 'mcp>=1.2,<2'",
+              file=sys.stderr)
         print(f"（导入错误：{exc}）", file=sys.stderr)
         return 2
     mcp = _build_server(args.port)

@@ -104,7 +104,7 @@ python -m pytest -q               # run tests (no display needed)
 PyInstaller cannot cross-compile; build natively on each platform:
 
 ```bash
-pip install pyinstaller
+pip install ".[ai]" pyinstaller  # includes MCP bridge dependencies
 pyinstaller writerstudio.spec    # single-file portable exe on Windows; directory build on Linux/macOS
 python scripts/make_appimage.py  # Linux: assemble the directory build into an AppImage (zero-install distribution)
 ```
