@@ -62,6 +62,54 @@ def snapshots() -> list[Path]:
     return sorted(files, key=mtime, reverse=True)
 
 
+def _win_pid_alive(pid: int) -> bool:
+    """Windows 进程探活：OpenProcess + GetExitCodeProcess == STILL_ACTIVE。
+
+    Windows 上 ``os.kill(pid, 0)`` 实际传递的是 ``CTRL_C_EVENT``（常量值为 0），
+    并非 POSIX 探活语义，既可能误发中断信号，又会在子进程已退出后仍返回成功。
+    """
+    import ctypes
+
+    process_query_limited = 0x1000
+    still_active = 259
+    error_access_denied = 5
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.GetExitCodeProcess.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+    kernel32.GetExitCodeProcess.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_int
+
+    handle = kernel32.OpenProcess(process_query_limited, False, pid)
+    if not handle:
+        return ctypes.get_last_error() == error_access_denied
+    try:
+        code = ctypes.c_uint32()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return False
+        return code.value == still_active
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def pid_alive(pid: int) -> bool:
+    """跨平台判断指定 PID 的进程是否存活（不含本程序身份校验）。"""
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        return _win_pid_alive(pid)
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def _owner_alive(path: Path) -> bool:
     """快照的属主进程是否还活着（旧单文件快照无从判断，当作已退出）。"""
     m = _PID_RE.match(path.name)
@@ -80,11 +128,7 @@ def _owner_alive(path: Path) -> bool:
             # 进程刚 fork 出来、cmdline 还没写好：宁可信其活着，别删人家快照
             return True
         return b"writerstudio" in raw.lower()
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
+    return pid_alive(pid)
 
 
 def _first_nonempty() -> Optional[Path]:

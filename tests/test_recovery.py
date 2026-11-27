@@ -269,3 +269,57 @@ def test_filelock_detects_other_instance(tmp_path, monkeypatch):
     filelock.claim(target)
     filelock.release(target)
     assert not reg.exists()
+
+
+def test_win_pid_alive_checks_exit_code_and_access_denied(monkeypatch):
+    """Windows 探活逻辑：STILL_ACTIVE 判活、已退出判死、拒绝访问保守判活。"""
+    import ctypes
+
+    state = {"handle": 0x1234, "exit_code": 259, "last_error": 0, "closed": []}
+
+    class _Fn:
+        def __init__(self, impl):
+            self._impl = impl
+            self.argtypes = None
+            self.restype = None
+
+        def __call__(self, *args):
+            return self._impl(*args)
+
+    class _FakeKernel32:
+        def __init__(self):
+            self.OpenProcess = _Fn(lambda access, inherit, pid: state["handle"])
+
+            def _get_exit(handle, ptr):
+                ptr._obj.value = state["exit_code"]
+                return 1
+
+            self.GetExitCodeProcess = _Fn(_get_exit)
+            self.CloseHandle = _Fn(lambda h: state["closed"].append(h) or 1)
+
+    fake_k32 = _FakeKernel32()
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *a, **k: fake_k32, raising=False)
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: state["last_error"],
+                        raising=False)
+
+    # STILL_ACTIVE (259) -> 活着，且关闭句柄
+    assert recovery._win_pid_alive(4321) is True
+    assert state["closed"] == [0x1234]
+
+    # 进程已退出（exit_code=0，即便句柄未立即回收）-> 已退出
+    state["exit_code"] = 0
+    assert recovery._win_pid_alive(4321) is False
+    assert len(state["closed"]) == 2
+
+    # OpenProcess 失败且 ERROR_ACCESS_DENIED (5) -> 保守判活着
+    state["handle"] = 0
+    state["last_error"] = 5
+    assert recovery._win_pid_alive(4321) is True
+
+    # OpenProcess 失败且 ERROR_INVALID_PARAMETER (87) -> 已退出
+    state["last_error"] = 87
+    assert recovery._win_pid_alive(4321) is False
+
+    # 非法 PID 直接判死
+    assert recovery.pid_alive(0) is False
+    assert recovery.pid_alive(-1) is False

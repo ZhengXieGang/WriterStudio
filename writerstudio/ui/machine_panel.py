@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -106,6 +107,7 @@ class MachinePanel(QWidget):
         self.port_combo.setMinimumContentsLength(6)
         refresh = QPushButton(tr("刷新"))
         refresh.clicked.connect(self._refresh_ports)
+        self._refresh_btn = refresh
         row.addWidget(self.port_combo, 1)
         row.addWidget(refresh)
         cf.addRow(tr("串口"), row)
@@ -193,10 +195,12 @@ class MachinePanel(QWidget):
 
         pad = QGridLayout()
         pad.setContentsMargins(0, 0, 0, 0)
+        self._jog_buttons: list[QPushButton] = []
 
         def mk(label, dx, dy):
             b = QPushButton(label)
             b.clicked.connect(lambda: self._jog(dx, dy))
+            self._jog_buttons.append(b)
             return b
 
         pad.addWidget(mk("Y+", 0, 1), 0, 1)
@@ -213,6 +217,9 @@ class MachinePanel(QWidget):
         pf = QFormLayout(pen)
         self._pen_form = pf
         self.pen_mode = QComboBox()
+        self.pen_mode.setSizeAdjustPolicy(
+            QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.pen_mode.setMinimumContentsLength(6)
         for key, label in PEN_MODES.items():
             self.pen_mode.addItem(tr(label), key)
         self.pen_mode.currentIndexChanged.connect(self._on_pen_mode)
@@ -363,8 +370,7 @@ class MachinePanel(QWidget):
         # ---- 作业 ----
         job = QGroupBox(tr("作业"))
         jf = QVBoxLayout(job)
-        # 勾选项分两行放，避免三个挤一行把面板最小宽度撑到需要横向滚动
-        flow = QHBoxLayout()
+        # 勾选项逐行竖排：避免不同平台字体密度下并排把窄停靠区撑出横向滚动条
         self.single_step_check = QCheckBox(tr("单步发送"))
         self.single_step_check.setToolTip(
             tr("一次只发一条命令，等机器回 ok 再发下一条。\n"
@@ -373,31 +379,25 @@ class MachinePanel(QWidget):
         self.return_start_check = QCheckBox(tr("完成后回起点"))
         self.return_start_check.setChecked(True)
         self.return_start_check.setToolTip(tr("写完后笔头回到 X0 Y0（写字起点）"))
-        flow.addWidget(self.single_step_check)
-        flow.addWidget(self.return_start_check)
-        flow.addStretch(1)
-        jf.addLayout(flow)
-        flow2 = QHBoxLayout()
         self.sleep_check = QCheckBox(tr("完成后休眠"))
         self.sleep_check.setToolTip(tr("写完让机器休眠（$SLP，需固件支持）"))
-        flow2.addWidget(self.sleep_check)
-        flow2.addStretch(1)
-        jf.addLayout(flow2)
-        # 书写顺序：阅读顺序 vs 最短空程
-        orow = QHBoxLayout()
-        orow.addWidget(QLabel(tr("书写顺序")))
+        jf.addWidget(self.single_step_check)
+        jf.addWidget(self.return_start_check)
+        jf.addWidget(self.sleep_check)
+        # 书写顺序与笔画抽稀放入 QFormLayout：窄停靠区/宽字体下享受 WrapLongRows 自动换行
+        job_form = QFormLayout()
         self.order_combo = QComboBox()
+        self.order_combo.setSizeAdjustPolicy(
+            QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.order_combo.setMinimumContentsLength(6)
         self.order_combo.addItem(tr("阅读顺序（逐字/从上到下）"), "reading")
         self.order_combo.addItem(tr("最短空程（图形/签名）"), "shortest")
         self.order_combo.setToolTip(
             tr("阅读顺序：写完一个字/一组再写下一个，文字从左到右、从上到下，\n"
             "读起来自然（常规书写顺序）。\n"
             "最短空程：贪心最近邻，抬笔移动最少，但会打乱顺序，适合矢量图/签名。"))
-        orow.addWidget(self.order_combo, 1)
-        jf.addLayout(orow)
+        job_form.addRow(tr("书写顺序"), self.order_combo)
         # 笔画抽稀：高速书写时微小线段频繁换向会让线条发抖，适度抽稀更顺滑
-        srow = QHBoxLayout()
-        srow.addWidget(QLabel(tr("笔画抽稀")))
         self.simplify_spin = QDoubleSpinBox()
         self.simplify_spin.setRange(0.0, 1.0)
         self.simplify_spin.setSingleStep(0.05)
@@ -406,8 +406,8 @@ class MachinePanel(QWidget):
         self.simplify_spin.setToolTip(
             tr("按此容差合并笔画上的密集采样点（0=关闭）。\n"
             "书写速度快时线条发抖可试 0.1~0.3；0.5 以上会明显失真。"))
-        srow.addWidget(self.simplify_spin, 1)
-        jf.addLayout(srow)
+        job_form.addRow(tr("笔画抽稀"), self.simplify_spin)
+        jf.addLayout(job_form)
         gen = QPushButton(tr("生成预览"))
         gen.clicked.connect(self.generateRequested.emit)
         exp = QPushButton(tr("导出 G-code…"))
@@ -436,14 +436,11 @@ class MachinePanel(QWidget):
         self.pen_limit = spin(0.0, 10000.0, 0.0, " m", 5.0, 1)
         self.pen_limit.setToolTip(tr("累计书写达到该长度时提醒更换/削笔；0 = 不提醒"))
         self.pen_limit.valueChanged.connect(self._save_penlife)
-        lrow = QHBoxLayout()
         self.pen_reset_btn = QPushButton(tr("清零"))
         self.pen_reset_btn.clicked.connect(self._reset_penlife)
-        lrow.addWidget(self.pen_reset_btn)
-        lrow.addWidget(QLabel(tr("提醒阈值")))
-        lrow.addWidget(self.pen_limit)
         lf.addRow(self.penlife_label)
-        lf.addRow(lrow)
+        lf.addRow(tr("提醒阈值"), self.pen_limit)
+        lf.addRow(self.pen_reset_btn)
         jf.addLayout(lf)
         root.addWidget(job)
         root.addStretch(1)
@@ -465,6 +462,26 @@ class MachinePanel(QWidget):
         88px 并允许横向扩展——表单行里的字段撑满同一列，视觉上等宽对齐。
         """
         unify_inputs(self, min_width=88, button_height=30)
+        # 同行并排按钮：macOS Aqua / Windows / Linux 原生样式默认给每个 QPushButton
+        # 强加 75~95px 最小宽度地板，三个短按钮并排就会把 300px 停靠区撑出横向滚动条。
+        # 改用 Ignored 水平策略并按实际文案宽 + 16px 设定最小宽：空间充足时照常均分铺满，
+        # 窄环境与不同平台原生样式下不再溢出。
+        fm = self.fontMetrics()
+        compact: list[tuple[QPushButton, tuple[str, ...]]] = [
+            (self._refresh_btn, (self._refresh_btn.text(),)),
+            (self.connect_btn, (tr("连接"), tr("断开"))),
+            (self.home_btn, (self.home_btn.text(),)),
+            (self.unlock_btn, (self.unlock_btn.text(),)),
+            (self.send_btn, (self.send_btn.text(),)),
+            (self.pause_btn, (tr("暂停"), tr("继续"))),
+            (self.abort_btn, (self.abort_btn.text(),)),
+            *((b, (b.text(),)) for b in self._jog_buttons),
+        ]
+        for btn, labels in compact:
+            btn.setSizePolicy(QSizePolicy.Policy.Ignored,
+                              QSizePolicy.Policy.Fixed)
+            min_w = max(fm.horizontalAdvance(t) for t in labels) + 16
+            btn.setMinimumWidth(min_w)
 
     # --------------------------------------------------------------- 端口
     def _refresh_ports(self) -> None:

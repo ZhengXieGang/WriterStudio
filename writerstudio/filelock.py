@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from .recovery import home_dir
+from .recovery import home_dir, pid_alive
 
 
 def _dir() -> Path:
@@ -64,11 +64,7 @@ def _alive(info: dict) -> bool:
         stored = info.get("start")
         # 双方都能取到启动时刻时用它确认不是「同 PID 的另一进程」
         return start is None or stored is None or float(stored) == start
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
+    return pid_alive(pid)
 
 
 def _sweep() -> None:
